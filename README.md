@@ -1,4 +1,6 @@
-### Updates! Our new paper: [LiveCC: Learning Video LLM with Streaming Speech Transcription at Scale](https://huggingface.co/papers/2504.16030). All resources, including the training video data, have been released at [LiveCC Webpage](https://showlab.github.io/livecc/)
+### 2025-09-03 I made some updates to make sure this repo can be inference with the latest transformers==4.55.4 and pytorch==2.7.1+cu128. Similar versions should be okay. If you want to obtain a strong VLM-online model, I highly recommend you to finetune Qwen2.5VL-Instruct with the streaming EOS loss here. No need to use the weak text-only Llama3 again.
+
+### 2025-04-24 Updates! Our new paper: [LiveCC: Learning Video LLM with Streaming Speech Transcription at Scale](https://huggingface.co/papers/2504.16030). All resources, including the training video data, have been released at [LiveCC Webpage](https://showlab.github.io/livecc/)
 
 ## <img src="demo/assistant_rectangle.png" height="25"> VideoLLM-online: Online Video Large Language Model for Streaming Video
 
