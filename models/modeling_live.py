@@ -10,7 +10,7 @@ logger = logging.get_logger(__name__)
 
 class LiveMixin(AutoModelForCausalLM):
     def set_vision_inside(self):
-        logger.warning_once("!!! Set vision encoder in the model, only recommended for on in-the-wild inference. "
+        logger.warning_once("!!! Set vision encoder in the model, only recommended for in-the-wild inference. "
             "Please dont call this for efficient training & evaluation. Instead, do visual feature pre-extraction.")
         self.vision_encoder, self.vision_encode = build_live_vision(self.config)
 
@@ -196,8 +196,8 @@ def build_live(
     attn_implementation: str = 'flash_attention_2',
     torch_dtype: str | torch.dtype = 'auto',
     **kwargs
-):
-    model = model_class.from_pretrained(llm_pretrained, config=config_class.from_pretrained(llm_pretrained, **kwargs), torch_dtype=torch_dtype, attn_implementation=attn_implementation)
+):  
+    model = model_class.from_pretrained(llm_pretrained, config=config_class.from_pretrained(llm_pretrained, **kwargs), device_map='cpu', torch_dtype=torch_dtype, attn_implementation=attn_implementation)
     tokenizer = build_live_tokenizer_and_update_config(llm_pretrained, model.config)
     if is_training:
         lora_config = LoraConfig(

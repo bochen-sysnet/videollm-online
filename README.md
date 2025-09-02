@@ -60,7 +60,7 @@ PyTorch source will make ffmpeg installed, but it is an old version and usually 
 wget https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
 tar xvf ffmpeg-release-amd64-static.tar.xz
 rm ffmpeg-release-amd64-static.tar.xz
-mv ffmpeg-7.0.1-amd64-static ffmpeg
+mv ffmpeg-7.0.2-amd64-static ffmpeg
 ```
 
 If you want to try our model with the audio in real-time streaming, please also clone ChatTTS.

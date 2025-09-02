@@ -1,6 +1,5 @@
 import os, torchvision, transformers, tqdm, time, json
 import torch.multiprocessing as mp
-torchvision.set_video_backend('video_reader')
 
 from data.utils import ffmpeg_once
 

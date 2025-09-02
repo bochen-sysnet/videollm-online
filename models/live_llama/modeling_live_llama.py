@@ -11,7 +11,6 @@ logger = logging.get_logger(__name__)
 
 class LiveLlamaForCausalLM(LlamaForCausalLM, LiveMixin):
     config_class = LiveLlamaConfig
-    _keys_to_ignore_on_load_missing = ['vision_encoder', 'connector']
 
     def __init__(self, config: LiveLlamaConfig):
         super().__init__(config)
