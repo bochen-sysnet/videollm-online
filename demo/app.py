@@ -1,5 +1,8 @@
 import os, torchvision, transformers
-torchvision.set_video_backend('video_reader')
+try:
+    torchvision.set_video_backend('video_reader')
+except RuntimeError:
+    torchvision.set_video_backend('pyav')
 from functools import partial
 import gradio as gr
 
@@ -86,7 +89,13 @@ with gr.Blocks(title="VideoLLM-online", css=css) as demo:
             while True:
                 query, response = liveinfer()
                 if query or response:
-                    history[-1][1] += f'\n{response}'
+                    if history and len(history) > 0:
+                        # Create a new tuple with the updated response
+                        last_query, last_response = history[-1]
+                        history[-1] = (last_query, last_response + f'\n{response}')
+                    else:
+                        # If history is empty, add a new message
+                        history.append((query, response))
                 yield history
         gr_liveinfer_queue_refresher.change(gr_liveinfer_queue_refresher_change, inputs=[gr_chat_interface.chatbot], outputs=[gr_chat_interface.chatbot])
     

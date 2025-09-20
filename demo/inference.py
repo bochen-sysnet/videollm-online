@@ -11,8 +11,14 @@ logger = transformers.logging.get_logger('liveinfer')
 class LiveInfer:
     def __init__(self, ) -> None:
         args = parse_args()
+        if not torch.cuda.is_available() and args.attn_implementation == 'flash_attention_2':
+            logger.warning("Flash attention not available without CUDA. Falling back to SDPA implementation.")
+            args.attn_implementation = 'sdpa'
         self.model, self.tokenizer = build_model_and_tokenizer(is_training=False, set_vision_inside=True, **asdict(args))
-        self.model.to('cuda')
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if self.device == 'cpu':
+            logger.warning("CUDA not available. Running inference on CPU, which will be extremely slow.")
+        self.model.to(self.device)
         
         # visual
         self.hidden_size = self.model.config.hidden_size
@@ -22,23 +28,23 @@ class LiveInfer:
         self.frame_num_tokens = self.model.config.frame_num_tokens
         self.frame_v_placeholder = self.model.config.v_placeholder * self.frame_num_tokens
         self.frame_token_interval_id = self.model.config.frame_token_interval_id
-        self.frame_placeholder_ids = torch.tensor(self.model.config.v_placeholder_id).repeat(self.model.config.frame_num_tokens).reshape(1,-1)
+        self.frame_placeholder_ids = torch.tensor(self.model.config.v_placeholder_id, device=self.device).repeat(self.model.config.frame_num_tokens).reshape(1,-1)
         
         # generation
         self.system_prompt = args.system_prompt
-        self.inplace_output_ids = torch.zeros(1, 100, device='cuda', dtype=torch.long)
+        self.inplace_output_ids = torch.zeros(1, 100, device=self.device, dtype=torch.long)
         self.frame_token_interval_threshold = 0.725
         self.eos_token_id = self.model.config.eos_token_id
-        self._start_ids = self.tokenizer.apply_chat_template([{'role': 'system', 'content': self.system_prompt}], add_stream_prompt=True, return_tensors='pt').to('cuda')
-        self._added_stream_prompt_ids = self.tokenizer.apply_chat_template([{}], add_stream_prompt=True, return_tensors='pt').to('cuda')
-        self._added_stream_generation_ids = self.tokenizer.apply_chat_template([{}], add_stream_generation_prompt=True, return_tensors='pt').to('cuda')
+        self._start_ids = self.tokenizer.apply_chat_template([{'role': 'system', 'content': self.system_prompt}], add_stream_prompt=True, return_tensors='pt').to(self.device)
+        self._added_stream_prompt_ids = self.tokenizer.apply_chat_template([{}], add_stream_prompt=True, return_tensors='pt').to(self.device)
+        self._added_stream_generation_ids = self.tokenizer.apply_chat_template([{}], add_stream_generation_prompt=True, return_tensors='pt').to(self.device)
         
         # app
         self.reset()
 
     def _call_for_response(self, video_time, query):
         if query is not None:
-            self.last_ids = self.tokenizer.apply_chat_template([{'role': 'user', 'content': query}], add_stream_query_prompt=True, add_generation_prompt=True, return_tensors='pt').to('cuda')
+            self.last_ids = self.tokenizer.apply_chat_template([{'role': 'user', 'content': query}], add_stream_query_prompt=True, add_generation_prompt=True, return_tensors='pt').to(self.device)
         else:
             assert self.last_ids == 933, f'{self.last_ids} != 933' # HACK, 933 = ]\n
             self.last_ids = self._added_stream_generation_ids
@@ -81,12 +87,12 @@ class LiveInfer:
         return None, None
     
     def reset(self, ):
-        self.query_queue = collections.deque()
-        self.frame_embeds_queue = collections.deque()
         self.video_time = 0
         self.last_frame_idx = -1
         self.video_tensor = None
-        self.last_ids = torch.tensor([[]], device='cuda', dtype=torch.long)
+        self.query_queue = collections.deque()
+        self.frame_embeds_queue = collections.deque()
+        self.last_ids = torch.tensor([[]], device=self.device, dtype=torch.long)
         self.past_key_values = None
 
     def input_query_stream(self, query, history=None, video_time=None):
@@ -108,7 +114,7 @@ class LiveInfer:
         self.video_time = video_time
     
     def load_video(self, video_path):
-        self.video_tensor = read_video(video_path, pts_unit='sec', output_format='TCHW')[0].to('cuda')
+        self.video_tensor = read_video(video_path, pts_unit='sec', output_format='TCHW')[0].to(self.device)
         self.num_video_frames = self.video_tensor.size(0)
         self.video_duration = self.video_tensor.size(0) / self.frame_fps
         logger.warning(f'{video_path} -> {self.video_tensor.shape}, {self.frame_fps} FPS')

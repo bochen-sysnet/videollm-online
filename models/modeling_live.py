@@ -1,4 +1,5 @@
 import torch, os
+from contextlib import nullcontext
 from peft import LoraConfig, get_peft_model, PeftModel
 from transformers import AutoModelForCausalLM, Cache
 from transformers.utils import logging
@@ -20,7 +21,8 @@ class LiveMixin(AutoModelForCausalLM):
 
     def visual_embed(self, frames: torch.Tensor):
         if hasattr(self, 'vision_encode'):
-            with torch.cuda.amp.autocast():
+            autocast_context = torch.cuda.amp.autocast() if torch.cuda.is_available() else nullcontext()
+            with autocast_context:
                 frames = self.vision_encode(self.vision_encoder, frames)
             frames = frames.to(self.dtype)
         frames = self.connector(frames)
@@ -197,6 +199,16 @@ def build_live(
     torch_dtype: str | torch.dtype = 'auto',
     **kwargs
 ):  
+    if attn_implementation == 'flash_attention_2':
+        if not torch.cuda.is_available():
+            logger.warning("Flash attention requested but CUDA is unavailable. Falling back to sdpa attention.")
+            attn_implementation = 'sdpa'
+        else:
+            try:
+                import flash_attn  # noqa: F401
+            except Exception:  # pragma: no cover - best effort import guard
+                logger.warning("Flash attention requested but flash_attn is not installed. Falling back to sdpa attention.")
+                attn_implementation = 'sdpa'
     model = model_class.from_pretrained(llm_pretrained, config=config_class.from_pretrained(llm_pretrained, **kwargs), device_map='cpu', torch_dtype=torch_dtype, attn_implementation=attn_implementation)
     tokenizer = build_live_tokenizer_and_update_config(llm_pretrained, model.config)
     if is_training:

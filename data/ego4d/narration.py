@@ -170,6 +170,41 @@ def build_ego4d_refined_narration_stream_train(**kwargs):
 def build_ego4d_refined_narration_stream_val(**kwargs):
     return Ego4DRefinedNarrationStream(split='val', **kwargs)
 
+class Ego4DRefinedNarrationStreamFiltered(Ego4DRefinedNarrationStream):
+    """Ego4D refined narration stream using filtered data (only videos with embeddings)."""
+    
+    def get_annos(self, split: str) -> dict:
+        anno_path = os.path.join(Ego4D.anno_root, f'refined_narration_stream_{split}_filtered.json')
+        assert os.path.exists(anno_path), f"Filtered data not found: {anno_path}"
+        narration_streams = json.load(open(anno_path))
+        return narration_streams
+
+def build_ego4d_refined_narration_stream_val_filtered(**kwargs):
+    return Ego4DRefinedNarrationStreamFiltered(split='val', **kwargs)
+
+class Ego4DRefinedNarrationStreamTiny(Ego4DRefinedNarrationStream):
+    """Ego4D refined narration stream using tiny dataset (10 videos for testing)."""
+    
+    def get_annos(self, split: str) -> dict:
+        anno_path = os.path.join(Ego4D.anno_root, f'refined_narration_stream_{split}_tiny.json')
+        assert os.path.exists(anno_path), f"Tiny data not found: {anno_path}"
+        narration_streams = json.load(open(anno_path))
+        return narration_streams
+
+def build_ego4d_refined_narration_stream_val_tiny(**kwargs):
+    return Ego4DRefinedNarrationStreamTiny(split='val', **kwargs)
+
+class Ego4DRefinedNarrationStreamSingle(Ego4DRefinedNarrationStream):
+    """Ego4D refined narration stream using single video for testing."""
+    def get_annos(self, split: str) -> dict:
+        anno_path = os.path.join(Ego4D.anno_root, f'refined_narration_stream_{split}_single.json')
+        assert os.path.exists(anno_path), f"Single video data not found: {anno_path}"
+        narration_streams = json.load(open(anno_path))
+        return narration_streams
+
+def build_ego4d_refined_narration_stream_val_single(**kwargs):
+    return Ego4DRefinedNarrationStreamSingle(split='val', **kwargs)
+
 if __name__ == '__main__':
     build_ego4d_refined_narration_stream_train(
         frame_fps=2, is_training=True, augmentation=True,
