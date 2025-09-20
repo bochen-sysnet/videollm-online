@@ -9,3 +9,62 @@ __pycache__/
 *.wav
 /demo/rendering/*.mp4
 .DS_Store
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Large model files
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+
+# Multimedia files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.flv
+*.webm
+*.m4v
+*.3gp
+
+# Image files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.svg
+*.ico
+
+# Large JSON files (keep small config files)
+/datasets/*.json
+/data/*.json
+!configs/**/*.json
+!demo/assets/*.json
+
+# Timing plots (generated files)
+/timing_plots/
+
+# Cache and temporary files
+*.cache
+*.tmp
+*.temp
+.cache/
+.tmp/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+.DS_Store
