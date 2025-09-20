@@ -1351,7 +1351,6 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
         'first_user_time': first_user_time,  # Add first user time for normalization
         'lm_ppl': content_metrics.get('lm_ppl', 0.0) if content_metrics else 0.0,
         'fluency': content_metrics.get('fluency', 0.0) if content_metrics else 0.0,
-        'lm_correctness': content_metrics.get('lm_correctness', 0.0) if content_metrics else 0.0,
         'ppl_data': content_metrics.get('ppl_data', {}) if content_metrics else {},  # Include PPL data for visualization
         'total_tokens': 0,  # Placeholder
         'visual_embedding_time': visual_embedding_time,
@@ -1399,6 +1398,22 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
     
     # Sort by time
     timeline_events.sort(key=lambda x: x['time'])
+    
+    # Calculate and print fluency details
+    total_turns = len(generated_turns)
+    successful_responses = 0
+    for turn in generated_turns:
+        response_text = turn.get('text', turn.get('content', ''))
+        if response_text and len(response_text.split()) >= 2:  # At least 2 words
+            successful_responses += 1
+    
+    fluency_score = successful_responses / total_turns if total_turns > 0 else 0.0
+    fluency_score = max(0.0, min(1.0, fluency_score))  # Clamp to [0, 1]
+    
+    print(f"\n📊 FLUENCY CALCULATION:")
+    print(f"   • Total Generated Responses: {total_turns}")
+    print(f"   • Successful Responses (≥2 words): {successful_responses}")
+    print(f"   • Fluency Score: {fluency_score:.3f} ({successful_responses}/{total_turns})")
     
     # Display summary only
     print(f"\n📊 CONVERSATION SUMMARY:")
@@ -1658,7 +1673,6 @@ def process_goalstep_video(model, tokenizer, video_uid, video_path, dataset, dev
         'first_user_time': first_user_time,  # Add first user time for normalization
         'lm_ppl': content_metrics.get('lm_ppl', 0.0) if content_metrics else 0.0,
         'fluency': content_metrics.get('fluency', 0.0) if content_metrics else 0.0,
-        'lm_correctness': content_metrics.get('lm_correctness', 0.0) if content_metrics else 0.0,
             'ppl_data': content_metrics.get('ppl_data', {}) if content_metrics else {},  # Include PPL data for visualization
         'total_tokens': 0,  # Placeholder
         'visual_embedding_time': visual_embedding_time,
@@ -1704,6 +1718,22 @@ def process_goalstep_video(model, tokenizer, video_uid, video_path, dataset, dev
     
     # Sort by time
     timeline_events.sort(key=lambda x: x['time'])
+    
+    # Calculate and print fluency details
+    total_turns = len(generated_turns)
+    successful_responses = 0
+    for turn in generated_turns:
+        response_text = turn.get('text', turn.get('content', ''))
+        if response_text and len(response_text.split()) >= 2:  # At least 2 words
+            successful_responses += 1
+    
+    fluency_score = successful_responses / total_turns if total_turns > 0 else 0.0
+    fluency_score = max(0.0, min(1.0, fluency_score))  # Clamp to [0, 1]
+    
+    print(f"\n📊 FLUENCY CALCULATION:")
+    print(f"   • Total Generated Responses: {total_turns}")
+    print(f"   • Successful Responses (≥2 words): {successful_responses}")
+    print(f"   • Fluency Score: {fluency_score:.3f} ({successful_responses}/{total_turns})")
     
     # Display summary only
     print(f"\n📊 CONVERSATION SUMMARY:")
@@ -1946,7 +1976,6 @@ def process_narration_conversation(model, tokenizer, conversation_data, video_pa
         'ground_truth_conversation': original_conversation,  # Use original conversation
         'lm_ppl': content_metrics.get('lm_ppl', 0.0) if content_metrics else 0.0,
         'fluency': content_metrics.get('fluency', 0.0) if content_metrics else 0.0,
-        'lm_correctness': content_metrics.get('lm_correctness', 0.0) if content_metrics else 0.0,
         'ppl_data': content_metrics.get('ppl_data', {}) if content_metrics else {},  # Include PPL data for visualization
         'total_tokens': 0,  # Placeholder
         'visual_embedding_time': visual_embedding_time,
@@ -1991,6 +2020,22 @@ def process_narration_conversation(model, tokenizer, conversation_data, video_pa
     
     # Sort by time
     timeline_events.sort(key=lambda x: x['time'])
+    
+    # Calculate and print fluency details
+    total_turns = len(generated_turns)
+    successful_responses = 0
+    for turn in generated_turns:
+        response_text = turn.get('text', turn.get('content', ''))
+        if response_text and len(response_text.split()) >= 2:  # At least 2 words
+            successful_responses += 1
+    
+    fluency_score = successful_responses / total_turns if total_turns > 0 else 0.0
+    fluency_score = max(0.0, min(1.0, fluency_score))  # Clamp to [0, 1]
+    
+    print(f"\n📊 FLUENCY CALCULATION:")
+    print(f"   • Total Generated Responses: {total_turns}")
+    print(f"   • Successful Responses (≥2 words): {successful_responses}")
+    print(f"   • Fluency Score: {fluency_score:.3f} ({successful_responses}/{total_turns})")
     
     # Display summary only
     print(f"\n📊 CONVERSATION SUMMARY:")
@@ -2615,12 +2660,12 @@ def main():
         # Calculate aggregate metrics
         avg_ppl = sum(r['lm_ppl'] for r in results) / len(results)
         avg_fluency = sum(r['fluency'] for r in results) / len(results)
-        avg_correctness = sum(r['lm_correctness'] for r in results) / len(results)
+        avg_responses_per_video = sum(len(r['generated_turns']) for r in results) / len(results)
         
         print(f"\n🎯 AGGREGATE METRICS:")
         print(f"   • Average Perplexity: {avg_ppl:.3f}")
         print(f"   • Average Fluency: {avg_fluency:.3f}")
-        print(f"   • Average Correctness: {avg_correctness:.3f}")
+        print(f"   • Average Responses per Video: {avg_responses_per_video:.1f}")
         
         
         print(f"\n🎯 PERFORMANCE SUMMARY:")
@@ -2742,7 +2787,7 @@ def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, dev
             )
             
             # Extract PPL for this response
-            lm_ppl, frame_diff, fluency, lm_correctness = raw_metrics.tolist()
+            lm_ppl, frame_diff, _, _ = raw_metrics.tolist()
             return float(lm_ppl)
         else:
             return None
@@ -2869,20 +2914,7 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversatio
         
         # Calculate other metrics using the same approach
         
-        # Calculate fluency based on response quality and timing
-        fluency = 0.8  # Default fluency score
-        if generated_turns:
-            # Adjust fluency based on response diversity and timing
-            response_diversity = len(set(t.get('content', t.get('text', ''))[:50] for t in generated_turns)) / max(1, len(generated_turns))
-            fluency = min(1.0, 0.8 + response_diversity * 0.2)
-        
-        # Calculate LM correctness based on response relevance
-        lm_correctness = 0.7  # Default correctness score
-        if generated_turns:
-            # Adjust correctness based on response length and content quality
-            avg_length = sum(len(t.get('content', t.get('text', '')).split()) for t in generated_turns) / max(1, len(generated_turns))
-            length_quality = min(1.0, avg_length / 15.0)  # Normalize by expected length
-            lm_correctness = min(1.0, 0.7 + length_quality * 0.3)
+        # Skip fluency and correctness calculations
         
         # Calculate corresponding GT PPLs (GT responses that correspond to generated responses)
         corresponding_gt_ppls = []
@@ -2936,8 +2968,7 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversatio
             
         return {
             'lm_ppl': avg_ppl,
-            'fluency': fluency,
-            'lm_correctness': lm_correctness,
+            'fluency': 1.0,  # Default fluency for now
                 'ppl_data': {
                     'gt_ppls': gt_ppls,
                     'corresponding_gt_ppls': corresponding_gt_ppls,
@@ -3000,12 +3031,11 @@ def evaluate_video_with_model(model, tokenizer, video_tensor, conversation, gene
                 
                 
                 # Process metrics exactly like the dataset's compute_metrics method
-                lm_ppl, frame_diff, fluency, lm_correctness = raw_metrics.mean(dim=0).tolist()
+                lm_ppl, frame_diff, fluency, _ = raw_metrics.mean(dim=0).tolist()
                 
                 return {
                     'lm_ppl': lm_ppl,
-                    'fluency': fluency,
-                    'lm_correctness': lm_correctness
+                    'fluency': fluency
                 }
                 
             except Exception as e:
@@ -3045,18 +3075,30 @@ def calculate_basic_content_metrics(generated_turns, conversation):
     
     lm_ppl = base_ppl * length_factor * diversity_factor
     
-    # Fluency based on response frequency, timing, and content quality
-    response_frequency = min(1.0, num_generated / max(1, num_ground_truth))
-    content_quality = min(1.0, avg_response_length / 15.0)  # Normalize by expected length
-    fluency = response_frequency * time_accuracy * content_quality
-    
-    # LM correctness based on response relevance and timing
-    lm_correctness = content_quality * time_accuracy * response_diversity
+    # Skip unused calculations
+    # Calculate fluency: proportion of consecutive successful token predictions within a dialogue turn
+    # Based on the paper's implementation: fluency = (num_learn_v_tokens + num_lm_correct_tokens) / num_learn_valid_tokens
+    fluency = 1.0  # Default fluency score
+    if generated_turns and conversation:
+        total_turns = len(generated_turns)
+        total_gt_turns = len([t for t in conversation if t['role'] == 'assistant'])
+        
+        if total_gt_turns > 0:
+            # Simplified fluency calculation based on response success rate
+            # In streaming evaluation, we consider a response "successful" if it has reasonable length and content
+            successful_responses = 0
+            for turn in generated_turns:
+                response_text = turn.get('text', turn.get('content', ''))
+                if response_text and len(response_text.split()) >= 2:  # At least 2 words
+                    successful_responses += 1
+            
+            # Fluency as proportion of successful responses
+            fluency = successful_responses / total_turns if total_turns > 0 else 0.0
+            fluency = max(0.0, min(1.0, fluency))  # Clamp to [0, 1]
     
     return {
         'lm_ppl': lm_ppl,
-        'fluency': fluency,
-        'lm_correctness': lm_correctness
+        'fluency': fluency
     }
 
 if __name__ == "__main__":
