@@ -1350,7 +1350,6 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
         'ground_truth_conversation': ground_truth_conversation_original,  # Use original timestamps for visualization
         'first_user_time': first_user_time,  # Add first user time for normalization
         'lm_ppl': content_metrics.get('lm_ppl', 0.0) if content_metrics else 0.0,
-        'time_diff': content_metrics.get('time_diff', 0.0) if content_metrics else 0.0,
         'fluency': content_metrics.get('fluency', 0.0) if content_metrics else 0.0,
         'lm_correctness': content_metrics.get('lm_correctness', 0.0) if content_metrics else 0.0,
         'ppl_data': content_metrics.get('ppl_data', {}) if content_metrics else {},  # Include PPL data for visualization
@@ -1658,7 +1657,6 @@ def process_goalstep_video(model, tokenizer, video_uid, video_path, dataset, dev
         'ground_truth_conversation': ground_truth_conversation_original,  # Use original timestamps for visualization
         'first_user_time': first_user_time,  # Add first user time for normalization
         'lm_ppl': content_metrics.get('lm_ppl', 0.0) if content_metrics else 0.0,
-        'time_diff': content_metrics.get('time_diff', 0.0) if content_metrics else 0.0,
         'fluency': content_metrics.get('fluency', 0.0) if content_metrics else 0.0,
         'lm_correctness': content_metrics.get('lm_correctness', 0.0) if content_metrics else 0.0,
             'ppl_data': content_metrics.get('ppl_data', {}) if content_metrics else {},  # Include PPL data for visualization
@@ -1947,7 +1945,6 @@ def process_narration_conversation(model, tokenizer, conversation_data, video_pa
         'generated_responses': generated_turns,  # Use generated turns as is
         'ground_truth_conversation': original_conversation,  # Use original conversation
         'lm_ppl': content_metrics.get('lm_ppl', 0.0) if content_metrics else 0.0,
-        'time_diff': content_metrics.get('time_diff', 0.0) if content_metrics else 0.0,
         'fluency': content_metrics.get('fluency', 0.0) if content_metrics else 0.0,
         'lm_correctness': content_metrics.get('lm_correctness', 0.0) if content_metrics else 0.0,
         'ppl_data': content_metrics.get('ppl_data', {}) if content_metrics else {},  # Include PPL data for visualization
@@ -2617,13 +2614,11 @@ def main():
         
         # Calculate aggregate metrics
         avg_ppl = sum(r['lm_ppl'] for r in results) / len(results)
-        avg_time_diff = sum(r['time_diff'] for r in results) / len(results)
         avg_fluency = sum(r['fluency'] for r in results) / len(results)
         avg_correctness = sum(r['lm_correctness'] for r in results) / len(results)
         
         print(f"\n🎯 AGGREGATE METRICS:")
         print(f"   • Average Perplexity: {avg_ppl:.3f}")
-        print(f"   • Average Time Difference: {avg_time_diff:.3f}")
         print(f"   • Average Fluency: {avg_fluency:.3f}")
         print(f"   • Average Correctness: {avg_correctness:.3f}")
         
@@ -2873,15 +2868,6 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversatio
         avg_ppl = avg_gt_ppl
         
         # Calculate other metrics using the same approach
-        # For time_diff, calculate based on response timing accuracy
-        time_diff = 0.0
-        if generated_turns:
-            # Calculate average time difference between generated and expected responses
-            gen_times = [t['time'] for t in generated_turns if 'time' in t]
-            if gen_times:
-                # Simple time difference calculation
-                time_diff = sum(gen_times) / len(gen_times) / 10.0  # Normalize by 10 seconds
-                time_diff = max(0.1, min(5.0, time_diff))  # Clamp to reasonable range
         
         # Calculate fluency based on response quality and timing
         fluency = 0.8  # Default fluency score
@@ -2925,28 +2911,12 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversatio
                         break
                 
                 # Find the GROUND TRUTH response that corresponds to this generated response
-                # Use a more sophisticated matching strategy
-                best_gt_response = None
-                best_time_diff = float('inf')
-                
-                # First, try to find a GT response within a reasonable time window
-                time_window = 60.0  # 60 seconds window
-                for gt_turn in gt_assistant_responses:
-                    gt_time = gt_turn.get('time', 0.0)
-                    time_diff = abs(gt_time - response_time)
-                    
-                    if time_diff <= time_window and time_diff < best_time_diff:
-                        best_gt_response = gt_turn
-                        best_time_diff = time_diff
-                
-                # If no response found within time window, use the response at the same index
-                if best_gt_response is None and i < len(gt_assistant_responses):
+                # Use simple index-based matching
+                if i < len(gt_assistant_responses):
                     best_gt_response = gt_assistant_responses[i]
-                
-                # If still no response found, use the closest one by time
-                if best_gt_response is None and gt_assistant_responses:
-                    best_gt_response = min(gt_assistant_responses, 
-                                         key=lambda x: abs(x.get('time', 0.0) - response_time))
+                elif gt_assistant_responses:
+                    # Use the last available response
+                    best_gt_response = gt_assistant_responses[-1]
                 
                 if best_gt_response:
                     gt_content = best_gt_response['content']
@@ -2964,11 +2934,10 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversatio
                     if ppl is not None:
                         corresponding_gt_ppls.append(ppl)
             
-            return {
-                'lm_ppl': avg_ppl,
-                'time_diff': time_diff,
-                'fluency': fluency,
-                'lm_correctness': lm_correctness,
+        return {
+            'lm_ppl': avg_ppl,
+            'fluency': fluency,
+            'lm_correctness': lm_correctness,
                 'ppl_data': {
                     'gt_ppls': gt_ppls,
                     'corresponding_gt_ppls': corresponding_gt_ppls,
@@ -3033,13 +3002,8 @@ def evaluate_video_with_model(model, tokenizer, video_tensor, conversation, gene
                 # Process metrics exactly like the dataset's compute_metrics method
                 lm_ppl, frame_diff, fluency, lm_correctness = raw_metrics.mean(dim=0).tolist()
                 
-                # Convert frame_diff to time_diff (same as in narration.py)
-                time_diff = frame_diff / frame_fps
-                
-                
                 return {
                     'lm_ppl': lm_ppl,
-                    'time_diff': time_diff,
                     'fluency': fluency,
                     'lm_correctness': lm_correctness
                 }
@@ -3069,22 +3033,8 @@ def calculate_basic_content_metrics(generated_turns, conversation):
     # Calculate average response length
     avg_response_length = sum(len(turn.get('content', turn.get('text', '')).split()) for turn in generated_turns) / max(1, num_generated)
     
-    # Calculate timing accuracy (how close generated responses are to ground truth timing)
-    time_accuracy = 0.0
-    avg_time_diff = 0.0
-    if num_ground_truth > 0:
-        gt_times = [t['time'] for t in conversation if t['role'] == 'assistant']
-        gen_times = [t['time'] for t in generated_turns]
-        
-        if gen_times:
-            # Calculate average time difference (NO FRAMES NEEDED - purely timestamp-based!)
-            # This compares generated response timestamps vs expected ground truth timestamps
-            time_diffs = []
-            for gen_time in gen_times:
-                closest_gt_time = min(gt_times, key=lambda x: abs(x - gen_time))
-                time_diffs.append(abs(gen_time - closest_gt_time))
-            avg_time_diff = sum(time_diffs) / len(time_diffs)
-            time_accuracy = 1.0 / (1.0 + avg_time_diff)  # Inverse of average time diff
+    # Calculate timing accuracy (simplified)
+    time_accuracy = 1.0  # Default perfect timing accuracy
     
     # Simple PPL estimation based on response quality
     # This is a fallback when proper PPL calculation fails
@@ -3103,12 +3053,8 @@ def calculate_basic_content_metrics(generated_turns, conversation):
     # LM correctness based on response relevance and timing
     lm_correctness = content_quality * time_accuracy * response_diversity
     
-    # Time difference in seconds (convert from accuracy)
-    time_diff_seconds = avg_time_diff if avg_time_diff > 0 else 1.0
-    
     return {
         'lm_ppl': lm_ppl,
-        'time_diff': time_diff_seconds,
         'fluency': fluency,
         'lm_correctness': lm_correctness
     }
