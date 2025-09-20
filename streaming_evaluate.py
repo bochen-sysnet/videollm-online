@@ -17,6 +17,9 @@ import collections
 import matplotlib.pyplot as plt
 import numpy as np
 
+# Import analysis functions
+from video_analysis import create_gt_word_count_analysis, create_initial_distribution_analysis, create_time_per_token_analysis, create_generated_word_count_analysis
+
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -678,13 +681,13 @@ def create_frame_score_analysis(all_frame_scores_data, output_dir=Config.OUTPUT_
     return output_path
 
 def create_individual_conversation_timing_plots(conversation_timings, output_dir=Config.OUTPUT_DIR):
-    """Create individual timing plots for each conversation with simplified 2-plot layout"""
+    """Create individual timing plots for each conversation with enhanced 3-plot layout"""
     os.makedirs(output_dir, exist_ok=True)
     
     for i, conversation_timing in enumerate(conversation_timings):
         conversation_number = i + 1  # Always use sequential numbering 1, 2, 3, ...
         conversation_id = conversation_timing.get('conversation_id', f'conversation_{i+1}')
-        fig, axes = plt.subplots(1, 2, figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_LARGE[1]//2))
+        fig, axes = plt.subplots(1, 3, figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_LARGE[1]//3))
         fig.suptitle(f'Conversation {conversation_number} ({conversation_id}) - Timing Analysis', fontsize=14, fontweight='bold')
         
         # 1. Timing components breakdown
@@ -710,7 +713,7 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
         ax2 = axes[1]
         if conversation_timing['frame_processing_times']:
             frame_count = len(conversation_timing['frame_processing_times'])
-            generation_count = max(1, conversation_timing.get('generated_turns', 1))
+            generation_count = max(1, len(conversation_timing.get('generated_turns', [])))
             
             visual_per_frame = conversation_timing['visual_embedding_time'] / frame_count
             model_per_frame = conversation_timing['model_forward_time'] / frame_count
@@ -731,6 +734,66 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
                 height = bar.get_height()
                 ax2.text(bar.get_x() + bar.get_width()/2., height + 0.0001,
                         label, ha='center', va='bottom', fontsize=9)
+        
+        # 3. Timing components over time
+        ax3 = axes[2]
+        frame_timing_data = conversation_timing.get('frame_timing_data', [])
+        
+        if frame_timing_data:
+            # Extract timing data
+            video_times = [data['video_time'] for data in frame_timing_data]
+            visual_times = [data['visual_embedding_time'] * 1000 for data in frame_timing_data]  # Convert to ms
+            model_times = [data['model_forward_time'] * 1000 for data in frame_timing_data]  # Convert to ms
+            generation_times = [data['generation_time'] * 1000 for data in frame_timing_data]  # Convert to ms
+            
+            # Plot timing components over time
+            ax3.plot(video_times, visual_times, 'b-', linewidth=1.5, alpha=0.8, label='Visual Embedding (ms)')
+            ax3.plot(video_times, model_times, 'orange', linewidth=1.5, alpha=0.8, label='Model Forward (ms)')
+            ax3.plot(video_times, generation_times, 'g-', linewidth=1.5, alpha=0.8, label='Generation (ms)')
+            
+            ax3.set_xlabel('Video Time (seconds)')
+            ax3.set_ylabel('Time per Frame (ms)')
+            ax3.set_title('Timing Components Over Time')
+            ax3.grid(True, alpha=0.3)
+            ax3.legend(fontsize=8)
+            
+            # Add some statistics
+            avg_visual = np.mean(visual_times)
+            avg_model = np.mean(model_times)
+            avg_generation = np.mean(generation_times)
+            
+            stats_text = f'Avg Visual: {avg_visual:.1f}ms\nAvg Model: {avg_model:.1f}ms\nAvg Gen: {avg_generation:.1f}ms'
+            ax3.text(0.02, 0.98, stats_text, transform=ax3.transAxes, 
+                    verticalalignment='top', fontsize=8,
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        else:
+            # Fallback: create synthetic data from total times if no per-frame data available
+            if conversation_timing['frame_processing_times']:
+                frame_count = len(conversation_timing['frame_processing_times'])
+                video_times = np.linspace(0, conversation_timing.get('video_duration', frame_count / 2.0), frame_count)
+                
+                # Distribute total times evenly across frames
+                visual_per_frame = conversation_timing['visual_embedding_time'] / frame_count * 1000
+                model_per_frame = conversation_timing['model_forward_time'] / frame_count * 1000
+                generation_per_frame = conversation_timing['generation_time'] / frame_count * 1000
+                
+                ax3.plot(video_times, [visual_per_frame] * frame_count, 'b-', linewidth=1.5, alpha=0.8, label='Visual Embedding (ms)')
+                ax3.plot(video_times, [model_per_frame] * frame_count, 'orange', linewidth=1.5, alpha=0.8, label='Model Forward (ms)')
+                ax3.plot(video_times, [generation_per_frame] * frame_count, 'g-', linewidth=1.5, alpha=0.8, label='Generation (ms)')
+                
+                ax3.set_xlabel('Video Time (seconds)')
+                ax3.set_ylabel('Time per Frame (ms)')
+                ax3.set_title('Timing Components Over Time (Estimated)')
+                ax3.grid(True, alpha=0.3)
+                ax3.legend(fontsize=8)
+                
+                stats_text = f'Visual: {visual_per_frame:.1f}ms/frame\nModel: {model_per_frame:.1f}ms/frame\nGen: {generation_per_frame:.1f}ms/frame'
+                ax3.text(0.02, 0.98, stats_text, transform=ax3.transAxes, 
+                        verticalalignment='top', fontsize=8,
+                        bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+            else:
+                ax3.text(0.5, 0.5, 'No timing data available', ha='center', va='center', transform=ax3.transAxes)
+                ax3.set_title('Timing Components Over Time')
         
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f'conversation_{conversation_number}_timing.png'), dpi=300, bbox_inches='tight')
@@ -1099,6 +1162,8 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
     total_model_forward_time = 0.0
     total_generation_time = 0.0
     frame_processing_times = []
+    # Store per-frame component timing data for visualization
+    frame_timing_data = []  # List of dicts with per-frame timing components
     generated_turns = []
     frame_scores_data = None  # Will store frame_token_interval_score data
     
@@ -1184,7 +1249,17 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
             
             # Store per-frame processing time
             frame_processing_times.append(frame_processing_time)
-            
+
+            # Store per-frame component timing data for visualization
+            frame_timing_data.append({
+                'frame_idx': frame_idx,
+                'video_time': video_time,
+                'visual_embedding_time': visual_embedding_time,
+                'model_forward_time': streaming_time,
+                'generation_time': generation_time,
+                'total_processing_time': frame_processing_time
+            })
+
             # Record response generation separately (like benchmark.py)
             if response:
                 response_time = video_time  # Use actual video time
@@ -1287,8 +1362,10 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
         'frame_processing_times': frame_processing_times,  # Real per-frame times from actual measurements
         'eos_timing': {'eos_detection_time': 0.0, 'with_eos': 0.0, 'without_eos': 0.0},  # Placeholder
         'conversation_turns': len(generated_turns),
+        'generated_turns': generated_turns,  # Add actual generated turns data
         'video_duration': duration,  # Use conversation duration
-        'frame_scores_data': frame_scores_data  # Add frame_token_interval_score data
+        'frame_scores_data': frame_scores_data,  # Add frame_token_interval_score data
+        'frame_timing_data': frame_timing_data  # Add per-frame component timing data
     }
     
     # Create timeline with interleaved user prompts, ground truth, and generated responses
@@ -1348,6 +1425,9 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
 
 def process_goalstep_video(model, tokenizer, video_uid, video_path, dataset, device):
     """Process a single goalstep video with continuous frame-by-frame processing and response generation."""
+    
+    # Create a conversation_id from video_uid for consistency
+    conversation_id = f"goalstep_video_{video_uid}"
     
     print(f"📹 Loading video metadata: {video_path}")
     
@@ -1703,6 +1783,8 @@ def process_narration_conversation(model, tokenizer, conversation_data, video_pa
     total_model_forward_time = 0.0
     total_generation_time = 0.0
     frame_processing_times = []
+    # Store per-frame component timing data for visualization
+    frame_timing_data = []  # List of dicts with per-frame timing components
     generated_turns = []
     frame_scores_data = None  # Will store frame_token_interval_score data
     
@@ -1758,61 +1840,71 @@ def process_narration_conversation(model, tokenizer, conversation_data, video_pa
             memory_data['memory_usage'].append(current_memory)
             memory_data['memory_growth'].append(memory_growth)
             memory_data['memory_per_frame'].append(memory_per_frame)
-            
+        
         # Dynamic frame limit adjustment based on actual memory growth
         if frame_idx > 100:  # After 100 frames, we have good data
             remaining_memory = 24000 - current_memory  # Assume 24GB total
     
-    # Measure total frame processing time (RGB to processed)
-    frame_start_time = time.time()
-    
-    try:
-        # Process the frame with detailed timing (like benchmark.py)
-        liveinfer.input_video_stream(video_time)
-        query, response = liveinfer()
+        # Measure total frame processing time (RGB to processed)
+        frame_start_time = time.time()
         
-        frame_processing_time = time.time() - frame_start_time
-        
-        # Get detailed timing data
-        timing_data = liveinfer.get_timing_data()
-        
-        # Extract detailed metrics (like benchmark.py)
-        visual_embedding_time = timing_data.get('visual_embedding_time', 0.0)
-        streaming_time = timing_data.get('streaming_time', 0.0)  # This is model forward time
-        generation_time = timing_data.get('generation_time', 0.0)
-        
-        # Accumulate timing data
-        total_visual_embedding_time += visual_embedding_time
-        total_model_forward_time += streaming_time  # Use streaming_time as model forward time
-        total_generation_time += generation_time
-        
-        # Store per-frame processing time
-        frame_processing_times.append(frame_processing_time)
-        
-        # Record response generation separately (like benchmark.py)
-        if response:
-            response_time = video_time  # Use actual video time
-            generated_turns.append({
-                'time': response_time,
-                'text': response,
-                'user_prompt': query or user_prompt,
-                'generation_time': generation_time
-            })
-        
-        # Record conversation if there's a query or response (like benchmark.py)
-        if query or response:
-            print(f"[{video_time:.2f}s] Query: {query}")
-            print(f"[{video_time:.2f}s] Response: {response}")
-            if generation_time > 0:
-                print(f"  └─ Generation time: {generation_time:.3f}s")
+        try:
+            # Process the frame with detailed timing (like benchmark.py)
+            liveinfer.input_video_stream(video_time)
+            query, response = liveinfer()
             
-    except Exception as e:
-        print(f"❌ Error processing frame {frame_idx} at time {video_time:.2f}s: {e}")
-        import traceback
-        traceback.print_exc()
-        # Continue processing other frames
-        frame_processing_time = time.time() - frame_start_time
-        frame_processing_times.append(frame_processing_time)
+            frame_processing_time = time.time() - frame_start_time
+            
+            # Get detailed timing data
+            timing_data = liveinfer.get_timing_data()
+            
+            # Extract detailed metrics (like benchmark.py)
+            visual_embedding_time = timing_data.get('visual_embedding_time', 0.0)
+            streaming_time = timing_data.get('streaming_time', 0.0)  # This is model forward time
+            generation_time = timing_data.get('generation_time', 0.0)
+            
+            # Accumulate timing data
+            total_visual_embedding_time += visual_embedding_time
+            total_model_forward_time += streaming_time  # Use streaming_time as model forward time
+            total_generation_time += generation_time
+            
+            # Store per-frame processing time
+            frame_processing_times.append(frame_processing_time)
+
+            # Store per-frame component timing data for visualization
+            frame_timing_data.append({
+                'frame_idx': frame_idx,
+                'video_time': video_time,
+                'visual_embedding_time': visual_embedding_time,
+                'model_forward_time': streaming_time,
+                'generation_time': generation_time,
+                'total_processing_time': frame_processing_time
+            })
+
+            # Record response generation separately (like benchmark.py)
+            if response:
+                response_time = video_time  # Use actual video time
+                generated_turns.append({
+                    'time': response_time,
+                    'text': response,
+                    'user_prompt': query or user_prompt,
+                    'generation_time': generation_time
+                })
+            
+            # Record conversation if there's a query or response (like benchmark.py)
+            if query or response:
+                print(f"[{video_time:.2f}s] Query: {query}")
+                print(f"[{video_time:.2f}s] Response: {response}")
+                if generation_time > 0:
+                    print(f"  └─ Generation time: {generation_time:.3f}s")
+                
+        except Exception as e:
+            print(f"❌ Error processing frame {frame_idx} at time {video_time:.2f}s: {e}")
+            import traceback
+            traceback.print_exc()
+            # Continue processing other frames
+            frame_processing_time = time.time() - frame_start_time
+            frame_processing_times.append(frame_processing_time)
     
     # Collect frame scores data after processing
     frame_scores_data = liveinfer.get_frame_scores()
@@ -1867,8 +1959,10 @@ def process_narration_conversation(model, tokenizer, conversation_data, video_pa
         'frame_processing_times': frame_processing_times,  # Real per-frame times from actual measurements
         'eos_timing': {'eos_detection_time': 0.0, 'with_eos': 0.0, 'without_eos': 0.0},  # Placeholder
         'conversation_turns': len(generated_turns),
+        'generated_turns': generated_turns,  # Add actual generated turns data
         'video_duration': duration,  # Use conversation duration
-        'frame_scores_data': frame_scores_data  # Add frame_token_interval_score data
+        'frame_scores_data': frame_scores_data,  # Add frame_token_interval_score data
+        'frame_timing_data': frame_timing_data  # Add per-frame component timing data
     }
     
     # Create timeline with interleaved user prompts, ground truth, and generated responses
@@ -2086,23 +2180,23 @@ class SimpleLiveInfer:
         visual_start = time.time()
         frame_idx = int(video_time * self.frame_fps)
         if frame_idx > self.last_frame_idx:
-            ranger = range(self.last_frame_idx + 1, frame_idx + 1)
-            
-            # Stream frames from CPU to GPU as needed
-            if self.video_tensor is not None:
-                # Get frames from CPU memory and move to GPU
-                cpu_frames = self.video_tensor[ranger]
-                gpu_frames = cpu_frames.to(self.device)
-                
-                # Process frames on GPU
-                frames_embeds = self.model.visual_embed(gpu_frames).split(self.frame_num_tokens)
-            self.frame_embeds_queue.extend([(r / self.frame_fps, frame_embeds) for r, frame_embeds in zip(ranger, frames_embeds)])
-            
-            # Immediately release GPU frames to free memory
-            del gpu_frames
-            torch.cuda.empty_cache()
-        else:
-            print(f"Warning: Video tensor not loaded")
+            # Process frames one at a time to avoid OOM
+            for single_frame_idx in range(self.last_frame_idx + 1, frame_idx + 1):
+                # Stream single frame from CPU to GPU as needed
+                if self.video_tensor is not None:
+                    # Get single frame from CPU memory and move to GPU
+                    cpu_frame = self.video_tensor[single_frame_idx:single_frame_idx+1]  # Keep batch dimension
+                    gpu_frame = cpu_frame.to(self.device)
+                    
+                    # Process single frame on GPU
+                    frame_embeds = self.model.visual_embed(gpu_frame).split(self.frame_num_tokens)
+                    self.frame_embeds_queue.extend([(single_frame_idx / self.frame_fps, frame_embeds) for frame_embeds in frame_embeds])
+                    
+                    # Immediately release GPU frame to free memory
+                    del gpu_frame
+                    torch.cuda.empty_cache()
+                else:
+                    print(f"Warning: Video tensor not loaded")
                 
         visual_embedding_time = time.time() - visual_start
         
@@ -2167,9 +2261,17 @@ class SimpleLiveInfer:
         # MEASURE GENERATION TIME (this is the VLM text generation)
         generation_start = time.time()
         
+        # Track response triggers for ALL response generations
+        # This ensures consistent tracking regardless of how the response was triggered
         if query is not None:
+            # Query-based response - track as 'query' trigger
+            self.response_triggers.append('query')
+            self.response_times.append(video_time)
             self.last_ids = self.tokenizer.apply_chat_template([{'role': 'user', 'content': query}], add_stream_query_prompt=True, add_generation_prompt=True, return_tensors='pt').to(self.device)
         else:
+            # Frame-based response - track as 'frame' trigger
+            self.response_triggers.append('frame')
+            self.response_times.append(video_time)
             # Use the stream generation prompt for continuous generation
             self.last_ids = self._added_stream_generation_ids
         inputs_embeds = self.model.get_input_embeddings()(self.last_ids)
@@ -2214,9 +2316,7 @@ class SimpleLiveInfer:
             # 2. if the same time, response after frame at that time
             if self.query_queue and video_time >= self.query_queue[0][0]:
                 video_time, query = self.query_queue.popleft()
-                # Track query-based response trigger
-                self.response_triggers.append('query')
-                self.response_times.append(video_time)
+                # Note: Response triggers are now tracked in _call_for_response
                 return video_time, query
             # 3. if the next is frame but next is not interval, then response
             next_score = outputs.logits[:,-1:].softmax(dim=-1)
@@ -2226,17 +2326,11 @@ class SimpleLiveInfer:
             self.frame_scores.append(frame_token_interval_score)
             self.frame_times.append(video_time)
             
-            # Debug: show frame scores occasionally
-            if len(self.frame_scores) % 200 == 0:  # Every 200 frames
-                print(f"🔍 Frame {len(self.frame_scores)}: score={frame_token_interval_score:.3f}, threshold={self.frame_token_interval_threshold:.3f}")
-            
             if frame_token_interval_score < self.frame_token_interval_threshold:
                 next_score[:,:,self.frame_token_interval_id].zero_()
             self.last_ids = next_score.argmax(dim=-1)
             if self.last_ids != self.frame_token_interval_id: 
-                # Track frame-based response trigger
-                self.response_triggers.append('frame')
-                self.response_times.append(video_time)
+                # Note: Response triggers are now tracked in _call_for_response
                 return video_time, None
         return None, None
 
@@ -2278,6 +2372,8 @@ class SimpleLiveInfer:
             'response_triggers': self.response_triggers.copy(),
             'response_times': self.response_times.copy()
         }
+
+# Analysis functions moved to video_analysis.py
 
 def create_ppl_analysis_visualization(results, output_dir="timing_plots"):
     """Create comprehensive PPL analysis visualizations."""
@@ -2333,80 +2429,58 @@ def create_ppl_analysis_visualization(results, output_dir="timing_plots"):
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # Add value labels on bars
-    for bar in bars1:
-        height = bar.get_height()
-        if height > 0:
-            ax1.text(bar.get_x() + bar.get_width()/2., height + 0.1,
-                    f'{height:.2f}', ha='center', va='bottom', fontsize=8)
-    
-    for bar in bars2:
-        height = bar.get_height()
-        if height > 0:
-            ax1.text(bar.get_x() + bar.get_width()/2., height + 0.1,
-                    f'{height:.2f}', ha='center', va='bottom', fontsize=8)
-    
-    # 2. PPL Distribution Histogram
+    # 2. Overall PPL Distribution
     ax2 = plt.subplot(2, 3, 2)
-    if all_gt_ppls:
-        ax2.hist(all_gt_ppls, bins=20, alpha=0.7, label='All GT Responses', color='skyblue', edgecolor='black')
-    if all_corresponding_gt_ppls:
-        ax2.hist(all_corresponding_gt_ppls, bins=20, alpha=0.7, label='Corresponding GT Responses', color='lightcoral', edgecolor='black')
-    
-    ax2.set_xlabel('PPL Value')
+    ax2.hist(all_gt_ppls, bins=30, alpha=0.7, label='All GT Responses', color='skyblue', edgecolor='black')
+    ax2.hist(all_corresponding_gt_ppls, bins=30, alpha=0.7, label='Corresponding GT Responses', color='lightcoral', edgecolor='black')
+    ax2.set_xlabel('PPL')
     ax2.set_ylabel('Frequency')
-    ax2.set_title('PPL Distribution')
+    ax2.set_title('Overall PPL Distribution')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
     # 3. PPL vs Response Count
     ax3 = plt.subplot(2, 3, 3)
-    response_counts = [data['total_gt_responses'] for data in video_ppls.values()]
-    corresponding_counts = [data['generated_responses'] for data in video_ppls.values()]
+    generated_counts = [data['generated_responses'] for data in video_ppls.values()]
+    avg_ppls = [np.mean(data['gt_ppls']) if data['gt_ppls'] else 0 for data in video_ppls.values()]
     
-    ax3.scatter(response_counts, video_avg_ppls, s=100, alpha=0.7, label='All GT Responses', color='skyblue')
-    ax3.scatter(corresponding_counts, video_corresponding_avg_ppls, s=100, alpha=0.7, label='Corresponding GT Responses', color='lightcoral')
-    
-    ax3.set_xlabel('Number of Responses')
+    scatter = ax3.scatter(generated_counts, avg_ppls, alpha=0.7, s=100, color='green')
+    ax3.set_xlabel('Generated Responses')
     ax3.set_ylabel('Average PPL')
-    ax3.set_title('PPL vs Response Count')
-    ax3.legend()
+    ax3.set_title('PPL vs Generated Response Count')
     ax3.grid(True, alpha=0.3)
     
-    # 4. PPL Box Plot by Video
+    # 4. Box plot of PPL by video
     ax4 = plt.subplot(2, 3, 4)
-    ppl_data_by_video = []
-    video_labels = []
-    
-    for video_name, data in video_ppls.items():
-        if data['gt_ppls']:
-            ppl_data_by_video.append(data['gt_ppls'])
-            video_labels.append(video_name)
+    ppl_data_by_video = [data['gt_ppls'] for data in video_ppls.values() if data['gt_ppls']]
+    video_labels = [name for name, data in video_ppls.items() if data['gt_ppls']]
     
     if ppl_data_by_video:
         bp = ax4.boxplot(ppl_data_by_video, labels=video_labels, patch_artist=True)
         for patch in bp['boxes']:
             patch.set_facecolor('lightblue')
-            patch.set_alpha(0.7)
+        ax4.set_xlabel('Video')
+        ax4.set_ylabel('PPL')
+        ax4.set_title('PPL Distribution by Video')
+        ax4.tick_params(axis='x', rotation=45)
+        ax4.grid(True, alpha=0.3)
     
-    ax4.set_xlabel('Video')
-    ax4.set_ylabel('PPL Value')
-    ax4.set_title('PPL Distribution by Video (Box Plot)')
-    ax4.tick_params(axis='x', rotation=45)
-    ax4.grid(True, alpha=0.3)
-    
-    # 5. PPL Trends Over Time (if we have timing data)
+    # 5. Response Count Statistics
     ax5 = plt.subplot(2, 3, 5)
-    if all_gt_ppls:
-        sorted_ppls = sorted(all_gt_ppls)
-        ax5.plot(range(len(sorted_ppls)), sorted_ppls, 'o-', alpha=0.7, label='All GT Responses', color='skyblue')
-    if all_corresponding_gt_ppls:
-        sorted_corresponding_ppls = sorted(all_corresponding_gt_ppls)
-        ax5.plot(range(len(sorted_corresponding_ppls)), sorted_corresponding_ppls, 'o-', alpha=0.7, label='Corresponding GT Responses', color='lightcoral')
+    response_counts = [data['generated_responses'] for data in video_ppls.values()]
+    gt_counts = [data['total_gt_responses'] for data in video_ppls.values()]
     
-    ax5.set_xlabel('Response Index (Sorted)')
-    ax5.set_ylabel('PPL Value')
-    ax5.set_title('PPL Trends (Sorted)')
+    x = np.arange(len(video_names))
+    width = 0.35
+    
+    bars1 = ax5.bar(x - width/2, response_counts, width, label='Generated', alpha=0.8, color='orange')
+    bars2 = ax5.bar(x + width/2, gt_counts, width, label='Ground Truth', alpha=0.8, color='purple')
+    
+    ax5.set_xlabel('Video')
+    ax5.set_ylabel('Response Count')
+    ax5.set_title('Response Count by Video')
+    ax5.set_xticks(x)
+    ax5.set_xticklabels(video_names, rotation=45)
     ax5.legend()
     ax5.grid(True, alpha=0.3)
     
@@ -2414,94 +2488,59 @@ def create_ppl_analysis_visualization(results, output_dir="timing_plots"):
     ax6 = plt.subplot(2, 3, 6)
     ax6.axis('off')
     
-    # Calculate summary statistics
-    stats_text = "PPL Analysis Summary\n" + "="*30 + "\n\n"
+    stats_text = f"""
+    PPL Analysis Summary:
     
-    if all_gt_ppls:
-        stats_text += f"All GT Responses ({len(all_gt_ppls)}):\n"
-        stats_text += f"  Mean: {np.mean(all_gt_ppls):.3f}\n"
-        stats_text += f"  Median: {np.median(all_gt_ppls):.3f}\n"
-        stats_text += f"  Std: {np.std(all_gt_ppls):.3f}\n"
-        stats_text += f"  Min: {np.min(all_gt_ppls):.3f}\n"
-        stats_text += f"  Max: {np.max(all_gt_ppls):.3f}\n\n"
+    Total Videos: {len(video_ppls)}
+    Total GT Responses: {len(all_gt_ppls)}
+    Total Corresponding GT: {len(all_corresponding_gt_ppls)}
     
-    if all_corresponding_gt_ppls:
-        stats_text += f"Corresponding GT Responses ({len(all_corresponding_gt_ppls)}):\n"
-        stats_text += f"  Mean: {np.mean(all_corresponding_gt_ppls):.3f}\n"
-        stats_text += f"  Median: {np.median(all_corresponding_gt_ppls):.3f}\n"
-        stats_text += f"  Std: {np.std(all_corresponding_gt_ppls):.3f}\n"
-        stats_text += f"  Min: {np.min(all_corresponding_gt_ppls):.3f}\n"
-        stats_text += f"  Max: {np.max(all_corresponding_gt_ppls):.3f}\n\n"
+    Average PPL:
+    • All GT: {np.mean(all_gt_ppls):.3f}
+    • Corresponding GT: {np.mean(all_corresponding_gt_ppls):.3f}
     
-    # Video-by-video breakdown
-    stats_text += "Per-Video Breakdown:\n"
-    for video_name, data in video_ppls.items():
-        if data['gt_ppls']:
-            avg_ppl = np.mean(data['gt_ppls'])
-            stats_text += f"  {video_name}: {len(data['gt_ppls'])} responses, avg PPL: {avg_ppl:.3f}\n"
+    PPL Range:
+    • Min: {np.min(all_gt_ppls):.3f}
+    • Max: {np.max(all_gt_ppls):.3f}
+    • Std: {np.std(all_gt_ppls):.3f}
     
-    ax6.text(0.05, 0.95, stats_text, transform=ax6.transAxes, fontsize=10,
+    Generated Responses:
+    • Total: {sum(response_counts)}
+    • Avg per Video: {np.mean(response_counts):.1f}
+    """
+    
+    ax6.text(0.1, 0.9, stats_text, transform=ax6.transAxes, fontsize=10,
              verticalalignment='top', fontfamily='monospace',
              bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
     
     plt.tight_layout()
     
-    # Save the plot
+    # Save comprehensive analysis
     output_path = os.path.join(output_dir, 'ppl_analysis_comprehensive.png')
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
+    plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
     print(f"📊 Comprehensive PPL analysis saved to: {output_path}")
     
-    # Create a simpler comparison plot
-    fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    # Create simple comparison plot
+    fig2, ax = plt.subplots(1, 1, figsize=(10, 6))
     
-    # Comparison of average PPLs
     if all_gt_ppls and all_corresponding_gt_ppls:
-        categories = ['All GT Responses', 'Corresponding GT Responses']
-        means = [np.mean(all_gt_ppls), np.mean(all_corresponding_gt_ppls)]
-        stds = [np.std(all_gt_ppls), np.std(all_corresponding_gt_ppls)]
-        
-        bars = ax1.bar(categories, means, yerr=stds, capsize=5, alpha=0.7, 
-                      color=['skyblue', 'lightcoral'], edgecolor='black')
-        
-        ax1.set_ylabel('Average PPL')
-        ax1.set_title('PPL Comparison: All vs Corresponding GT Responses')
-        ax1.grid(True, alpha=0.3)
-        
-        # Add value labels
-        for bar, mean in zip(bars, means):
-            ax1.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.1,
-                    f'{mean:.3f}', ha='center', va='bottom', fontweight='bold')
-    
-    # Video-by-video comparison
-    if video_ppls:
-        video_names = list(video_ppls.keys())
-        all_means = [np.mean(data['gt_ppls']) if data['gt_ppls'] else 0 for data in video_ppls.values()]
-        corresponding_means = [np.mean(data['corresponding_gt_ppls']) if data['corresponding_gt_ppls'] else 0 for data in video_ppls.values()]
-        
-        x = np.arange(len(video_names))
-        width = 0.35
-        
-        ax2.bar(x - width/2, all_means, width, label='All GT Responses', alpha=0.8, color='skyblue')
-        ax2.bar(x + width/2, corresponding_means, width, label='Corresponding GT Responses', alpha=0.8, color='lightcoral')
-        
-        ax2.set_xlabel('Video')
-        ax2.set_ylabel('Average PPL')
-        ax2.set_title('PPL by Video: All vs Corresponding GT Responses')
-        ax2.set_xticks(x)
-        ax2.set_xticklabels(video_names, rotation=45)
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
+        ax.hist(all_gt_ppls, bins=30, alpha=0.7, label='All GT Responses', color='skyblue', density=True)
+        ax.hist(all_corresponding_gt_ppls, bins=30, alpha=0.7, label='Corresponding GT Responses', color='lightcoral', density=True)
+        ax.set_xlabel('PPL')
+        ax.set_ylabel('Density')
+        ax.set_title('PPL Distribution Comparison')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
     
-    # Save the comparison plot
+    # Save comparison plot
     comparison_path = os.path.join(output_dir, 'ppl_comparison.png')
-    plt.savefig(comparison_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
+    plt.savefig(comparison_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
     print(f"📊 PPL comparison plot saved to: {comparison_path}")
+    
+    plt.close()
+    plt.close()
 
 def main():
     import sys
@@ -2559,6 +2598,11 @@ def main():
     )
     
     print(f"📊 Dataset loaded: {len(dataset)} conversation turn(s) from validation set")
+    
+    # Create ground truth word count analysis
+    print(f"\n📊 Creating ground truth word count analysis...")
+    create_gt_word_count_analysis(data_source)
+    
     print("-" * 50)
     
     # Evaluate more conversations for better coverage
@@ -2587,7 +2631,7 @@ def main():
         print(f"\n🎯 PERFORMANCE SUMMARY:")
         print(f"   • Conversations Processed: {len(results)}")
         print(f"   • Total Frames: {sum(r['num_frames'] for r in results)}")
-        print(f"   • Total Generated Responses: {sum(r['generated_turns'] for r in results)}")
+        print(f"   • Total Generated Responses: {sum(len(r['generated_turns']) for r in results)}")
         print(f"   • Total Ground Truth Responses: {sum(r['ground_truth_turns'] for r in results)}")
 
         
@@ -2601,6 +2645,14 @@ def main():
         # Create PPL analysis visualization
         print(f"\n📊 Creating comprehensive PPL analysis...")
         create_ppl_analysis_visualization(results)
+        
+        # Create time per token analysis
+        print(f"\n📊 Creating time per token analysis...")
+        create_time_per_token_analysis(results)
+        
+        # Create generated word count analysis
+        print(f"\n📊 Creating generated word count analysis...")
+        create_generated_word_count_analysis(results)
         
         print(f"\n✅ Evaluation completed successfully!")
         print(f"📊 Processed {len(results)} conversations with streaming approach")
