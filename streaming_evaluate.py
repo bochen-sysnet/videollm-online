@@ -17,9 +17,6 @@ import collections
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Import analysis functions
-from video_analysis import create_gt_word_count_analysis, create_initial_distribution_analysis, create_time_per_token_analysis, create_generated_word_count_analysis
-
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -60,7 +57,7 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 10                 # Max frames for evaluation to avoid OOM
+    MAX_EVAL_FRAMES = 100                # Max frames for evaluation to avoid OOM
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 50           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
@@ -283,87 +280,87 @@ class FilteredEgo4DRefinedNarrationStream:
                 conversations_per_video[video_uid] = 0
             conversations_per_video[video_uid] += 1
         
-        print(f"📊 Dataset Statistics:")
-        print(f"   • Total videos: {len(unique_videos)}")
+        # print(f"📊 Dataset Statistics:")
+        # print(f"   • Total videos: {len(unique_videos)}")
         print(f"   • Total conversations: {len(self.conversations)}")
-        print(f"   • Average conversations per video: {len(self.conversations) / len(unique_videos):.2f}")
-        print(f"   • Min conversations per video: {min(conversations_per_video.values())}")
-        print(f"   • Max conversations per video: {max(conversations_per_video.values())}")
-        print(f"   • Average conversation duration: {sum(c['duration'] for c in self.conversations) / len(self.conversations):.2f}s")
+        # print(f"   • Average conversations per video: {len(self.conversations) / len(unique_videos):.2f}")
+        # print(f"   • Min conversations per video: {min(conversations_per_video.values())}")
+        # print(f"   • Max conversations per video: {max(conversations_per_video.values())}")
+        # print(f"   • Average conversation duration: {sum(c['duration'] for c in self.conversations) / len(self.conversations):.2f}s")
         
         # Create and show conversation distribution analysis at the beginning
-        self.create_initial_distribution_analysis(conversations_per_video, unique_videos)
+#         self.create_initial_distribution_analysis(conversations_per_video, unique_videos)
     
-    def create_initial_distribution_analysis(self, conversations_per_video, unique_videos):
-        """Create initial distribution analysis showing all videos and their conversation counts"""
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import os
+#     def create_initial_distribution_analysis(self, conversations_per_video, unique_videos):
+#         """Create initial distribution analysis showing all videos and their conversation counts"""
+#         import matplotlib.pyplot as plt
+#         import numpy as np
+#         import os
         
-        # Create output directory if it doesn't exist
-        os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
+#         # Create output directory if it doesn't exist
+#         os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
         
-        # Sort videos by conversation count for better visualization
-        sorted_videos = sorted(unique_videos, key=lambda x: conversations_per_video[x], reverse=True)
-        video_indices = list(range(1, len(sorted_videos) + 1))
-        conversation_counts = [conversations_per_video[vid] for vid in sorted_videos]
+#         # Sort videos by conversation count for better visualization
+#         sorted_videos = sorted(unique_videos, key=lambda x: conversations_per_video[x], reverse=True)
+#         video_indices = list(range(1, len(sorted_videos) + 1))
+#         conversation_counts = [conversations_per_video[vid] for vid in sorted_videos]
         
-        # Create the plot
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_MEDIUM[1]))
-        fig.suptitle(f'Conversation Distribution Analysis - {self.data_source.upper()} Dataset', fontsize=16, fontweight='bold')
+#         # Create the plot
+#         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_MEDIUM[1]))
+#         fig.suptitle(f'Conversation Distribution Analysis - {self.data_source.upper()} Dataset', fontsize=16, fontweight='bold')
         
-        # Plot 1: Video Index vs Number of Conversations (as requested)
-        bars = ax1.bar(video_indices, conversation_counts, color='skyblue', alpha=0.7)
-        ax1.set_xlabel('Video Index (sorted by conversation count)')
-        ax1.set_ylabel('Number of Conversations')
-        ax1.set_title('Conversations per Video')
-        ax1.grid(True, alpha=0.3)
+#         # Plot 1: Video Index vs Number of Conversations (as requested)
+#         bars = ax1.bar(video_indices, conversation_counts, color='skyblue', alpha=0.7)
+#         ax1.set_xlabel('Video Index (sorted by conversation count)')
+#         ax1.set_ylabel('Number of Conversations')
+#         ax1.set_title('Conversations per Video')
+#         ax1.grid(True, alpha=0.3)
         
-        # Add value labels on bars (only for bars with height > 0)
-        for i, (bar, count) in enumerate(zip(bars, conversation_counts)):
-            if count > 0:
-                ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.05, 
-                        str(count), ha='center', va='bottom', fontsize=8)
+#         # Add value labels on bars (only for bars with height > 0)
+#         for i, (bar, count) in enumerate(zip(bars, conversation_counts)):
+#             if count > 0:
+#                 ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.05, 
+#                         str(count), ha='center', va='bottom', fontsize=8)
         
-        # Plot 2: Distribution of conversation counts
-        unique_counts, count_frequencies = np.unique(conversation_counts, return_counts=True)
-        ax2.bar(unique_counts, count_frequencies, color='lightcoral', alpha=0.7)
-        ax2.set_xlabel('Number of Conversations per Video')
-        ax2.set_ylabel('Number of Videos')
-        ax2.set_title('Distribution of Conversation Counts')
-        ax2.grid(True, alpha=0.3)
+#         # Plot 2: Distribution of conversation counts
+#         unique_counts, count_frequencies = np.unique(conversation_counts, return_counts=True)
+#         ax2.bar(unique_counts, count_frequencies, color='lightcoral', alpha=0.7)
+#         ax2.set_xlabel('Number of Conversations per Video')
+#         ax2.set_ylabel('Number of Videos')
+#         ax2.set_title('Distribution of Conversation Counts')
+#         ax2.grid(True, alpha=0.3)
         
-        # Add value labels
-        for count, freq in zip(unique_counts, count_frequencies):
-            ax2.text(count, freq + 0.1, str(freq), ha='center', va='bottom', fontsize=8)
+#         # Add value labels
+#         for count, freq in zip(unique_counts, count_frequencies):
+#             ax2.text(count, freq + 0.1, str(freq), ha='center', va='bottom', fontsize=8)
         
-        # Add summary statistics
-        total_videos = len(unique_videos)
-        total_conversations = sum(conversation_counts)
-        avg_conversations = total_conversations / total_videos if total_videos > 0 else 0
-        max_conversations = max(conversation_counts) if conversation_counts else 0
-        min_conversations = min(conversation_counts) if conversation_counts else 0
+#         # Add summary statistics
+#         total_videos = len(unique_videos)
+#         total_conversations = sum(conversation_counts)
+#         avg_conversations = total_conversations / total_videos if total_videos > 0 else 0
+#         max_conversations = max(conversation_counts) if conversation_counts else 0
+#         min_conversations = min(conversation_counts) if conversation_counts else 0
         
-        stats_text = f"""Dataset Summary:
-Total Videos: {total_videos}
-Total Conversations: {total_conversations}
-Avg Conversations/Video: {avg_conversations:.2f}
-Max Conversations/Video: {max_conversations}
-Min Conversations/Video: {min_conversations}"""
+#         stats_text = f"""Dataset Summary:
+# Total Videos: {total_videos}
+# Total Conversations: {total_conversations}
+# Avg Conversations/Video: {avg_conversations:.2f}
+# Max Conversations/Video: {max_conversations}
+# Min Conversations/Video: {min_conversations}"""
         
-        fig.text(0.02, 0.02, stats_text, fontsize=10, verticalalignment='bottom',
-                 bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+#         fig.text(0.02, 0.02, stats_text, fontsize=10, verticalalignment='bottom',
+#                  bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
         
-        plt.tight_layout()
+#         plt.tight_layout()
         
-        # Save the plot
-        output_path = os.path.join(Config.OUTPUT_DIR, f'initial_conversation_distribution_{self.data_source}.png')
-        plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
-        print(f"📊 Initial conversation distribution analysis saved to: {output_path}")
+#         # Save the plot
+#         output_path = os.path.join(Config.OUTPUT_DIR, f'initial_conversation_distribution_{self.data_source}.png')
+#         plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
+#         print(f"📊 Initial conversation distribution analysis saved to: {output_path}")
         
-        plt.show()
+#         plt.show()
         
-        return output_path
+#         return output_path
     
     def __len__(self):
         return len(self.conversations)
@@ -504,7 +501,7 @@ def defragment_gpu_memory():
         print(f"Warning: Memory defragmentation failed: {e}")
         return False
 
-def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR):
+def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create simplified memory usage visualization for all videos"""
     import matplotlib.pyplot as plt
     import os
@@ -549,7 +546,7 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR):
     plt.tight_layout()
     
     # Save the plot
-    output_path = os.path.join(output_dir, 'memory_usage_analysis.png')
+    output_path = os.path.join(output_dir, f'memory_usage_analysis_{data_source}.png')
     plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
     print(f"📊 Memory usage analysis saved to: {output_path}")
     
@@ -557,7 +554,7 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR):
     
     return output_path
 
-def create_frame_score_analysis(all_frame_scores_data, output_dir=Config.OUTPUT_DIR):
+def create_frame_score_analysis(all_frame_scores_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create frame score analysis visualization showing scores, threshold, and response triggers"""
     import matplotlib.pyplot as plt
     import numpy as np
@@ -672,7 +669,7 @@ def create_frame_score_analysis(all_frame_scores_data, output_dir=Config.OUTPUT_
     plt.tight_layout()
     
     # Save the plot
-    output_path = os.path.join(output_dir, 'frame_scores_analysis.png')
+    output_path = os.path.join(output_dir, f'frame_scores_analysis_{data_source}.png')
     plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
     print(f"📊 Frame score analysis saved to: {output_path}")
     
@@ -680,7 +677,7 @@ def create_frame_score_analysis(all_frame_scores_data, output_dir=Config.OUTPUT_
     
     return output_path
 
-def create_individual_conversation_timing_plots(conversation_timings, output_dir=Config.OUTPUT_DIR):
+def create_individual_conversation_timing_plots(conversation_timings, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create individual timing plots for each conversation with enhanced 3-plot layout"""
     os.makedirs(output_dir, exist_ok=True)
     
@@ -796,7 +793,7 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
                 ax3.set_title('Timing Components Over Time')
         
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'conversation_{conversation_number}_timing.png'), dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(output_dir, f'conversation_{conversation_number}_timing_{data_source}.png'), dpi=300, bbox_inches='tight')
         plt.close()
     
     print(f"📊 Individual conversation timing plots saved to {output_dir}/")
@@ -1114,8 +1111,8 @@ def process_query_response(model, tokenizer, device, query_text, video_time, pas
     
     return f"(Video Time = {video_time}s) User: {query_text}", f"(Video Time = {video_time}s) Assistant: {cleaned_response}"
 
-def process_goalstep_conversation(model, tokenizer, conversation_data, video_path, dataset, device):
-    """Process a single goalstep conversation with continuous frame-by-frame processing and response generation."""
+def process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, data_source='goalstep'):
+    """Process a single conversation with continuous frame-by-frame processing and response generation."""
     
     video_uid = conversation_data['video_uid']
     conversation_id = conversation_data['conversation_id']
@@ -1126,7 +1123,7 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
     original_conversation = conversation_data['original_conversation']
     timestamp_offset = conversation_data.get('timestamp_offset', 0.0)
     
-    print(f"📹 Processing conversation: {conversation_id}")
+    print(f"📹 Processing {data_source} conversation: {conversation_id}")
     print(f"📹 Video: {video_uid}")
     print(f"📹 Duration: {duration:.2f}s (from {start_time:.2f}s to {end_time:.2f}s)")
     print(f"📹 Conversation turns: {len(conversation)}")
@@ -1146,8 +1143,21 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
         print(f"Error loading video metadata: {e}")
         return None, None
     
-    # Extract user prompts and their normalized timestamps
-    user_prompts = [(turn['time'], turn['content']) for turn in conversation if turn['role'] == 'user']
+    # Handle different data sources
+    if data_source == 'goalstep':
+        # Extract user prompts and their normalized timestamps
+        user_prompts = [(turn['time'], turn['content']) for turn in conversation if turn['role'] == 'user']
+    else:  # narration
+        # For narration, we need to add a user prompt at the beginning
+        import random
+        if hasattr(dataset, 'instructions') and dataset.instructions:
+            instruction = random.choice(dataset.instructions)
+            user_prompt = instruction['content']
+        else:
+            user_prompt = "Please concisely narrate the video in real time."
+        
+        print(f"📝 Using instruction: {user_prompt}")
+        user_prompts = [(0.0, user_prompt)]  # Add at time 0.0
     
     # Create LiveInfer instance for continuous processing
     liveinfer = SimpleLiveInfer(model, tokenizer, device)
@@ -1175,7 +1185,7 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
     memory_based_limit = calculate_max_frames_for_memory()
     
     # Use conversation duration as the primary limit, but don't exceed video frames or memory
-    test_frames = min(num_frames, conversation_based_limit, memory_based_limit)
+    test_frames = min(num_frames, conversation_based_limit, memory_based_limit, Config.MAX_EVAL_FRAMES)
     
     # Print memory information
     memory_info = get_gpu_memory_info()
@@ -1259,7 +1269,7 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
                 'generation_time': generation_time,
                 'total_processing_time': frame_processing_time
             })
-
+            
             # Record response generation separately (like benchmark.py)
             if response:
                 response_time = video_time  # Use actual video time
@@ -1339,6 +1349,9 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
                 first_user_time = turn['time']
             break
     
+    # Calculate fluency score using shared function
+    fluency_score = calculate_fluency_score(generated_turns, original_conversation, data_source)
+    
     # Create result summary with all required keys
     result = {
         'conversation_id': conversation_id,
@@ -1350,7 +1363,7 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
         'ground_truth_conversation': ground_truth_conversation_original,  # Use original timestamps for visualization
         'first_user_time': first_user_time,  # Add first user time for normalization
         'lm_ppl': content_metrics.get('lm_ppl', 0.0) if content_metrics else 0.0,
-        'fluency': content_metrics.get('fluency', 0.0) if content_metrics else 0.0,
+        'fluency': fluency_score,  # Use actual calculated fluency with temporal alignment
         'ppl_data': content_metrics.get('ppl_data', {}) if content_metrics else {},  # Include PPL data for visualization
         'total_tokens': 0,  # Placeholder
         'visual_embedding_time': visual_embedding_time,
@@ -1398,22 +1411,6 @@ def process_goalstep_conversation(model, tokenizer, conversation_data, video_pat
     
     # Sort by time
     timeline_events.sort(key=lambda x: x['time'])
-    
-    # Calculate and print fluency details
-    total_turns = len(generated_turns)
-    successful_responses = 0
-    for turn in generated_turns:
-        response_text = turn.get('text', turn.get('content', ''))
-        if response_text and len(response_text.split()) >= 2:  # At least 2 words
-            successful_responses += 1
-    
-    fluency_score = successful_responses / total_turns if total_turns > 0 else 0.0
-    fluency_score = max(0.0, min(1.0, fluency_score))  # Clamp to [0, 1]
-    
-    print(f"\n📊 FLUENCY CALCULATION:")
-    print(f"   • Total Generated Responses: {total_turns}")
-    print(f"   • Successful Responses (≥2 words): {successful_responses}")
-    print(f"   • Fluency Score: {fluency_score:.3f} ({successful_responses}/{total_turns})")
     
     # Display summary only
     print(f"\n📊 CONVERSATION SUMMARY:")
@@ -1507,7 +1504,7 @@ def process_goalstep_video(model, tokenizer, video_uid, video_path, dataset, dev
     memory_based_limit = calculate_max_frames_for_memory()
     
     # Use conversation duration as the primary limit, but don't exceed video frames or memory
-    test_frames = min(num_frames, conversation_based_limit, memory_based_limit)
+    test_frames = min(num_frames, conversation_based_limit, memory_based_limit, Config.MAX_EVAL_FRAMES)
     
     # Print memory information
     memory_info = get_gpu_memory_info()
@@ -1672,7 +1669,7 @@ def process_goalstep_video(model, tokenizer, video_uid, video_path, dataset, dev
         'ground_truth_conversation': ground_truth_conversation_original,  # Use original timestamps for visualization
         'first_user_time': first_user_time,  # Add first user time for normalization
         'lm_ppl': content_metrics.get('lm_ppl', 0.0) if content_metrics else 0.0,
-        'fluency': content_metrics.get('fluency', 0.0) if content_metrics else 0.0,
+        'fluency': fluency_score,  # Use actual calculated fluency with temporal alignment
             'ppl_data': content_metrics.get('ppl_data', {}) if content_metrics else {},  # Include PPL data for visualization
         'total_tokens': 0,  # Placeholder
         'visual_embedding_time': visual_embedding_time,
@@ -1719,251 +1716,126 @@ def process_goalstep_video(model, tokenizer, video_uid, video_path, dataset, dev
     # Sort by time
     timeline_events.sort(key=lambda x: x['time'])
     
-    # Calculate and print fluency details
+    # Calculate and print fluency details with temporal alignment
     total_turns = len(generated_turns)
+    total_gt_turns = len([t for t in original_conversation if t['role'] == 'assistant'])
+    
+    # Get GT response times and normalize them to start from 0s (when user prompt is given)
+    first_user_time = None
+    for turn in original_conversation:
+        if turn['role'] == 'user':
+            if first_user_time is None:
+                first_user_time = turn['time']
+                break
+    
+    # Fallback: if no user prompt found, use the first assistant response time as reference
+    if first_user_time is None:
+        assistant_times = [t['time'] for t in original_conversation if t['role'] == 'assistant']
+        first_user_time = min(assistant_times) if assistant_times else 0.0
+    
+    # Normalize GT response times to start from 0s
+    gt_response_times = [t['time'] - first_user_time for t in original_conversation if t['role'] == 'assistant']
+    generated_response_times = [t['time'] for t in generated_turns]
+    
+    # Temporal alignment threshold (in seconds) - more lenient alignment
+    temporal_threshold = 1.0  # Allow 1.0 seconds tolerance
+    
+    # Count successful responses that align temporally with GT responses (one-to-one mapping)
     successful_responses = 0
-    for turn in generated_turns:
-        response_text = turn.get('text', turn.get('content', ''))
-        if response_text and len(response_text.split()) >= 2:  # At least 2 words
-            successful_responses += 1
+    aligned_pairs = []
+    used_gt_times = set()  # Track which GT times have been used
     
-    fluency_score = successful_responses / total_turns if total_turns > 0 else 0.0
-    fluency_score = max(0.0, min(1.0, fluency_score))  # Clamp to [0, 1]
-    
-    print(f"\n📊 FLUENCY CALCULATION:")
-    print(f"   • Total Generated Responses: {total_turns}")
-    print(f"   • Successful Responses (≥2 words): {successful_responses}")
-    print(f"   • Fluency Score: {fluency_score:.3f} ({successful_responses}/{total_turns})")
-    
-    # Display summary only
-    print(f"\n📊 CONVERSATION SUMMARY:")
-    print(f"   Total events: {len(timeline_events)} (Generated: {len(generated_turns)}, Ground Truth: {len([t for t in normalized_conversation if t['role'] == 'assistant'])})")
-    print(f"   User prompts: {len([t for t in normalized_conversation if t['role'] == 'user'])}")
-    
-    # Clean up memory more aggressively
-    liveinfer.reset()  # Reset internal state
-    del liveinfer
-    
-    # Force garbage collection and memory cleanup
-    import gc
-    gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()  # Ensure all operations complete
-    
-    # Print memory status after cleanup
-    memory_info = get_gpu_memory_info()
-    if memory_info:
-        print_memory_status("🧹", "Memory after cleanup")
-    
-    return result, memory_data
-
-def process_narration_conversation(model, tokenizer, conversation_data, video_path, dataset, device):
-    """Process a single narration conversation with continuous frame-by-frame processing and response generation."""
-    
-    video_uid = conversation_data['video_uid']
-    conversation_id = conversation_data['conversation_id']
-    conversation = conversation_data['conversation']
-    start_time = conversation_data['start_time']
-    end_time = conversation_data['end_time']
-    duration = conversation_data['duration']
-    original_conversation = conversation_data['original_conversation']
-    
-    print(f"📹 Processing narration conversation: {conversation_id}")
-    print(f"📹 Video: {video_uid}")
-    print(f"📹 Duration: {duration:.2f}s (from {start_time:.2f}s to {end_time:.2f}s)")
-    print(f"📹 Conversation turns: {len(conversation)}")
-    
-    # Get video metadata without loading the entire video
-    from torchvision.io import read_video
-    try:
-        # Load only metadata first
-        video_reader = read_video(video_path, pts_unit='sec', output_format='TCHW')
-        num_frames = video_reader[0].size(0)
-        video_duration = num_frames / Config.FRAME_FPS
-        print(f"Video metadata: {num_frames} frames, {video_duration:.2f}s duration")
+    for gen_time in generated_response_times:
+        # Find the closest unused GT response time
+        available_gt_times = [t for t in gt_response_times if t not in used_gt_times]
+        if not available_gt_times:
+            break  # No more GT responses available for mapping
+            
+        closest_gt_time = min(available_gt_times, key=lambda x: abs(x - gen_time))
+        time_diff = abs(gen_time - closest_gt_time)
         
-        # Don't load the entire video tensor - we'll load frames on-demand
-        video_tensor = None
-    except Exception as e:
-        print(f"Error loading video metadata: {e}")
-        return None, None
-    
-    # For narration, we need to add a user prompt at the beginning
-    # Select a random instruction from the dataset
-    import random
-    if hasattr(dataset, 'instructions') and dataset.instructions:
-        instruction = random.choice(dataset.instructions)
-        user_prompt = instruction['content']
-    else:
-        user_prompt = "Please concisely narrate the video in real time."
-    
-    print(f"📝 Using instruction: {user_prompt}")
-    
-    # Create LiveInfer instance for continuous processing
-    liveinfer = SimpleLiveInfer(model, tokenizer, device)
-    liveinfer.load_video(video_path)
-    
-    # Add the user prompt at the beginning of the conversation
-    liveinfer.input_query_stream(user_prompt, video_time=0.0)
-    
-    # Process frames continuously with timing measurements
-    total_visual_embedding_time = 0.0
-    total_model_forward_time = 0.0
-    total_generation_time = 0.0
-    frame_processing_times = []
-    # Store per-frame component timing data for visualization
-    frame_timing_data = []  # List of dicts with per-frame timing components
-    generated_turns = []
-    frame_scores_data = None  # Will store frame_token_interval_score data
-    
-    # Calculate frame range based on conversation duration
-    conversation_based_limit = int(duration * 2) + 50  # 2fps + buffer
-    print(f"📊 Using conversation duration {duration:.1f}s for conversation {conversation_id}")
-    
-    # Calculate dynamic frame limit based on available memory
-    memory_based_limit = calculate_max_frames_for_memory()
-    
-    # Use conversation duration as the primary limit, but don't exceed video frames or memory
-    test_frames = min(num_frames, conversation_based_limit, memory_based_limit)
-    
-    # Print memory information
-    memory_info = get_gpu_memory_info()
-    if memory_info:
-        print_memory_status()
-        print(f"📊 Memory-based frame limit: {memory_based_limit}")
-    
-    print(f"🔄 Processing {test_frames} frames continuously...")
-    
-    # Track initial memory for growth analysis
-    initial_memory = get_gpu_memory()
-    
-    # Collect memory data for visualization
-    memory_data = {
-        'frames': [],
-        'memory_usage': [],
-        'memory_growth': [],
-        'memory_per_frame': []
-    }
-    
-    # Collect frame score data for visualization
-    frame_scores_data = {
-        'frame_scores': [],
-        'frame_times': [],
-        'threshold': 0.0,
-        'response_triggers': [],
-        'response_times': []
-    }
-    
-    for frame_idx in range(test_frames):
-        video_time = frame_idx / Config.FRAME_FPS  # Convert frame index to time
-        
-        # Monitor memory usage at regular intervals
-        if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
-            current_memory = get_gpu_memory()
-            memory_growth = current_memory - initial_memory
-            memory_per_frame = memory_growth / max(1, frame_idx) if frame_idx > 0 else 0
-            
-            # Store data for visualization
-            memory_data['frames'].append(frame_idx)
-            memory_data['memory_usage'].append(current_memory)
-            memory_data['memory_growth'].append(memory_growth)
-            memory_data['memory_per_frame'].append(memory_per_frame)
-        
-        # Dynamic frame limit adjustment based on actual memory growth
-        if frame_idx > 100:  # After 100 frames, we have good data
-            remaining_memory = 24000 - current_memory  # Assume 24GB total
-    
-        # Measure total frame processing time (RGB to processed)
-        frame_start_time = time.time()
-        
-        try:
-            # Process the frame with detailed timing (like benchmark.py)
-            liveinfer.input_video_stream(video_time)
-            query, response = liveinfer()
-            
-            frame_processing_time = time.time() - frame_start_time
-            
-            # Get detailed timing data
-            timing_data = liveinfer.get_timing_data()
-            
-            # Extract detailed metrics (like benchmark.py)
-            visual_embedding_time = timing_data.get('visual_embedding_time', 0.0)
-            streaming_time = timing_data.get('streaming_time', 0.0)  # This is model forward time
-            generation_time = timing_data.get('generation_time', 0.0)
-            
-            # Accumulate timing data
-            total_visual_embedding_time += visual_embedding_time
-            total_model_forward_time += streaming_time  # Use streaming_time as model forward time
-            total_generation_time += generation_time
-            
-            # Store per-frame processing time
-            frame_processing_times.append(frame_processing_time)
-
-            # Store per-frame component timing data for visualization
-            frame_timing_data.append({
-                'frame_idx': frame_idx,
-                'video_time': video_time,
-                'visual_embedding_time': visual_embedding_time,
-                'model_forward_time': streaming_time,
-                'generation_time': generation_time,
-                'total_processing_time': frame_processing_time
-            })
-
-            # Record response generation separately (like benchmark.py)
-            if response:
-                response_time = video_time  # Use actual video time
-                generated_turns.append({
-                    'time': response_time,
-                    'text': response,
-                    'user_prompt': query or user_prompt,
-                    'generation_time': generation_time
-                })
-            
-            # Record conversation if there's a query or response (like benchmark.py)
-            if query or response:
-                print(f"[{video_time:.2f}s] Query: {query}")
-                print(f"[{video_time:.2f}s] Response: {response}")
-                if generation_time > 0:
-                    print(f"  └─ Generation time: {generation_time:.3f}s")
-                
-        except Exception as e:
-            print(f"❌ Error processing frame {frame_idx} at time {video_time:.2f}s: {e}")
-            import traceback
-            traceback.print_exc()
-            # Continue processing other frames
-            frame_processing_time = time.time() - frame_start_time
-            frame_processing_times.append(frame_processing_time)
-    
-    # Collect frame scores data after processing
-    frame_scores_data = liveinfer.get_frame_scores()
-    
-    # Calculate the correct total processing time
-    total_frame_processing_time = sum(frame_processing_times)
-    total_processing_time = total_frame_processing_time
-    
-    # Calculate overhead time (time not captured in individual components)
-    total_measured_components = total_visual_embedding_time + total_model_forward_time + total_generation_time
-    overhead_time = total_frame_processing_time - total_measured_components
-    
-    visual_embedding_time = total_visual_embedding_time
-    model_forward_time = total_model_forward_time
-    generation_time = total_generation_time
-    num_processed_frames = len(frame_processing_times)
-    
-    # Print detailed timing metrics for verification
-    print(f"🔍 NARRATION TIMING METRICS FOR CONVERSATION {conversation_id[:8]}...:")
-    print(f"   • Conversation duration: {duration:.2f}s")
-    print(f"   • Frames processed: {num_processed_frames}")
-    print(f"   • Generated responses: {len(generated_turns)}")
-    print_timing_metrics(visual_embedding_time, model_forward_time, generation_time, num_processed_frames, len(generated_turns))
-    print(f"   • Total processing time: {total_processing_time:.3f}s")
-    print(f"   • Timing breakdown: Visual={visual_embedding_time/total_processing_time*100:.1f}%, Model={model_forward_time/total_processing_time*100:.1f}%, Generation={generation_time/total_processing_time*100:.1f}%")
-    print("-" * 60)
+        if time_diff <= temporal_threshold:
+            # Check if response has reasonable content (≥2 words)
+            gen_turn = next((t for t in generated_turns if t['time'] == gen_time), None)
+            if gen_turn:
+                response_text = gen_turn.get('text', gen_turn.get('content', ''))
+                if response_text and len(response_text.split()) >= 2:
+                    successful_responses += 1
+    # print(f"   • Total processing time: {total_processing_time:.3f}s")
+    # print(f"   • Timing breakdown: Visual={visual_embedding_time/total_processing_time*100:.1f}%, Model={model_forward_time/total_processing_time*100:.1f}%, Generation={generation_time/total_processing_time*100:.1f}%")
+    # print("-" * 60)
     
     # Calculate content-based metrics using model evaluation
     content_metrics = calculate_metrics_like_benchmark(
         model, tokenizer, liveinfer.video_tensor, conversation, generated_turns, device, original_conversation, 'narration'
     )
+    
+    # Calculate and print fluency details with temporal alignment
+    total_turns = len(generated_turns)
+    total_gt_turns = len([t for t in original_conversation if t['role'] == 'assistant'])
+    
+    # Get GT response times and normalize them to start from 0s (when user prompt is given)
+    first_user_time_fluency = None
+    for turn in original_conversation:
+        if turn['role'] == 'user':
+            if first_user_time_fluency is None:
+                first_user_time_fluency = turn['time']
+                break
+    
+    # Fallback: if no user prompt found, use the first assistant response time as reference
+    if first_user_time_fluency is None:
+        assistant_times = [t['time'] for t in original_conversation if t['role'] == 'assistant']
+        first_user_time_fluency = min(assistant_times) if assistant_times else 0.0
+    
+    # Normalize GT response times to start from 0s
+    gt_response_times = [t['time'] - first_user_time_fluency for t in original_conversation if t['role'] == 'assistant']
+    generated_response_times = [t['time'] for t in generated_turns]
+    
+    # Temporal alignment threshold (in seconds) - more lenient alignment
+    temporal_threshold = 1.0  # Allow 1.0 seconds tolerance
+    
+    # Count successful responses that align temporally with GT responses (one-to-one mapping)
+    successful_responses = 0
+    aligned_pairs = []
+    used_gt_times = set()  # Track which GT times have been used
+    
+    for gen_time in generated_response_times:
+        # Find the closest unused GT response time
+        available_gt_times = [t for t in gt_response_times if t not in used_gt_times]
+        if not available_gt_times:
+            break  # No more GT responses available for mapping
+            
+        closest_gt_time = min(available_gt_times, key=lambda x: abs(x - gen_time))
+        time_diff = abs(gen_time - closest_gt_time)
+        
+        if time_diff <= temporal_threshold:
+            # Check if response has reasonable content (≥2 words)
+            gen_turn = next((t for t in generated_turns if t['time'] == gen_time), None)
+            if gen_turn:
+                response_text = gen_turn.get('text', gen_turn.get('content', ''))
+                if response_text and len(response_text.split()) >= 2:
+                    successful_responses += 1
+                    aligned_pairs.append((gen_time, closest_gt_time, time_diff))
+                    used_gt_times.add(closest_gt_time)  # Mark this GT time as used
+    
+    fluency_score = successful_responses / total_gt_turns if total_gt_turns > 0 else 0.0
+    fluency_score = max(0.0, min(1.0, fluency_score))  # Clamp to [0, 1]
+    
+    print(f"\n📊 FLUENCY CALCULATION (Temporal Alignment):")
+    print(f"   • Total Generated Responses: {total_turns}")
+    print(f"   • Total GT Responses: {total_gt_turns}")
+    print(f"   • Temporally Aligned Responses (≤{temporal_threshold}s): {successful_responses}")
+    print(f"   • Fluency Score: {fluency_score:.3f} ({successful_responses}/{total_gt_turns})")
+    
+    # Debug: Print first few aligned pairs
+    if aligned_pairs:
+        print(f"   • Sample Aligned Pairs (Gen Time → GT Time, Diff):")
+        for i, (gen_time, gt_time, diff) in enumerate(aligned_pairs[:5]):
+            print(f"     {i+1}. {gen_time:.1f}s → {gt_time:.1f}s (diff: {diff:.1f}s)")
+    
+    # Debug: Print GT and generated times (normalized)
+    print(f"   • GT Response Times (normalized): {[f'{t:.1f}s' for t in gt_response_times[:10]]}")
+    print(f"   • Generated Response Times: {[f'{t:.1f}s' for t in generated_response_times[:10]]}")
     
     # Create result summary with all required keys
     result = {
@@ -1975,7 +1847,7 @@ def process_narration_conversation(model, tokenizer, conversation_data, video_pa
         'generated_responses': generated_turns,  # Use generated turns as is
         'ground_truth_conversation': original_conversation,  # Use original conversation
         'lm_ppl': content_metrics.get('lm_ppl', 0.0) if content_metrics else 0.0,
-        'fluency': content_metrics.get('fluency', 0.0) if content_metrics else 0.0,
+        'fluency': fluency_score,  # Use actual calculated fluency with temporal alignment
         'ppl_data': content_metrics.get('ppl_data', {}) if content_metrics else {},  # Include PPL data for visualization
         'total_tokens': 0,  # Placeholder
         'visual_embedding_time': visual_embedding_time,
@@ -2021,22 +1893,6 @@ def process_narration_conversation(model, tokenizer, conversation_data, video_pa
     # Sort by time
     timeline_events.sort(key=lambda x: x['time'])
     
-    # Calculate and print fluency details
-    total_turns = len(generated_turns)
-    successful_responses = 0
-    for turn in generated_turns:
-        response_text = turn.get('text', turn.get('content', ''))
-        if response_text and len(response_text.split()) >= 2:  # At least 2 words
-            successful_responses += 1
-    
-    fluency_score = successful_responses / total_turns if total_turns > 0 else 0.0
-    fluency_score = max(0.0, min(1.0, fluency_score))  # Clamp to [0, 1]
-    
-    print(f"\n📊 FLUENCY CALCULATION:")
-    print(f"   • Total Generated Responses: {total_turns}")
-    print(f"   • Successful Responses (≥2 words): {successful_responses}")
-    print(f"   • Fluency Score: {fluency_score:.3f} ({successful_responses}/{total_turns})")
-    
     # Display summary only
     print(f"\n📊 CONVERSATION SUMMARY:")
     print(f"   Total events: {len(timeline_events)} (Generated: {len(generated_turns)}, Ground Truth: {len([t for t in original_conversation if t['role'] == 'assistant'])})")
@@ -2059,7 +1915,15 @@ def process_narration_conversation(model, tokenizer, conversation_data, video_pa
     
     return result, memory_data
 
-def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', num_conversations=3, random_selection=False, specific_indices=None):
+def process_goalstep_conversation(model, tokenizer, conversation_data, video_path, dataset, device):
+    """Wrapper for goalstep conversation processing."""
+    return process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, 'goalstep')
+
+def process_narration_conversation(model, tokenizer, conversation_data, video_path, dataset, device):
+    """Wrapper for narration conversation processing."""
+    return process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, 'narration')
+
+def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', num_conversations=3, random_selection=False, specific_indices=None, data_source='goalstep'):
     """Evaluate multiple conversations using streaming approach - one frame at a time."""
     
     results = []
@@ -2085,11 +1949,11 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         
         # Defragment memory between conversations (except first conversation)
         if i > 0:
-            print("🧹 Defragmenting GPU memory...")
+            # print("🧹 Defragmenting GPU memory...")
             defragment_gpu_memory()
-            memory_info = get_gpu_memory_info()
-            if memory_info:
-                print_memory_status("💾", "Memory after defragmentation")
+            # memory_info = get_gpu_memory_info()
+            # if memory_info:
+            #     print_memory_status("💾", "Memory after defragmentation")
         
         # Get conversation data
         if conversation_idx < len(dataset.conversations):
@@ -2135,12 +1999,12 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
     # Create comprehensive memory visualization
     if all_memory_data:
         print("\n📊 Creating memory usage analysis...")
-        create_memory_visualization(all_memory_data)
+        create_memory_visualization(all_memory_data, data_source=data_source)
     
     # Create frame score analysis visualization
     if all_frame_scores_data:
         print("\n📊 Creating frame score analysis...")
-        create_frame_score_analysis(all_frame_scores_data)
+        create_frame_score_analysis(all_frame_scores_data, data_source=data_source)
     
     return results
 
@@ -2236,9 +2100,9 @@ class SimpleLiveInfer:
                     
                     # Immediately release GPU frame to free memory
                     del gpu_frame
-                    torch.cuda.empty_cache()
-                else:
-                    print(f"Warning: Video tensor not loaded")
+            torch.cuda.empty_cache()
+        else:
+            print(f"Warning: Video tensor not loaded")
                 
         visual_embedding_time = time.time() - visual_start
         
@@ -2309,13 +2173,26 @@ class SimpleLiveInfer:
             # Query-based response - track as 'query' trigger
             self.response_triggers.append('query')
             self.response_times.append(video_time)
+            # Store the current query for context reconstruction
+            self._current_query = query
             self.last_ids = self.tokenizer.apply_chat_template([{'role': 'user', 'content': query}], add_stream_query_prompt=True, add_generation_prompt=True, return_tensors='pt').to(self.device)
         else:
             # Frame-based response - track as 'frame' trigger
             self.response_triggers.append('frame')
             self.response_times.append(video_time)
+            # Clear current query for frame-triggered responses
+            self._current_query = None
             # Use the stream generation prompt for continuous generation
             self.last_ids = self._added_stream_generation_ids
+        
+        # DEBUG: Print context information for PPL calculation
+        context_info = self._get_context_info()
+        print(f"📊 CONTEXT FOR GENERATION (Time: {video_time}s):")
+        print(f"   • Streamed frames processed: {context_info['num_frames']}")
+        print(f"   • User prompts in history: {context_info['num_prompts']}")
+        print(f"   • Previous responses: {context_info['num_responses']}")
+        print(f"   • Total tokens in past_key_values: {context_info['total_tokens']}")
+        
         inputs_embeds = self.model.get_input_embeddings()(self.last_ids)
         output_ids, self.past_key_values = fast_greedy_generate(model=self.model, inputs_embeds=inputs_embeds, past_key_values=self.past_key_values, eos_token_id=self.eos_token_id, inplace_output_ids=self.inplace_output_ids)
         self.last_ids = output_ids[:, -1:]
@@ -2325,10 +2202,33 @@ class SimpleLiveInfer:
         # Store the actual generation time
         self.timing_data['generation_time'] = generation_time
         
+        # Note: Dual PPL calculation is now done during evaluation phase
+        # using all GT responses with proper context reconstruction
+        
         if query:
             query = f'(Video Time = {video_time}s) User: {query}'
         response = f'(Video Time = {video_time}s) Assistant:{self.tokenizer.decode(output_ids[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)}'
         return query, response
+    
+    def _get_context_info(self):
+        """Get context information for debugging."""
+        context_info = {
+            'num_frames': len(self.frame_embeds_queue) + (self.last_frame_idx + 1 if hasattr(self, 'last_frame_idx') else 0),
+            'num_prompts': len([r for r in self.response_triggers if r == 'query']),
+            'num_responses': len(self.response_triggers),
+            'total_tokens': 0
+        }
+        
+        # Estimate total tokens in past_key_values
+        if self.past_key_values is not None:
+            for layer in self.past_key_values:
+                if layer is not None and len(layer) >= 2:
+                    key_tensor = layer[0]
+                    if key_tensor is not None:
+                        context_info['total_tokens'] += key_tensor.shape[-2]  # sequence length
+        
+        return context_info
+    
     
     def _call_for_streaming(self):
         while self.frame_embeds_queue:
@@ -2415,174 +2315,6 @@ class SimpleLiveInfer:
             'response_times': self.response_times.copy()
         }
 
-# Analysis functions moved to video_analysis.py
-
-def create_ppl_analysis_visualization(results, output_dir="timing_plots"):
-    """Create comprehensive PPL analysis visualizations."""
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import os
-    
-    # Ensure output directory exists
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Extract PPL data from results
-    video_ppls = {}
-    all_gt_ppls = []
-    all_corresponding_gt_ppls = []
-    
-    for i, result in enumerate(results):
-        video_id = f"Video_{i+1}"
-        if 'ppl_data' in result:
-            ppl_data = result['ppl_data']
-            video_ppls[video_id] = {
-                'gt_ppls': ppl_data.get('gt_ppls', []),
-                'corresponding_gt_ppls': ppl_data.get('corresponding_gt_ppls', []),
-                'generated_responses': ppl_data.get('generated_responses', 0),
-                'total_gt_responses': ppl_data.get('total_gt_responses', 0)
-            }
-            all_gt_ppls.extend(ppl_data.get('gt_ppls', []))
-            all_corresponding_gt_ppls.extend(ppl_data.get('corresponding_gt_ppls', []))
-    
-    if not video_ppls:
-        print("⚠️ No PPL data found in results")
-        return
-    
-    # Create comprehensive PPL analysis figure
-    fig = plt.figure(figsize=(20, 12))
-    
-    # 1. PPL Distribution by Video
-    ax1 = plt.subplot(2, 3, 1)
-    video_names = list(video_ppls.keys())
-    video_avg_ppls = [np.mean(data['gt_ppls']) if data['gt_ppls'] else 0 for data in video_ppls.values()]
-    video_corresponding_avg_ppls = [np.mean(data['corresponding_gt_ppls']) if data['corresponding_gt_ppls'] else 0 for data in video_ppls.values()]
-    
-    x = np.arange(len(video_names))
-    width = 0.35
-    
-    bars1 = ax1.bar(x - width/2, video_avg_ppls, width, label='All GT Responses', alpha=0.8, color='skyblue')
-    bars2 = ax1.bar(x + width/2, video_corresponding_avg_ppls, width, label='Corresponding GT Responses', alpha=0.8, color='lightcoral')
-    
-    ax1.set_xlabel('Video')
-    ax1.set_ylabel('Average PPL')
-    ax1.set_title('Average PPL by Video')
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(video_names, rotation=45)
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # 2. Overall PPL Distribution
-    ax2 = plt.subplot(2, 3, 2)
-    ax2.hist(all_gt_ppls, bins=30, alpha=0.7, label='All GT Responses', color='skyblue', edgecolor='black')
-    ax2.hist(all_corresponding_gt_ppls, bins=30, alpha=0.7, label='Corresponding GT Responses', color='lightcoral', edgecolor='black')
-    ax2.set_xlabel('PPL')
-    ax2.set_ylabel('Frequency')
-    ax2.set_title('Overall PPL Distribution')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    # 3. PPL vs Response Count
-    ax3 = plt.subplot(2, 3, 3)
-    generated_counts = [data['generated_responses'] for data in video_ppls.values()]
-    avg_ppls = [np.mean(data['gt_ppls']) if data['gt_ppls'] else 0 for data in video_ppls.values()]
-    
-    scatter = ax3.scatter(generated_counts, avg_ppls, alpha=0.7, s=100, color='green')
-    ax3.set_xlabel('Generated Responses')
-    ax3.set_ylabel('Average PPL')
-    ax3.set_title('PPL vs Generated Response Count')
-    ax3.grid(True, alpha=0.3)
-    
-    # 4. Box plot of PPL by video
-    ax4 = plt.subplot(2, 3, 4)
-    ppl_data_by_video = [data['gt_ppls'] for data in video_ppls.values() if data['gt_ppls']]
-    video_labels = [name for name, data in video_ppls.items() if data['gt_ppls']]
-    
-    if ppl_data_by_video:
-        bp = ax4.boxplot(ppl_data_by_video, labels=video_labels, patch_artist=True)
-        for patch in bp['boxes']:
-            patch.set_facecolor('lightblue')
-        ax4.set_xlabel('Video')
-        ax4.set_ylabel('PPL')
-        ax4.set_title('PPL Distribution by Video')
-        ax4.tick_params(axis='x', rotation=45)
-        ax4.grid(True, alpha=0.3)
-    
-    # 5. Response Count Statistics
-    ax5 = plt.subplot(2, 3, 5)
-    response_counts = [data['generated_responses'] for data in video_ppls.values()]
-    gt_counts = [data['total_gt_responses'] for data in video_ppls.values()]
-    
-    x = np.arange(len(video_names))
-    width = 0.35
-    
-    bars1 = ax5.bar(x - width/2, response_counts, width, label='Generated', alpha=0.8, color='orange')
-    bars2 = ax5.bar(x + width/2, gt_counts, width, label='Ground Truth', alpha=0.8, color='purple')
-    
-    ax5.set_xlabel('Video')
-    ax5.set_ylabel('Response Count')
-    ax5.set_title('Response Count by Video')
-    ax5.set_xticks(x)
-    ax5.set_xticklabels(video_names, rotation=45)
-    ax5.legend()
-    ax5.grid(True, alpha=0.3)
-    
-    # 6. Summary Statistics
-    ax6 = plt.subplot(2, 3, 6)
-    ax6.axis('off')
-    
-    stats_text = f"""
-    PPL Analysis Summary:
-    
-    Total Videos: {len(video_ppls)}
-    Total GT Responses: {len(all_gt_ppls)}
-    Total Corresponding GT: {len(all_corresponding_gt_ppls)}
-    
-    Average PPL:
-    • All GT: {np.mean(all_gt_ppls):.3f}
-    • Corresponding GT: {np.mean(all_corresponding_gt_ppls):.3f}
-    
-    PPL Range:
-    • Min: {np.min(all_gt_ppls):.3f}
-    • Max: {np.max(all_gt_ppls):.3f}
-    • Std: {np.std(all_gt_ppls):.3f}
-    
-    Generated Responses:
-    • Total: {sum(response_counts)}
-    • Avg per Video: {np.mean(response_counts):.1f}
-    """
-    
-    ax6.text(0.1, 0.9, stats_text, transform=ax6.transAxes, fontsize=10,
-             verticalalignment='top', fontfamily='monospace',
-             bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
-    
-    plt.tight_layout()
-    
-    # Save comprehensive analysis
-    output_path = os.path.join(output_dir, 'ppl_analysis_comprehensive.png')
-    plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
-    print(f"📊 Comprehensive PPL analysis saved to: {output_path}")
-    
-    # Create simple comparison plot
-    fig2, ax = plt.subplots(1, 1, figsize=(10, 6))
-    
-    if all_gt_ppls and all_corresponding_gt_ppls:
-        ax.hist(all_gt_ppls, bins=30, alpha=0.7, label='All GT Responses', color='skyblue', density=True)
-        ax.hist(all_corresponding_gt_ppls, bins=30, alpha=0.7, label='Corresponding GT Responses', color='lightcoral', density=True)
-        ax.set_xlabel('PPL')
-        ax.set_ylabel('Density')
-        ax.set_title('PPL Distribution Comparison')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    # Save comparison plot
-    comparison_path = os.path.join(output_dir, 'ppl_comparison.png')
-    plt.savefig(comparison_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
-    print(f"📊 PPL comparison plot saved to: {comparison_path}")
-    
-    plt.close()
-    plt.close()
 
 def main():
     import sys
@@ -2641,18 +2373,20 @@ def main():
     
     print(f"📊 Dataset loaded: {len(dataset)} conversation turn(s) from validation set")
     
-    # Create ground truth word count analysis
-    print(f"\n📊 Creating ground truth word count analysis...")
-    create_gt_word_count_analysis(data_source)
+    # Create ground truth word count analysis (skipped for speed)
+    # print(f"\n📊 Creating ground truth word count analysis...")
+    # create_gt_word_count_analysis(data_source)
     
     print("-" * 50)
     
     # Evaluate more conversations for better coverage
     try:
-        print(f"💬 Processing 3 conversations for PPL analysis...")
+        # Use 3 videos for testing
+        num_videos = 3
+        print(f"💬 Processing {num_videos} conversation{'s' if num_videos > 1 else ''} for PPL analysis...")
         import random
         random.seed(42)  # For reproducibility
-        results = streaming_evaluate_conversations(model, tokenizer, dataset, device, num_conversations=3, random_selection=True)
+        results = streaming_evaluate_conversations(model, tokenizer, dataset, device, num_conversations=num_videos, random_selection=True, data_source=data_source)
         print("\n" + "=" * 60)
         print("📊 EVALUATION RESULTS")
         print("=" * 60)
@@ -2662,10 +2396,53 @@ def main():
         avg_fluency = sum(r['fluency'] for r in results) / len(results)
         avg_responses_per_video = sum(len(r['generated_turns']) for r in results) / len(results)
         
+        # Calculate time diff metric: average latency per generated response
+        # Sum the actual timing components for each response
+        total_generated_responses = sum(len(r['generated_turns']) for r in results)
+        if total_generated_responses > 0:
+            response_timings = []
+            
+            for r in results:
+                if len(r['generated_turns']) > 0:  # Only consider conversations with responses
+                    generated_turns = r['generated_turns']
+                    num_responses = len(generated_turns)
+                    
+                    if num_responses > 0:
+                        # Get the total timing for this conversation
+                        visual_time = r.get('visual_embedding_time', 0)
+                        model_time = r.get('model_forward_time', 0)
+                        generation_time = r.get('generation_time', 0)
+                        num_frames = r.get('num_frames', 1)
+                        
+                        # For each response, the latency is:
+                        # - Visual time: total visual time / number of frames (per frame) 
+                        # - Model time: total model time / number of frames (per frame)
+                        # - Generation time: total generation time / number of responses (per response)
+                        
+                        visual_per_frame = visual_time / num_frames if num_frames > 0 else 0
+                        model_per_frame = model_time / num_frames if num_frames > 0 else 0
+                        generation_per_response = generation_time / num_responses if num_responses > 0 else 0
+                        
+                        # Total latency per response = visual + model + generation
+                        response_latency = visual_per_frame + model_per_frame + generation_per_response
+                        response_timings.append(response_latency)
+                        
+                        print(f"   📊 Response {len(response_timings)}: latency = {response_latency:.3f}s (vis={visual_per_frame:.3f}s + model={model_per_frame:.3f}s + gen={generation_per_response:.3f}s)")
+                        print(f"       Breakdown: {num_frames} frames, {num_responses} responses")
+            
+            if response_timings:
+                avg_time_diff = sum(response_timings) / len(response_timings)
+                print(f"   📊 Individual response latencies: {[f'{t:.3f}s' for t in response_timings]}")
+            else:
+                avg_time_diff = 0.0
+        else:
+            avg_time_diff = 0.0
+        
         print(f"\n🎯 AGGREGATE METRICS:")
         print(f"   • Average Perplexity: {avg_ppl:.3f}")
         print(f"   • Average Fluency: {avg_fluency:.3f}")
         print(f"   • Average Responses per Video: {avg_responses_per_video:.1f}")
+        print(f"   • Average Time Diff (latency per response): {avg_time_diff:.3f}s")
         
         
         print(f"\n🎯 PERFORMANCE SUMMARY:")
@@ -2680,19 +2457,22 @@ def main():
         
         if conversation_timings:
             # Create individual conversation timing plots
-            create_individual_conversation_timing_plots(conversation_timings)
+            create_individual_conversation_timing_plots(conversation_timings, data_source=data_source)
         
         # Create PPL analysis visualization
-        print(f"\n📊 Creating comprehensive PPL analysis...")
-        create_ppl_analysis_visualization(results)
+        print(f"\n📊 Creating dual PPL analysis...")
+        create_dual_ppl_frame_visualization(results, data_source=data_source)
         
-        # Create time per token analysis
-        print(f"\n📊 Creating time per token analysis...")
-        create_time_per_token_analysis(results)
+        # Create PPL over time visualization for different videos
+        create_ppl_over_time_visualization(results, data_source=data_source)
         
-        # Create generated word count analysis
-        print(f"\n📊 Creating generated word count analysis...")
-        create_generated_word_count_analysis(results)
+        # Create time per token analysis (skipped for speed)
+        # print(f"\n📊 Creating time per token analysis...")
+        # create_time_per_token_analysis(results, data_source=data_source)
+        
+        # Create generated word count analysis (skipped for speed)
+        # print(f"\n📊 Creating generated word count analysis...")
+        # create_generated_word_count_analysis(results, data_source=data_source)
         
         print(f"\n✅ Evaluation completed successfully!")
         print(f"📊 Processed {len(results)} conversations with streaming approach")
@@ -2702,9 +2482,91 @@ def main():
         import traceback
         traceback.print_exc()
 
-def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, device, data_source='goalstep'):
+def calculate_fluency_score(generated_turns, original_conversation, data_source='goalstep'):
+    """Calculate fluency score with temporal alignment for both goalstep and narration datasets."""
+    
+    # Calculate and print fluency details with temporal alignment
+    total_turns = len(generated_turns)
+    total_gt_turns = len([t for t in original_conversation if t['role'] == 'assistant'])
+    
+    # Get GT response times and normalize them to start from 0s (when user prompt is given)
+    first_user_time_fluency = None
+    for turn in original_conversation:
+        if turn['role'] == 'user':
+            if first_user_time_fluency is None:
+                first_user_time_fluency = turn['time']
+                break
+    
+    # Fallback: if no user prompt found, use the first assistant response time as reference
+    if first_user_time_fluency is None:
+        assistant_times = [t['time'] for t in original_conversation if t['role'] == 'assistant']
+        first_user_time_fluency = min(assistant_times) if assistant_times else 0.0
+    
+    # Normalize GT response times to start from 0s
+    gt_response_times = [t['time'] - first_user_time_fluency for t in original_conversation if t['role'] == 'assistant']
+    generated_response_times = [t['time'] for t in generated_turns]
+    
+    # Temporal alignment threshold (in seconds) - more lenient alignment
+    temporal_threshold = 1.0  # Allow 1.0 seconds tolerance
+    
+    # Count successful responses that align temporally with GT responses (one-to-one mapping)
+    successful_responses = 0
+    aligned_pairs = []
+    used_gt_times = set()  # Track which GT times have been used
+    
+    for gen_time in generated_response_times:
+        # Find the closest unused GT response time
+        available_gt_times = [t for t in gt_response_times if t not in used_gt_times]
+        if not available_gt_times:
+            break  # No more GT responses available for mapping
+            
+        closest_gt_time = min(available_gt_times, key=lambda x: abs(x - gen_time))
+        time_diff = abs(gen_time - closest_gt_time)
+        
+        if time_diff <= temporal_threshold:
+            # Check if response has reasonable content (≥2 words)
+            gen_turn = next((t for t in generated_turns if t['time'] == gen_time), None)
+            if gen_turn:
+                response_text = gen_turn.get('text', gen_turn.get('content', ''))
+                if response_text and len(response_text.split()) >= 2:
+                    successful_responses += 1
+                    aligned_pairs.append((gen_time, closest_gt_time, time_diff))
+                    used_gt_times.add(closest_gt_time)  # Mark this GT time as used
+    
+    fluency_score = successful_responses / total_gt_turns if total_gt_turns > 0 else 0.0
+    fluency_score = max(0.0, min(1.0, fluency_score))  # Clamp to [0, 1]
+    
+    print(f"\n📊 FLUENCY CALCULATION (Temporal Alignment):")
+    if data_source == 'narration':
+        print(f"   • Total Generated Responses: {total_turns}")
+        print(f"   • Total GT Responses: {total_gt_turns}")
+        print(f"   • Temporally Aligned Responses (≤{temporal_threshold}s): {successful_responses}")
+    print(f"   • Fluency Score: {fluency_score:.3f} ({successful_responses}/{total_gt_turns})")
+    
+    # Debug: Print first few aligned pairs
+    if aligned_pairs:
+        print(f"   • Sample Aligned Pairs (Gen Time → GT Time, Diff):")
+        for i, (gen_time, gt_time, diff) in enumerate(aligned_pairs[:5]):
+            print(f"     {i+1}. {gen_time:.1f}s → {gt_time:.1f}s (diff: {diff:.1f}s)")
+    
+    # Debug: Print GT and generated times (normalized) - only for narration
+    if data_source == 'narration':
+        print(f"   • GT Response Times (normalized): {[f'{t:.1f}s' for t in gt_response_times[:10]]}")
+        print(f"   • Generated Response Times: {[f'{t:.1f}s' for t in generated_response_times[:10]]}")
+    
+    return fluency_score
+
+def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, device, data_source='goalstep', use_visual=True):
     """Calculate PPL for a single response using the proper conversation format."""
     try:
+        # Limit conversation length to avoid OOM in stream_evaluate
+        max_conversation_length = 20  # Limit to last 20 turns to reduce memory usage
+        if len(conversation) > max_conversation_length:
+            # Keep system prompt and stream, then take last N turns
+            limited_conversation = conversation[:2]  # Keep system and stream
+            limited_conversation.extend(conversation[-(max_conversation_length-2):])  # Add last N-2 turns
+            conversation = limited_conversation
+        
         # Tokenize the conversation
         input_text = tokenizer.apply_chat_template(
             conversation, 
@@ -2766,30 +2628,47 @@ def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, dev
         # Replace any out-of-bounds token IDs with eos_token_id (like data_collator.py does)
         labels[labels >= len(tokenizer) - 1] = tokenizer.eos_token_id
         
-        # Prepare video frames (use single frame to avoid OOM)
-        if video_tensor is not None and hasattr(video_tensor, 'shape') and video_tensor.shape[0] > 0:
-            single_frame = video_tensor[0:1].unsqueeze(0).to(device)  # Shape: [1, 1, 3, H, W]
-            single_frame = single_frame.squeeze(1)  # Shape: [1, 3, H, W]
+        if use_visual:
+            # Process frames one by one from CPU to GPU (like VLM streaming)
+            if video_tensor is not None and hasattr(video_tensor, 'shape') and video_tensor.shape[0] > 0:
+                # Clear cache before processing
+                torch.cuda.empty_cache()
+                
+                # Use the same frame-by-frame approach as VLM streaming
+                # Process only the first frame to minimize memory usage
+                frame_range = range(0, 1)  # Only first frame
+                
+                # Move frame from CPU to GPU one by one (like VLM streaming)
+                single_frame_cpu = video_tensor[frame_range]  # Shape: [1, 3, H, W] on CPU
+                single_frame_gpu = single_frame_cpu.to(device)  # Move to GPU
             
-            # Use appropriate threshold based on data source
-            if data_source == 'narration':
-                threshold = Config.STREAMING_THRESHOLD_NARRATION
-            else:  # goalstep or default
-                threshold = Config.STREAMING_THRESHOLD_GOALSTEP
-            
-            # Call stream_evaluate for this response
-            raw_metrics = model.stream_evaluate(
-                input_ids=input_ids,
-                labels=labels,
-                frames=single_frame,
-                frame_token_interval_threshold=threshold,
-                ignore_token_id=-100
-            )
-            
-            # Extract PPL for this response
-            lm_ppl, frame_diff, _, _ = raw_metrics.tolist()
-            return float(lm_ppl)
+                # Use appropriate threshold based on data source
+                if data_source == 'narration':
+                    threshold = Config.STREAMING_THRESHOLD_NARRATION
+                else:  # goalstep or default
+                    threshold = Config.STREAMING_THRESHOLD_GOALSTEP
+                
+                # Call stream_evaluate for this response with visual context
+                raw_metrics = model.stream_evaluate(
+                    input_ids=input_ids,
+                    labels=labels,
+                    frames=single_frame_gpu,
+                    frame_token_interval_threshold=threshold,
+                    ignore_token_id=-100
+                )
+                
+                # Clear cache and delete GPU tensors to free memory
+                del single_frame_gpu
+                del single_frame_cpu
+                torch.cuda.empty_cache()
+                
+                # Extract PPL for this response
+                lm_ppl, frame_diff, _, _ = raw_metrics.tolist()
+                return float(lm_ppl)
+            else:
+                return None
         else:
+            # No visual PPL calculation removed for simplification
             return None
             
     except Exception as e:
@@ -2797,6 +2676,259 @@ def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, dev
         import traceback
         traceback.print_exc()
         return None
+
+def create_conversation_with_gt_prefix(normalized_conversation, gt_time, user_prompt, gt_content):
+    """Create conversation using ground truth responses as context (golden prefix)."""
+    conversation = [
+        {'role': 'system', 'content': 'Please help with the video analysis.'},
+        {'role': 'stream', 'num_frames': 1, 'learn': False}
+    ]
+    
+    # Add all previous GT responses as context, ensuring proper user/assistant alternation
+    last_added_role = 'stream'
+    if normalized_conversation:
+        for turn in normalized_conversation:
+            if turn['time'] < gt_time:  # Only previous responses
+                if turn['role'] == 'user':
+                    conversation.append({'role': 'user', 'content': turn['content']})
+                    last_added_role = 'user'
+                elif turn['role'] == 'assistant' and last_added_role == 'user':
+                    # Only add assistant response if preceded by user
+                    conversation.append({'role': 'assistant', 'content': turn['content'], 'learn': True})
+                    last_added_role = 'assistant'
+    
+    # Add current user prompt and GT response
+    if last_added_role != 'user':
+        conversation.append({'role': 'user', 'content': user_prompt})
+    conversation.append({'role': 'assistant', 'content': gt_content, 'learn': True})
+    
+    return conversation
+
+def create_conversation_with_vlm_prefix(generated_turns, gt_time, user_prompt, gt_content):
+    """Create conversation using VLM responses as context (can be wrong/miss)."""
+    conversation = [
+        {'role': 'system', 'content': 'Please help with the video analysis.'},
+        {'role': 'stream', 'num_frames': 1, 'learn': False}
+    ]
+    
+    # Add all previous VLM responses as context, ensuring proper user/assistant alternation
+    last_added_role = 'stream'
+    for turn in generated_turns:
+        if turn['time'] < gt_time:  # Only previous responses
+            # Extract user prompt from turn
+            turn_user_prompt = turn.get('user_prompt', 'Please help with the video analysis.')
+            if turn_user_prompt != "Frame processing":  # Skip frame-triggered responses
+                # Only add user prompt if last added was not user
+                if last_added_role != 'user':
+                    conversation.append({'role': 'user', 'content': turn_user_prompt})
+                    last_added_role = 'user'
+                
+                # Extract assistant response (remove the video time prefix)
+                assistant_text = turn['text']
+                if 'Assistant:' in assistant_text:
+                    assistant_content = assistant_text.split('Assistant:', 1)[1].strip()
+                else:
+                    assistant_content = assistant_text
+                conversation.append({'role': 'assistant', 'content': assistant_content, 'learn': True})
+                last_added_role = 'assistant'
+    
+    # Add current user prompt and GT response
+    if last_added_role != 'user':
+        conversation.append({'role': 'user', 'content': user_prompt})
+    conversation.append({'role': 'assistant', 'content': gt_content, 'learn': True})
+    
+    return conversation
+
+def create_dual_ppl_frame_visualization(results, output_dir="timing_plots", data_source="goalstep"):
+    """Create visualization showing how dual PPLs vary over frames in different videos."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Collect data from all videos
+    video_data = []
+    for i, result in enumerate(results):
+        if 'ppl_data' in result and 'gt_ppls_gt_prefix_visual' in result['ppl_data']:
+            gt_prefix_ppls_visual = result['ppl_data']['gt_ppls_gt_prefix_visual']
+            vlm_prefix_ppls_visual = result['ppl_data']['gt_ppls_vlm_prefix_visual']
+            
+            if gt_prefix_ppls_visual and vlm_prefix_ppls_visual:
+                video_data.append({
+                    'video_idx': i,
+                    'gt_prefix_ppls_visual': gt_prefix_ppls_visual,
+                    'vlm_prefix_ppls_visual': vlm_prefix_ppls_visual,
+                    'num_responses': len(gt_prefix_ppls_visual)
+                })
+    
+    if not video_data:
+        print("No PPL data available for visualization")
+        return
+    
+    # Create figure with subplots (histogram + bar plot)
+    fig, axes = plt.subplots(2, 1, figsize=(12, 12))
+    fig.suptitle('Dual PPL Analysis: GT Prefix vs VLM Prefix', fontsize=16, fontweight='bold')
+    
+    # Collect data
+    all_gt_prefix_visual = []
+    all_vlm_prefix_visual = []
+    video_means_gt = []
+    video_means_vlm = []
+    video_stds_gt = []
+    video_stds_vlm = []
+    video_labels = []
+    
+    for data in video_data:
+        gt_ppls = data['gt_prefix_ppls_visual']
+        vlm_ppls = data['vlm_prefix_ppls_visual']
+        
+        all_gt_prefix_visual.extend(gt_ppls)
+        all_vlm_prefix_visual.extend(vlm_ppls)
+        
+        video_means_gt.append(np.mean(gt_ppls))
+        video_means_vlm.append(np.mean(vlm_ppls))
+        video_stds_gt.append(np.std(gt_ppls))
+        video_stds_vlm.append(np.std(vlm_ppls))
+        video_labels.append(f'Video {data["video_idx"] + 1}')
+    
+    # 1. PPL distribution comparison
+    ax1 = axes[0]
+    ax1.hist(all_gt_prefix_visual, bins=20, alpha=0.6, label='GT Prefix', color='blue')
+    ax1.hist(all_vlm_prefix_visual, bins=20, alpha=0.6, label='VLM Prefix', color='red')
+    ax1.set_xlabel('PPL')
+    ax1.set_ylabel('Frequency')
+    ax1.set_title('PPL Distribution Comparison')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. Bar plot showing mean (std) PPL for different videos
+    ax2 = axes[1]
+    x = np.arange(len(video_labels))
+    width = 0.35
+    
+    bars1 = ax2.bar(x - width/2, video_means_gt, width, yerr=video_stds_gt, 
+                   label='GT Prefix', color='blue', alpha=0.7, capsize=5)
+    bars2 = ax2.bar(x + width/2, video_means_vlm, width, yerr=video_stds_vlm, 
+                   label='VLM Prefix', color='red', alpha=0.7, capsize=5)
+    
+    ax2.set_xlabel('Video')
+    ax2.set_ylabel('Mean PPL ± Std')
+    ax2.set_title('Mean PPL by Video (with Standard Deviation)')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(video_labels)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Add value labels on bars
+    for i, (bar1, bar2) in enumerate(zip(bars1, bars2)):
+        height1 = bar1.get_height()
+        height2 = bar2.get_height()
+        ax2.text(bar1.get_x() + bar1.get_width()/2., height1 + video_stds_gt[i] + 0.1,
+                f'{height1:.2f}', ha='center', va='bottom', fontsize=8)
+        ax2.text(bar2.get_x() + bar2.get_width()/2., height2 + video_stds_vlm[i] + 0.1,
+                f'{height2:.2f}', ha='center', va='bottom', fontsize=8)
+    
+    # Add summary statistics to the histogram plot
+    if all_gt_prefix_visual and all_vlm_prefix_visual:
+        correlation = np.corrcoef(all_gt_prefix_visual, all_vlm_prefix_visual)[0, 1]
+        
+        # Add text box with statistics
+        stats_text = f"""Summary:
+GT Prefix: {np.mean(all_gt_prefix_visual):.3f} ± {np.std(all_gt_prefix_visual):.3f}
+VLM Prefix: {np.mean(all_vlm_prefix_visual):.3f} ± {np.std(all_vlm_prefix_visual):.3f}
+Correlation: {correlation:.3f}
+Responses: {len(all_gt_prefix_visual)}"""
+        
+        ax1.text(0.02, 0.98, stats_text, transform=ax1.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    
+    plt.tight_layout()
+    
+    # Save the plot with dataset-specific name
+    output_path = os.path.join(output_dir, f'dual_ppl_analysis_{data_source}.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"📊 Dual PPL analysis saved to: {output_path}")
+    
+    plt.close()
+    
+    # Create PPL over time visualization
+    create_ppl_over_time_visualization(video_data, output_dir, data_source)
+    
+    # Print summary statistics
+    print(f"\n📊 DUAL PPL ANALYSIS SUMMARY ({data_source.upper()}):")
+    print(f"   • Total responses analyzed: {len(all_gt_prefix_visual)}")
+    print(f"   • Videos with PPL data: {len(video_data)}")
+    print(f"   • GT Prefix PPL: {np.mean(all_gt_prefix_visual):.3f} ± {np.std(all_gt_prefix_visual):.3f}")
+    print(f"   • VLM Prefix PPL: {np.mean(all_vlm_prefix_visual):.3f} ± {np.std(all_vlm_prefix_visual):.3f}")
+    
+    # Calculate differences and correlation
+    # if len(all_gt_prefix_visual) == len(all_vlm_prefix_visual):
+    #     differences = [vlm - gt for gt, vlm in zip(all_gt_prefix_visual, all_vlm_prefix_visual)]
+    #     mean_diff = np.mean(differences)
+    #     std_diff = np.std(differences)
+    #     correlation = np.corrcoef(all_gt_prefix_visual, all_vlm_prefix_visual)[0, 1]
+    #     print(f"   • Average difference (VLM - GT): {mean_diff:.3f} ± {std_diff:.3f}")
+    #     print(f"   • Correlation coefficient: {correlation:.3f}")
+
+def create_ppl_over_time_visualization(video_data, output_dir="timing_plots", data_source="goalstep"):
+    """Create visualization showing PPL variation over time for different videos."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    if not video_data:
+        return
+    
+    # Create figure for PPL over time
+    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+    fig.suptitle(f'PPL Evolution Over Time - {data_source.upper()} Dataset', fontsize=16, fontweight='bold')
+    
+    # 1. GT Prefix PPL over time (Visual vs No Visual)
+    ax1 = axes[0]
+    colors = plt.cm.tab10(np.linspace(0, 1, len(video_data)))
+    
+    for i, data in enumerate(video_data):
+        response_indices = range(len(data['gt_prefix_ppls_visual']))
+        ax1.plot(response_indices, data['gt_prefix_ppls_visual'], 'o-', color=colors[i], 
+                label=f'Video {data["video_idx"]} (Visual)', alpha=0.7, markersize=4)
+        if data['gt_prefix_ppls_no_visual']:
+            ax1.plot(response_indices, data['gt_prefix_ppls_no_visual'], 's--', color=colors[i], 
+                    label=f'Video {data["video_idx"]} (No Visual)', alpha=0.7, markersize=4)
+    
+    ax1.set_xlabel('Response Index')
+    ax1.set_ylabel('GT Prefix PPL')
+    ax1.set_title('GT Prefix PPL Evolution Over Responses')
+    ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. VLM Prefix PPL over time (Visual vs No Visual)
+    ax2 = axes[1]
+    
+    for i, data in enumerate(video_data):
+        response_indices = range(len(data['vlm_prefix_ppls_visual']))
+        ax2.plot(response_indices, data['vlm_prefix_ppls_visual'], 'o-', color=colors[i], 
+                label=f'Video {data["video_idx"]} (Visual)', alpha=0.7, markersize=4)
+        if data['vlm_prefix_ppls_no_visual']:
+            ax2.plot(response_indices, data['vlm_prefix_ppls_no_visual'], 's--', color=colors[i], 
+                    label=f'Video {data["video_idx"]} (No Visual)', alpha=0.7, markersize=4)
+    
+    ax2.set_xlabel('Response Index')
+    ax2.set_ylabel('VLM Prefix PPL')
+    ax2.set_title('VLM Prefix PPL Evolution Over Responses')
+    ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    output_path = os.path.join(output_dir, f'ppl_over_time_{data_source}.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"📊 PPL over time analysis saved to: {output_path}")
+    
+    plt.close()
 
 def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversation, generated_turns, device, normalized_conversation=None, data_source='goalstep'):
     """Calculate metrics exactly like evaluate.py using stream_evaluate and compute_metrics."""
@@ -2865,10 +2997,12 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversatio
                         'original_time': turn.get('original_time', turn['time'])
                     })
         
-        print(f"📊 Calculating PPL for {len(ground_truth_responses)} ground truth responses...")
+        # Calculate DUAL PPL for ALL GROUND TRUTH responses in the dataset
+        gt_ppls_gt_prefix_visual = []  # PPL using GT responses as context (golden prefix) with visual
+        gt_ppls_vlm_prefix_visual = []  # PPL using VLM responses as context with visual
+    # No visual PPL collection removed for simplification
         
-        # Calculate PPL for ALL GROUND TRUTH responses in the dataset
-        gt_ppls = []
+        print(f"📊 Calculating dual PPL (visual context) for {len(ground_truth_responses)} ground truth responses...")
         
         for i, gt_response in enumerate(ground_truth_responses):
             try:
@@ -2884,33 +3018,61 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversatio
                             user_prompt = conv_turn['content']
                             break
                 
-                # Create conversation using the GROUND TRUTH response
-                gt_conversation = [
-                    {'role': 'system', 'content': 'Please help with the video analysis.'},
-                    {'role': 'stream', 'num_frames': 1, 'learn': False},
-                    {'role': 'user', 'content': user_prompt},
-                    {'role': 'assistant', 'content': gt_content, 'learn': True}
-                ]
+                # 1. PPL with GT prefix (golden context) - WITH VISUAL
+                gt_conversation = create_conversation_with_gt_prefix(
+                    normalized_conversation, gt_time, user_prompt, gt_content
+                )
+                ppl_gt_prefix_visual = calculate_ppl_for_response(model, tokenizer, gt_conversation, video_tensor, device, data_source, use_visual=True)
                 
-                # Calculate PPL for this GROUND TRUTH response
-                ppl = calculate_ppl_for_response(model, tokenizer, gt_conversation, video_tensor, device, data_source)
-                if ppl is not None:
-                    gt_ppls.append(ppl)
+                # 2. PPL with VLM prefix (actual generated responses as context) - WITH VISUAL
+                vlm_conversation = create_conversation_with_vlm_prefix(
+                    generated_turns, gt_time, user_prompt, gt_content
+                )
+                ppl_vlm_prefix_visual = calculate_ppl_for_response(model, tokenizer, vlm_conversation, video_tensor, device, data_source, use_visual=True)
+                
+                if ppl_gt_prefix_visual is not None:
+                    gt_ppls_gt_prefix_visual.append(ppl_gt_prefix_visual)
+                if ppl_vlm_prefix_visual is not None:
+                    gt_ppls_vlm_prefix_visual.append(ppl_vlm_prefix_visual)
+                    
+                if i % 10 == 0:  # Progress indicator
+                    # print(f"   Processed {i+1}/{len(ground_truth_responses)} GT responses...")
+                    # Clean up GPU memory periodically
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                
+                # Clean up memory after each response to prevent OOM
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                     
             except Exception as e:
+                print(f"Error processing GT response {i}: {e}")
+                # Clean up GPU memory on error
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 continue
         
-        # Calculate average PPLs for ground truth responses that correspond to generated responses
-        if gt_ppls:
-            avg_gt_ppl = sum(gt_ppls) / len(gt_ppls)
-            print(f"📊 Ground Truth PPL: {len(gt_ppls)} responses, avg PPL: {avg_gt_ppl:.3f}")
-            print(f"📊 GT PPL range: {min(gt_ppls):.3f} - {max(gt_ppls):.3f}")
+        # Calculate average PPLs for all four contexts
+        if gt_ppls_gt_prefix_visual:
+            avg_gt_ppl_gt_prefix_visual = sum(gt_ppls_gt_prefix_visual) / len(gt_ppls_gt_prefix_visual)
+            print(f"📊 GT Prefix PPL (Visual): {len(gt_ppls_gt_prefix_visual)} responses, avg PPL: {avg_gt_ppl_gt_prefix_visual:.3f}")
+            print(f"📊 GT Prefix PPL (Visual) range: {min(gt_ppls_gt_prefix_visual):.3f} - {max(gt_ppls_gt_prefix_visual):.3f}")
         else:
-            avg_gt_ppl = 0.0
-            print("📊 Ground Truth PPL: No valid calculations")
+            avg_gt_ppl_gt_prefix_visual = 0.0
+            print("📊 GT Prefix PPL (Visual): No valid calculations")
+            
+        if gt_ppls_vlm_prefix_visual:
+            avg_gt_ppl_vlm_prefix_visual = sum(gt_ppls_vlm_prefix_visual) / len(gt_ppls_vlm_prefix_visual)
+            print(f"📊 VLM Prefix PPL (Visual): {len(gt_ppls_vlm_prefix_visual)} responses, avg PPL: {avg_gt_ppl_vlm_prefix_visual:.3f}")
+            print(f"📊 VLM Prefix PPL (Visual) range: {min(gt_ppls_vlm_prefix_visual):.3f} - {max(gt_ppls_vlm_prefix_visual):.3f}")
+        else:
+            avg_gt_ppl_vlm_prefix_visual = 0.0
+            print("📊 VLM Prefix PPL (Visual): No valid calculations")
+            
+        # No visual PPL printing removed for simplification
         
-        # Use ground truth PPL as the main metric (evaluating how well the model predicts the ground truth)
-        avg_ppl = avg_gt_ppl
+        # Use average of visual PPLs as the main metric
+        avg_ppl = (avg_gt_ppl_gt_prefix_visual + avg_gt_ppl_vlm_prefix_visual) / 2 if (avg_gt_ppl_gt_prefix_visual > 0 and avg_gt_ppl_vlm_prefix_visual > 0) else max(avg_gt_ppl_gt_prefix_visual, avg_gt_ppl_vlm_prefix_visual)
         
         # Calculate other metrics using the same approach
         
@@ -2966,11 +3128,14 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversatio
                     if ppl is not None:
                         corresponding_gt_ppls.append(ppl)
             
-        return {
-            'lm_ppl': avg_ppl,
-            'fluency': 1.0,  # Default fluency for now
+            return {
+                'lm_ppl': avg_ppl,
+            'gt_prefix_ppl_visual': avg_gt_ppl_gt_prefix_visual,
+            'vlm_prefix_ppl_visual': avg_gt_ppl_vlm_prefix_visual,
+            'fluency': 1.0,  # Will be overridden by actual fluency calculation
                 'ppl_data': {
-                    'gt_ppls': gt_ppls,
+                'gt_ppls_gt_prefix_visual': gt_ppls_gt_prefix_visual,
+                'gt_ppls_vlm_prefix_visual': gt_ppls_vlm_prefix_visual,
                     'corresponding_gt_ppls': corresponding_gt_ppls,
                     'generated_responses': len(generated_turns),
                     'total_gt_responses': len(ground_truth_responses)
@@ -3093,13 +3258,90 @@ def calculate_basic_content_metrics(generated_turns, conversation):
                     successful_responses += 1
             
             # Fluency as proportion of successful responses
-            fluency = successful_responses / total_turns if total_turns > 0 else 0.0
+            fluency = successful_responses / total_gt_turns if total_gt_turns > 0 else 0.0
             fluency = max(0.0, min(1.0, fluency))  # Clamp to [0, 1]
     
     return {
         'lm_ppl': lm_ppl,
         'fluency': fluency
     }
+
+def create_ppl_over_time_visualization(results, output_dir="timing_plots", data_source="goalstep"):
+    """Create visualization showing how PPL varies over time for different videos."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Collect data from all videos
+    video_data = []
+    for i, result in enumerate(results):
+        if 'ppl_data' in result and 'gt_ppls_gt_prefix_visual' in result['ppl_data']:
+            gt_prefix_ppls_visual = result['ppl_data']['gt_ppls_gt_prefix_visual']
+            vlm_prefix_ppls_visual = result['ppl_data']['gt_ppls_vlm_prefix_visual']
+            
+            if gt_prefix_ppls_visual and vlm_prefix_ppls_visual:
+                video_data.append({
+                    'video_idx': i,
+                    'gt_prefix_ppls_visual': gt_prefix_ppls_visual,
+                    'vlm_prefix_ppls_visual': vlm_prefix_ppls_visual,
+                    'num_responses': len(gt_prefix_ppls_visual)
+                })
+    
+    if not video_data:
+        print("No PPL data available for time visualization")
+        return
+    
+    # Create figure with subplots for each video
+    n_videos = len(video_data)
+    fig, axes = plt.subplots(n_videos, 2, figsize=(15, 5 * n_videos))
+    if n_videos == 1:
+        axes = axes.reshape(1, -1)
+    
+    fig.suptitle(f'PPL Evolution Over Time - {data_source.title()} Dataset', fontsize=16, fontweight='bold')
+    
+    for i, data in enumerate(video_data):
+        video_idx = data['video_idx']
+        gt_ppls = data['gt_prefix_ppls_visual']
+        vlm_ppls = data['vlm_prefix_ppls_visual']
+        
+        # Create response indices (time points)
+        response_indices = list(range(1, len(gt_ppls) + 1))
+        
+        # Plot GT Prefix PPL over time
+        ax1 = axes[i, 0]
+        ax1.plot(response_indices, gt_ppls, 'o-', color='blue', linewidth=2, markersize=4, label='GT Prefix PPL')
+        ax1.set_title(f'Video {video_idx + 1}: GT Prefix PPL Over Time', fontweight='bold')
+        ax1.set_xlabel('Response Number')
+        ax1.set_ylabel('PPL')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend()
+        
+        # Plot VLM Prefix PPL over time
+        ax2 = axes[i, 1]
+        ax2.plot(response_indices, vlm_ppls, 'o-', color='red', linewidth=2, markersize=4, label='VLM Prefix PPL')
+        ax2.set_title(f'Video {video_idx + 1}: VLM Prefix PPL Over Time', fontweight='bold')
+        ax2.set_xlabel('Response Number')
+        ax2.set_ylabel('PPL')
+        ax2.grid(True, alpha=0.3)
+        ax2.legend()
+        
+        # Add statistics
+        avg_gt = np.mean(gt_ppls)
+        avg_vlm = np.mean(vlm_ppls)
+        ax1.text(0.05, 0.95, f'Avg: {avg_gt:.2f}', transform=ax1.transAxes, 
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7))
+        ax2.text(0.05, 0.95, f'Avg: {avg_vlm:.2f}', transform=ax2.transAxes,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral", alpha=0.7))
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_path = os.path.join(output_dir, f'ppl_over_time_{data_source}.png')
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    print(f"📊 PPL over time analysis saved to {plot_path}")
+    plt.close()
 
 if __name__ == "__main__":
     main()

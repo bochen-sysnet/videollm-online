@@ -226,7 +226,7 @@ def create_initial_distribution_analysis(conversations_per_video, unique_videos,
     return output_file
 
 
-def create_time_per_token_analysis(results, output_dir=Config.OUTPUT_DIR):
+def create_time_per_token_analysis(results, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """
     Analyze and visualize time per token for VLM generation.
     
@@ -302,7 +302,7 @@ def create_time_per_token_analysis(results, output_dir=Config.OUTPUT_DIR):
     
     plt.tight_layout()
     
-    output_file = os.path.join(output_dir, 'time_per_token_analysis.png')
+    output_file = os.path.join(output_dir, f'time_per_token_analysis_{data_source}.png')
     plt.savefig(output_file, dpi=Config.FIGURE_DPI, bbox_inches='tight')
     plt.close()
     
@@ -310,7 +310,7 @@ def create_time_per_token_analysis(results, output_dir=Config.OUTPUT_DIR):
     return output_file
 
 
-def create_generated_word_count_analysis(results, output_dir=Config.OUTPUT_DIR):
+def create_generated_word_count_analysis(results, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """
     Analyze and visualize word counts in VLM generated responses.
     
@@ -382,7 +382,7 @@ def create_generated_word_count_analysis(results, output_dir=Config.OUTPUT_DIR):
     
     plt.tight_layout()
     
-    output_file = os.path.join(output_dir, 'generated_word_count_analysis.png')
+    output_file = os.path.join(output_dir, f'generated_word_count_analysis_{data_source}.png')
     plt.savefig(output_file, dpi=Config.FIGURE_DPI, bbox_inches='tight')
     plt.close()
     
