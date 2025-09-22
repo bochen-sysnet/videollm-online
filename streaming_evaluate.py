@@ -10,19 +10,25 @@ import os
 import time
 import subprocess
 import warnings
+import gc
+import random
+import sys
+import traceback
+import collections
 from dataclasses import asdict
 from transformers import PreTrainedTokenizer
 from tqdm import tqdm
-import collections
 import matplotlib.pyplot as plt
 import numpy as np
+from torchvision.io import read_video
+import transformers
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*")
 
-from models import build_model_and_tokenizer, parse_args
+from models import build_model_and_tokenizer, parse_args, fast_greedy_generate
 from data.ego4d.narration import Ego4DRefinedNarrationStream
 
 # =============================================================================
@@ -61,6 +67,12 @@ class Config:
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 50           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
+    
+    # Threshold sweep configuration
+    DEFAULT_NUM_VIDEOS = 3                # Default number of videos for evaluation
+    DEFAULT_THRESHOLD_RANGE = (0.5, 0.99) # Default threshold range for sweep
+    DEFAULT_NUM_THRESHOLDS = 10           # Default number of thresholds for sweep
+    DEBUG_THRESHOLDS = [0.8, 0.9, 0.95]  # Debug thresholds for quick testing
     
     # File paths
     DATASET_BASE_PATH = "datasets/ego4d/v2/full_scale_2fps_384"
@@ -405,7 +417,6 @@ def print_timing_metrics(visual_time, model_time, generation_time, num_frames, n
 def defragment_gpu_memory():
     """Force GPU memory defragmentation to free up more contiguous memory"""
     try:
-        import gc
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
@@ -423,8 +434,6 @@ def defragment_gpu_memory():
 
 def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create simplified memory usage visualization for all videos"""
-    import matplotlib.pyplot as plt
-    import os
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -476,9 +485,6 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
 
 def create_frame_score_analysis(all_frame_scores_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create frame score analysis visualization showing scores, threshold, and response triggers"""
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import os
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -598,13 +604,13 @@ def create_frame_score_analysis(all_frame_scores_data, output_dir=Config.OUTPUT_
     return output_path
 
 def create_individual_conversation_timing_plots(conversation_timings, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
-    """Create individual timing plots for each conversation with enhanced 3-plot layout"""
+    """Create individual timing plots for each conversation with enhanced 4-plot layout"""
     os.makedirs(output_dir, exist_ok=True)
     
     for i, conversation_timing in enumerate(conversation_timings):
         conversation_number = i + 1  # Always use sequential numbering 1, 2, 3, ...
         conversation_id = conversation_timing.get('conversation_id', f'conversation_{i+1}')
-        fig, axes = plt.subplots(1, 3, figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_LARGE[1]//3))
+        fig, axes = plt.subplots(1, 4, figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_LARGE[1]//4))
         fig.suptitle(f'Conversation {conversation_number} ({conversation_id}) - Timing Analysis', fontsize=14, fontweight='bold')
         
         # 1. Timing components breakdown
@@ -687,7 +693,7 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
             # Fallback: create synthetic data from total times if no per-frame data available
             if conversation_timing['frame_processing_times']:
                 frame_count = len(conversation_timing['frame_processing_times'])
-                video_times = np.linspace(0, conversation_timing.get('video_duration', frame_count / 2.0), frame_count)
+                video_times = np.linspace(0, conversation_timing.get('video_duration', frame_count / Config.FRAME_FPS), frame_count)
                 
                 # Distribute total times evenly across frames
                 visual_per_frame = conversation_timing['visual_embedding_time'] / frame_count * 1000
@@ -711,6 +717,37 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
             else:
                 ax3.text(0.5, 0.5, 'No timing data available', ha='center', va='center', transform=ax3.transAxes)
                 ax3.set_title('Timing Components Over Time')
+        
+        # 4. Rebuffering time over time
+        ax4 = axes[3]
+        rebuffering_times = conversation_timing.get('rebuffering_times', [])
+        
+        if rebuffering_times:
+            frame_indices = range(len(rebuffering_times))
+            video_times = [i / Config.FRAME_FPS for i in frame_indices]  # Convert frame index to time
+            
+            # Plot rebuffering time over time
+            ax4.plot(video_times, rebuffering_times, 'r-', linewidth=2, alpha=0.8, label='Rebuffering Time')
+            ax4.fill_between(video_times, rebuffering_times, alpha=0.3, color='red')
+            
+            ax4.set_xlabel('Video Time (seconds)')
+            ax4.set_ylabel('Rebuffering Time (seconds)')
+            ax4.set_title('Rebuffering Time Over Time')
+            ax4.grid(True, alpha=0.3)
+            ax4.legend(fontsize=8)
+            
+            # Add statistics
+            total_rebuffering = sum(rebuffering_times)
+            avg_rebuffering = np.mean(rebuffering_times)
+            max_rebuffering = max(rebuffering_times)
+            
+            stats_text = f'Total: {total_rebuffering:.3f}s\nAvg: {avg_rebuffering:.3f}s\nMax: {max_rebuffering:.3f}s'
+            ax4.text(0.02, 0.98, stats_text, transform=ax4.transAxes, 
+                    verticalalignment='top', fontsize=8,
+                    bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.8))
+        else:
+            ax4.text(0.5, 0.5, 'No rebuffering data available', ha='center', va='center', transform=ax4.transAxes)
+            ax4.set_title('Rebuffering Time Over Time')
         
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f'conversation_{conversation_number}_timing_{data_source}.png'), dpi=300, bbox_inches='tight')
@@ -833,7 +870,7 @@ def create_individual_video_timing_plots(video_timings, output_dir=Config.OUTPUT
             
             # Convert frame indices to time in seconds for consistent plotting
             # Use the actual video duration instead of hardcoded 2000s
-            video_duration = video_timing.get('video_duration', total_frames / 2.0)  # Get actual duration
+            video_duration = video_timing.get('video_duration', total_frames / Config.FRAME_FPS)  # Get actual duration
             frame_duration = video_duration / total_frames  # Duration per frame in seconds
             time_axis = np.array(frame_indices) * frame_duration
             
@@ -999,7 +1036,6 @@ def get_videos_with_features():
 
 def process_query_response(model, tokenizer, device, query_text, video_time, past_key_values, inplace_output_ids, eos_token_id):
     """Process a query and generate response like benchmark"""
-    from models import fast_greedy_generate
     
     # Tokenize query like benchmark
     query_ids = tokenizer.apply_chat_template(
@@ -1049,7 +1085,6 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
     print(f"📹 Conversation turns: {len(conversation)}")
     
     # Get video metadata without loading the entire video
-    from torchvision.io import read_video
     try:
         # Load only metadata first
         video_reader = read_video(video_path, pts_unit='sec', output_format='TCHW')
@@ -1069,7 +1104,6 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
         user_prompts = [(turn['time'], turn['content']) for turn in conversation if turn['role'] == 'user']
     else:  # narration
         # For narration, we need to add a user prompt at the beginning
-        import random
         if hasattr(dataset, 'instructions') and dataset.instructions:
             instruction = random.choice(dataset.instructions)
             user_prompt = instruction['content']
@@ -1209,7 +1243,6 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
                 
         except Exception as e:
             print(f"❌ Error processing frame {frame_idx} at time {video_time:.2f}s: {e}")
-            import traceback
             traceback.print_exc()
             # Continue processing other frames
             frame_processing_time = time.time() - frame_start_time
@@ -1217,6 +1250,36 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
     
     # Collect frame scores data after processing
     frame_scores_data = liveinfer.get_frame_scores()
+    
+    # Calculate rebuffering time for each frame
+    rebuffering_times = []
+    frame_interval = 1.0 / Config.FRAME_FPS  # 0.5s for 2 FPS
+    
+    for frame_idx, processing_time in enumerate(frame_processing_times):
+        if frame_idx == 0:
+            # First frame: no rebuffering time
+            rebuffering_time = 0.0
+        else:
+            # Expected start time for this frame (0, 0.5, 1.0, 1.5, ...)
+            expected_start_time = frame_idx * frame_interval
+            
+            # Previous frame's actual finish time
+            previous_processing_time = frame_processing_times[frame_idx - 1]
+            previous_expected_start = (frame_idx - 1) * frame_interval
+            previous_finish_time = previous_expected_start + previous_processing_time
+            
+            # Calculate rebuffering time: max(0, previous_finish - expected_start)
+            rebuffering_time = max(0.0, previous_finish_time - expected_start_time)
+        
+        rebuffering_times.append(rebuffering_time)
+    
+    # Calculate total and average rebuffering time
+    total_rebuffering_time = sum(rebuffering_times)
+    average_rebuffering_time = total_rebuffering_time / len(rebuffering_times) if rebuffering_times else 0.0
+    
+    # Add rebuffering data to frame timing data
+    for i, timing_data in enumerate(frame_timing_data):
+        timing_data['rebuffering_time'] = rebuffering_times[i] if i < len(rebuffering_times) else 0.0
     
     # Calculate the correct total processing time
     total_frame_processing_time = sum(frame_processing_times)
@@ -1239,6 +1302,8 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
     print_timing_metrics(visual_embedding_time, model_forward_time, generation_time, num_processed_frames, len(generated_turns))
     print(f"   • Total processing time: {total_processing_time:.3f}s")
     print(f"   • Timing breakdown: Visual={visual_embedding_time/total_processing_time*100:.1f}%, Model={model_forward_time/total_processing_time*100:.1f}%, Generation={generation_time/total_processing_time*100:.1f}%")
+    print(f"   • Total rebuffering time: {total_rebuffering_time:.3f}s")
+    print(f"   • Average rebuffering time per frame: {average_rebuffering_time:.3f}s")
     print("-" * 60)
     
     # Calculate content-based metrics using model evaluation
@@ -1296,7 +1361,10 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
         'generated_turns': generated_turns,  # Add actual generated turns data
         'video_duration': duration,  # Use conversation duration
         'frame_scores_data': frame_scores_data,  # Add frame_token_interval_score data
-        'frame_timing_data': frame_timing_data  # Add per-frame component timing data
+        'frame_timing_data': frame_timing_data,  # Add per-frame component timing data
+        'rebuffering_times': rebuffering_times,  # Add rebuffering time data
+        'total_rebuffering_time': total_rebuffering_time,  # Add total rebuffering time
+        'average_rebuffering_time': average_rebuffering_time  # Add average rebuffering time
     }
     
     # Create timeline with interleaved user prompts, ground truth, and generated responses
@@ -1342,7 +1410,6 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
     del liveinfer
     
     # Force garbage collection and memory cleanup
-    import gc
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()  # Ensure all operations complete
@@ -1376,7 +1443,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         actual_num_conversations = len(conversation_indices)
         print(f"🎯 Specific conversation indices: {conversation_indices}")
     elif random_selection:
-        import random
         conversation_indices = random.sample(range(len(dataset.conversations)), actual_num_conversations)
         print(f"🎲 Random conversation indices: {conversation_indices}")
     else:
@@ -1447,18 +1513,22 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
     
     return results
 
-def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda', num_conversations=3, random_selection=False, specific_indices=None, data_source='goalstep', threshold_range=None, num_thresholds=10):
+def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda', num_conversations=None, random_selection=False, specific_indices=None, data_source='goalstep', threshold_range=None, num_thresholds=None):
     """Evaluate conversations across different streaming thresholds to analyze threshold sensitivity."""
     import torch
     
-    # Define threshold range if not provided
+    # Use config defaults if not provided
+    if num_conversations is None:
+        num_conversations = Config.DEFAULT_NUM_VIDEOS
     if threshold_range is None:
-        threshold_range = (0.5, 0.99)  # Focus on 0.5-1.0 range for both datasets
+        threshold_range = Config.DEFAULT_THRESHOLD_RANGE
+    if num_thresholds is None:
+        num_thresholds = Config.DEFAULT_NUM_THRESHOLDS
     
-    # Generate threshold values - test more thresholds for verification
-    if num_thresholds == 10:  # Default case
-        thresholds = np.array([0.8, 0.9, 0.95])  # Test 6 thresholds for verification
-        num_thresholds = 3
+    # Generate threshold values - use debug thresholds for quick testing
+    if num_thresholds == Config.DEFAULT_NUM_THRESHOLDS:  # Default case
+        thresholds = np.array(Config.DEBUG_THRESHOLDS)
+        num_thresholds = len(Config.DEBUG_THRESHOLDS)
     else:
         thresholds = np.linspace(threshold_range[0], threshold_range[1], num_thresholds)
     
@@ -1476,7 +1546,6 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
         actual_num_conversations = len(conversation_indices)
         print(f"🎯 Using specific conversation indices: {conversation_indices}")
     elif random_selection:
-        import random
         # Set seed for reproducibility and select conversations once
         random.seed(42)
         conversation_indices = random.sample(range(len(dataset.conversations)), actual_num_conversations)
@@ -1488,6 +1557,7 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
     # Store results for each threshold
     all_threshold_results = {}
     all_frame_scores_data = {}  # Collect frame scores data for all thresholds
+    all_rebuffering_data = {}  # Collect rebuffering time data for all thresholds
     
     for i, threshold in enumerate(thresholds):
         print(f"\n🎯 THRESHOLD {i+1}/{num_thresholds}: {threshold:.3f}")
@@ -1518,22 +1588,36 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
         
         # Collect frame scores data for this threshold
         threshold_frame_scores = {}
+        threshold_rebuffering_data = {}
         for j, result in enumerate(results):
             if 'frame_scores_data' in result and result['frame_scores_data']:
                 conv_key = f"conv_{j}"
                 threshold_frame_scores[conv_key] = result['frame_scores_data']
+            
+            # Collect rebuffering time data
+            if 'rebuffering_times' in result and result['rebuffering_times']:
+                conv_key = f"conv_{j}"
+                threshold_rebuffering_data[conv_key] = {
+                    'rebuffering_times': result['rebuffering_times'],
+                    'average_rebuffering_time': result.get('average_rebuffering_time', 0.0),
+                    'total_rebuffering_time': result.get('total_rebuffering_time', 0.0)
+                }
+        
         all_frame_scores_data[threshold] = threshold_frame_scores
+        all_rebuffering_data[threshold] = threshold_rebuffering_data
         
         # Print summary for this threshold
         if results:
             avg_ppl = sum(r['lm_ppl'] for r in results) / len(results)
             avg_fluency = sum(r['fluency'] for r in results) / len(results)
             avg_responses = sum(len(r['generated_turns']) for r in results) / len(results)
+            avg_rebuffering = sum(r.get('average_rebuffering_time', 0.0) for r in results) / len(results)
             
             print(f"📊 Threshold {threshold:.3f} Summary:")
             print(f"   • Average PPL: {avg_ppl:.3f}")
             print(f"   • Average Fluency: {avg_fluency:.3f}")
             print(f"   • Average Responses: {avg_responses:.1f}")
+            print(f"   • Average Rebuffering Time: {avg_rebuffering:.3f}s")
         
         # Clean up memory between thresholds
         if i < len(thresholds) - 1:  # Don't clean up after the last threshold
@@ -1541,7 +1625,7 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
     
     # Create comprehensive threshold analysis visualization
     print(f"\n📊 Creating threshold sensitivity analysis...")
-    create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data, data_source=data_source)
+    create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data, all_rebuffering_data, data_source=data_source)
     
     return all_threshold_results
 
@@ -1654,7 +1738,6 @@ class SimpleLiveInfer:
         self.timing_data['input_video_stream_time'] = time.time() - start_time
     
     def load_video(self, video_path):
-        from torchvision.io import read_video
         # Store video path for on-demand loading instead of loading entire video
         self.video_path = video_path
         
@@ -1668,7 +1751,6 @@ class SimpleLiveInfer:
         self.video_tensor = video_reader[0]  # Keep on CPU
         print(f"📹 Video loaded to CPU: {self.video_tensor.shape} ({self.video_tensor.device})")
         
-        import transformers
         logger = transformers.logging.get_logger('liveinfer')
         logger.warning(f'{video_path} -> {self.video_tensor.shape}, {self.frame_fps} FPS (CPU streaming mode)')
     
@@ -1680,12 +1762,10 @@ class SimpleLiveInfer:
             
             if end_frame - start_frame <= batch_size:
                 # Small range - load directly
-                from torchvision.io import read_video
                 frames = read_video(self.video_path, pts_unit='sec', output_format='TCHW')[0][start_frame:end_frame].to(self.device)
                 return frames
             else:
                 # Large range - load in batches
-                from torchvision.io import read_video
                 all_frames = []
                 for batch_start in range(start_frame, end_frame, batch_size):
                     batch_end = min(batch_start + batch_size, end_frame)
@@ -1702,7 +1782,6 @@ class SimpleLiveInfer:
             return None
     
     def _call_for_response(self, video_time, query):
-        from models import fast_greedy_generate
         
         # MEASURE GENERATION TIME (this is the VLM text generation)
         generation_start = time.time()
@@ -1857,7 +1936,6 @@ class SimpleLiveInfer:
 
 
 def main():
-    import sys
     
     # Extract custom arguments from command line args
     data_source = 'narration'  # default
@@ -1901,6 +1979,9 @@ def main():
     print(f"   • Frame FPS: {Config.FRAME_FPS}")
     print(f"   • Frame Num Tokens: {Config.FRAME_NUM_TOKENS}")
     print(f"   • V Placeholder ID: {Config.V_PLACEHOLDER_ID}")
+    print(f"   • Default Num Videos: {Config.DEFAULT_NUM_VIDEOS}")
+    print(f"   • Default Threshold Range: {Config.DEFAULT_THRESHOLD_RANGE}")
+    print(f"   • Debug Thresholds: {Config.DEBUG_THRESHOLDS}")
     
     # Create filtered dataset with configurable data source
     data_source = getattr(args, 'data_source', 'narration')  # Default to narration
@@ -1929,10 +2010,9 @@ def main():
     
     # Evaluate more conversations for better coverage
     try:
-        # Use 3 videos for testing
-        num_videos = 3
+        # Use config default number of videos
+        num_videos = Config.DEFAULT_NUM_VIDEOS
         print(f"💬 Processing {num_videos} conversation{'s' if num_videos > 1 else ''} for PPL analysis...")
-        import random
         random.seed(42)  # For reproducibility
         
         # Check if threshold sweep is requested
@@ -1945,8 +2025,8 @@ def main():
                 device=device,
                 num_conversations=num_videos,
                 random_selection=True,
-                data_source=data_source,
-                num_thresholds=10  # Use fewer thresholds for faster execution
+                data_source=data_source
+                # Use config defaults for threshold_range and num_thresholds
             )
             print("✅ Threshold sweep analysis completed!")
             return
@@ -1961,6 +2041,7 @@ def main():
         avg_ppl = sum(r['lm_ppl'] for r in results) / len(results)
         avg_fluency = sum(r['fluency'] for r in results) / len(results)
         avg_responses_per_video = sum(len(r['generated_turns']) for r in results) / len(results)
+        avg_rebuffering_time = sum(r.get('average_rebuffering_time', 0.0) for r in results) / len(results)
         
         # Calculate time diff metric: average latency per generated response
         # Sum the actual timing components for each response
@@ -2009,6 +2090,7 @@ def main():
         print(f"   • Average Fluency: {avg_fluency:.3f}")
         print(f"   • Average Responses per Video: {avg_responses_per_video:.1f}")
         print(f"   • Average Time Diff (latency per response): {avg_time_diff:.3f}s")
+        print(f"   • Average Rebuffering Time per Frame: {avg_rebuffering_time:.3f}s")
         
         
         print(f"\n🎯 PERFORMANCE SUMMARY:")
@@ -2030,7 +2112,23 @@ def main():
         create_dual_ppl_frame_visualization(results, data_source=data_source)
         
         # Create PPL over time visualization for different videos
-        create_ppl_over_time_visualization(results, data_source=data_source)
+        # Extract PPL data from results for visualization
+        ppl_video_data = []
+        for i, result in enumerate(results):
+            if 'ppl_data' in result and 'gt_ppls_gt_prefix_visual' in result['ppl_data']:
+                gt_prefix_ppls_visual = result['ppl_data']['gt_ppls_gt_prefix_visual']
+                vlm_prefix_ppls_visual = result['ppl_data']['gt_ppls_vlm_prefix_visual']
+                
+                if gt_prefix_ppls_visual and vlm_prefix_ppls_visual:
+                    ppl_video_data.append({
+                        'video_idx': i,
+                        'gt_prefix_ppls_visual': gt_prefix_ppls_visual,
+                        'vlm_prefix_ppls_visual': vlm_prefix_ppls_visual,
+                        'num_responses': len(gt_prefix_ppls_visual)
+                    })
+        
+        if ppl_video_data:
+            create_ppl_over_time_visualization(ppl_video_data, data_source=data_source)
         
         # Create time per token analysis (skipped for speed)
         # print(f"\n📊 Creating time per token analysis...")
@@ -2045,14 +2143,10 @@ def main():
         
     except Exception as e:
         print(f"❌ Error during evaluation: {e}")
-        import traceback
         traceback.print_exc()
 
-def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data=None, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
+def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data=None, all_rebuffering_data=None, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create unified comprehensive threshold analysis with frame score trends and error bars."""
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import os
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -2075,7 +2169,9 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         'vlm_prefix_ppl_stds': [],
         'frame_score_means': [],
         'frame_score_stds': [],
-        'frame_score_below_threshold_ratios': []
+        'frame_score_below_threshold_ratios': [],
+        'rebuffering_means': [],
+        'rebuffering_stds': []
     }
     
     for threshold in thresholds:
@@ -2087,6 +2183,7 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         gt_ppls = [r.get('lm_ppl', 0.0) for r in results]
         fluencies = [r.get('fluency', 0.0) for r in results]
         response_counts = [len(r.get('generated_turns', [])) for r in results]
+        rebuffering_times = [r.get('average_rebuffering_time', 0.0) for r in results]
         
         gt_prefix_ppls = []
         vlm_prefix_ppls = []
@@ -2124,9 +2221,11 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         detailed_metrics['frame_score_means'].append(np.mean(frame_scores) if frame_scores else 0.0)
         detailed_metrics['frame_score_stds'].append(np.std(frame_scores) if frame_scores else 0.0)
         detailed_metrics['frame_score_below_threshold_ratios'].append(np.mean(below_threshold_ratios) if below_threshold_ratios else 0.0)
+        detailed_metrics['rebuffering_means'].append(np.mean(rebuffering_times) if rebuffering_times else 0.0)
+        detailed_metrics['rebuffering_stds'].append(np.std(rebuffering_times) if rebuffering_times else 0.0)
     
-    # Create comprehensive visualization with 2x3 grid (removed GT PPL and PPL difference)
-    fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+    # Create comprehensive visualization with 2x3 grid (added rebuffering time analysis)
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
     fig.suptitle(f'Unified Threshold Analysis - {data_source.upper()} Dataset', fontsize=18, fontweight='bold')
     
     # 1. Decomposed VLM PPL - One line per video
@@ -2223,7 +2322,7 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         ax2.set_title('Fluency vs Threshold (Per Video)')
     
     # 3. Response count with per-video breakdown
-    ax3 = axes[1, 1]
+    ax3 = axes[0, 2]
     if all_threshold_results:
         colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
         
@@ -2265,7 +2364,7 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         ax3.set_title('Response Count vs Threshold (Per Video)')
     
     # 4. Frame Score Trends - Time vs Frame Score for Different Videos
-    ax4 = axes[2, 2]
+    ax4 = axes[1, 0]
     if all_frame_scores_data:
         colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
         for i, (threshold, threshold_data) in enumerate(all_frame_scores_data.items()):
@@ -2306,6 +2405,52 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         legend1 = ax4.legend(handles=video_legend_elements, title='Videos', loc='lower left', fontsize=8)
         legend2 = ax4.legend(handles=threshold_legend_elements, title='Thresholds', loc='lower right', fontsize=8)
         ax4.add_artist(legend1)  # Add first legend back after second one overwrites it
+    else:
+        ax4.text(0.5, 0.5, 'No frame score data available', ha='center', va='center', transform=ax4.transAxes)
+        ax4.set_title('Frame Score Trends Over Time')
+    
+    # 5. Rebuffering Time vs Threshold (Per Video)
+    ax5 = axes[1, 1]
+    if all_rebuffering_data:
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        # Collect rebuffering data for each video across thresholds
+        video_rebuffering = {}  # {video_idx: {threshold: avg_rebuffering}}
+        
+        for threshold in thresholds:
+            if threshold in all_rebuffering_data:
+                threshold_data = all_rebuffering_data[threshold]
+                for j, (conv_key, conv_data) in enumerate(threshold_data.items()):
+                    if j not in video_rebuffering:
+                        video_rebuffering[j] = {}
+                    
+                    # Get average rebuffering time for this video at this threshold
+                    if 'average_rebuffering_time' in conv_data:
+                        video_rebuffering[j][threshold] = conv_data['average_rebuffering_time']
+        
+        # Plot each video's rebuffering trajectory
+        for j, video_data in video_rebuffering.items():
+            if len(video_data) > 1:  # Only plot if we have data for multiple thresholds
+                video_thresholds = sorted(video_data.keys())
+                video_rebuffering_list = [video_data[t] for t in video_thresholds]
+                color = colors[j % len(colors)]
+                ax5.plot(video_thresholds, video_rebuffering_list, 'o-', color=color, linewidth=2, markersize=4, 
+                        label=f'Video {j+1}', alpha=0.8)
+        
+        # Add average rebuffering time line with error bars
+        if detailed_metrics['rebuffering_means']:
+            ax5.errorbar(thresholds, detailed_metrics['rebuffering_means'], yerr=detailed_metrics['rebuffering_stds'], 
+                        fmt='s-', color='black', linewidth=3, markersize=8, capsize=5, 
+                        label='Average Rebuffering Time ± Std', alpha=0.9)
+        
+        ax5.set_xlabel('Streaming Threshold')
+        ax5.set_ylabel('Rebuffering Time (seconds)')
+        ax5.set_title('Rebuffering Time vs Threshold (Per Video)')
+        ax5.grid(True, alpha=0.3)
+        ax5.legend(fontsize=9)
+    else:
+        ax5.text(0.5, 0.5, 'No rebuffering data available', ha='center', va='center', transform=ax5.transAxes)
+        ax5.set_title('Rebuffering Time vs Threshold (Per Video)')
     
     plt.tight_layout()
     
@@ -2496,7 +2641,6 @@ def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, dev
             
     except Exception as e:
         print(f"PPL calculation error: {e}")
-        import traceback
         traceback.print_exc()
         return None
 
@@ -2571,9 +2715,6 @@ def create_conversation_with_vlm_prefix(generated_turns, gt_time, user_prompt, g
 
 def create_dual_ppl_frame_visualization(results, output_dir="timing_plots", data_source="goalstep"):
     """Create visualization showing how dual PPLs vary over frames in different videos."""
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import os
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -2704,9 +2845,6 @@ Responses: {len(all_gt_prefix_visual)}"""
 
 def create_ppl_over_time_visualization(video_data, output_dir="timing_plots", data_source="goalstep"):
     """Create visualization showing PPL variation over time for different videos."""
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import os
     
     if not video_data:
         return
@@ -2723,7 +2861,7 @@ def create_ppl_over_time_visualization(video_data, output_dir="timing_plots", da
         response_indices = range(len(data['gt_prefix_ppls_visual']))
         ax1.plot(response_indices, data['gt_prefix_ppls_visual'], 'o-', color=colors[i], 
                 label=f'Video {data["video_idx"]} (Visual)', alpha=0.7, markersize=4)
-        if data['gt_prefix_ppls_no_visual']:
+        if 'gt_prefix_ppls_no_visual' in data and data['gt_prefix_ppls_no_visual']:
             ax1.plot(response_indices, data['gt_prefix_ppls_no_visual'], 's--', color=colors[i], 
                     label=f'Video {data["video_idx"]} (No Visual)', alpha=0.7, markersize=4)
     
@@ -2740,7 +2878,7 @@ def create_ppl_over_time_visualization(video_data, output_dir="timing_plots", da
         response_indices = range(len(data['vlm_prefix_ppls_visual']))
         ax2.plot(response_indices, data['vlm_prefix_ppls_visual'], 'o-', color=colors[i], 
                 label=f'Video {data["video_idx"]} (Visual)', alpha=0.7, markersize=4)
-        if data['vlm_prefix_ppls_no_visual']:
+        if 'vlm_prefix_ppls_no_visual' in data and data['vlm_prefix_ppls_no_visual']:
             ax2.plot(response_indices, data['vlm_prefix_ppls_no_visual'], 's--', color=colors[i], 
                     label=f'Video {data["video_idx"]} (No Visual)', alpha=0.7, markersize=4)
     
@@ -3026,7 +3164,6 @@ def evaluate_video_with_model(model, tokenizer, video_tensor, conversation, gene
                 
             except Exception as e:
                 print(f"Warning: stream_evaluate failed: {e}")
-                import traceback
                 traceback.print_exc()
         else:
             print(f"Warning: Model does not have stream_evaluate method")
@@ -3036,7 +3173,6 @@ def evaluate_video_with_model(model, tokenizer, video_tensor, conversation, gene
         
     except Exception as e:
         print(f"Warning: Video evaluation failed: {e}")
-        import traceback
         traceback.print_exc()
         return calculate_basic_content_metrics(generated_turns, conversation)
 
@@ -3086,83 +3222,6 @@ def calculate_basic_content_metrics(generated_turns, conversation):
         'lm_ppl': lm_ppl,
         'fluency': fluency
     }
-
-def create_ppl_over_time_visualization(results, output_dir="timing_plots", data_source="goalstep"):
-    """Create visualization showing how PPL varies over time for different videos."""
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import os
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Collect data from all videos
-    video_data = []
-    for i, result in enumerate(results):
-        if 'ppl_data' in result and 'gt_ppls_gt_prefix_visual' in result['ppl_data']:
-            gt_prefix_ppls_visual = result['ppl_data']['gt_ppls_gt_prefix_visual']
-            vlm_prefix_ppls_visual = result['ppl_data']['gt_ppls_vlm_prefix_visual']
-            
-            if gt_prefix_ppls_visual and vlm_prefix_ppls_visual:
-                video_data.append({
-                    'video_idx': i,
-                    'gt_prefix_ppls_visual': gt_prefix_ppls_visual,
-                    'vlm_prefix_ppls_visual': vlm_prefix_ppls_visual,
-                    'num_responses': len(gt_prefix_ppls_visual)
-                })
-    
-    if not video_data:
-        print("No PPL data available for time visualization")
-        return
-    
-    # Create figure with subplots for each video
-    n_videos = len(video_data)
-    fig, axes = plt.subplots(n_videos, 2, figsize=(15, 5 * n_videos))
-    if n_videos == 1:
-        axes = axes.reshape(1, -1)
-    
-    fig.suptitle(f'PPL Evolution Over Time - {data_source.title()} Dataset', fontsize=16, fontweight='bold')
-    
-    for i, data in enumerate(video_data):
-        video_idx = data['video_idx']
-        gt_ppls = data['gt_prefix_ppls_visual']
-        vlm_ppls = data['vlm_prefix_ppls_visual']
-        
-        # Create response indices (time points)
-        response_indices = list(range(1, len(gt_ppls) + 1))
-        
-        # Plot GT Prefix PPL over time
-        ax1 = axes[i, 0]
-        ax1.plot(response_indices, gt_ppls, 'o-', color='blue', linewidth=2, markersize=4, label='GT Prefix PPL')
-        ax1.set_title(f'Video {video_idx + 1}: GT Prefix PPL Over Time', fontweight='bold')
-        ax1.set_xlabel('Response Number')
-        ax1.set_ylabel('PPL')
-        ax1.grid(True, alpha=0.3)
-        ax1.legend()
-        
-        # Plot VLM Prefix PPL over time
-        ax2 = axes[i, 1]
-        ax2.plot(response_indices, vlm_ppls, 'o-', color='red', linewidth=2, markersize=4, label='VLM Prefix PPL')
-        ax2.set_title(f'Video {video_idx + 1}: VLM Prefix PPL Over Time', fontweight='bold')
-        ax2.set_xlabel('Response Number')
-        ax2.set_ylabel('PPL')
-        ax2.grid(True, alpha=0.3)
-        ax2.legend()
-        
-        # Add statistics
-        avg_gt = np.mean(gt_ppls)
-        avg_vlm = np.mean(vlm_ppls)
-        ax1.text(0.05, 0.95, f'Avg: {avg_gt:.2f}', transform=ax1.transAxes, 
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7))
-        ax2.text(0.05, 0.95, f'Avg: {avg_vlm:.2f}', transform=ax2.transAxes,
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral", alpha=0.7))
-    
-    plt.tight_layout()
-    
-    # Save the plot
-    plot_path = os.path.join(output_dir, f'ppl_over_time_{data_source}.png')
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    print(f"📊 PPL over time analysis saved to {plot_path}")
-    plt.close()
 
 if __name__ == "__main__":
     main()
