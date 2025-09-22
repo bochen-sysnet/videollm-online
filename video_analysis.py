@@ -390,6 +390,280 @@ def create_generated_word_count_analysis(results, output_dir=Config.OUTPUT_DIR, 
     return output_file
 
 
+def create_gt_words_per_time_analysis(data_source, output_dir=Config.OUTPUT_DIR):
+    """
+    Analyze words per time ratio for GT responses.
+    Time is measured from start of each response to start of next GT response or prompt.
+    
+    Args:
+        data_source (str): 'goalstep' or 'narration'
+        output_dir (str): Output directory for plots
+    """
+    print(f"📊 Creating GT words per time analysis for {data_source}...")
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    if data_source == 'goalstep':
+        print("📊 Loading goalstep conversation data from JSON files...")
+        data_path = "datasets/ego4d/v2/annotations/goalstep_livechat_trainval_filtered_21k.json"
+        with open(data_path, 'r') as f:
+            goalstep_data = json.load(f)
+        
+        # Collect words per time data from goalstep data
+        words_per_time_data = []
+        all_conversations = []
+        example_cases = []  # Store examples for debugging
+        
+        for conversation_data in goalstep_data:
+            if isinstance(conversation_data, dict):
+                conversation = conversation_data.get('conversation', [])
+                if conversation:
+                    all_conversations.append(conversation)
+        
+        # Process each conversation to calculate words per time
+        for conversation in all_conversations:
+            # Get all turns with timestamps
+            timed_turns = []
+            for turn in conversation:
+                if 'time' in turn and 'content' in turn:
+                    timed_turns.append({
+                        'time': turn['time'],
+                        'role': turn['role'],
+                        'content': turn['content']
+                    })
+            
+            # Sort by time
+            timed_turns.sort(key=lambda x: x['time'])
+            
+            # Calculate words per time for each assistant response
+            for i, turn in enumerate(timed_turns):
+                if turn['role'] == 'assistant':
+                    # Count words in this response
+                    word_count = len(turn['content'].split())
+                    
+                    # Find next turn (response or prompt) to calculate time duration
+                    next_time = None
+                    for j in range(i + 1, len(timed_turns)):
+                        if timed_turns[j]['role'] in ['assistant', 'user']:
+                            next_time = timed_turns[j]['time']
+                            break
+                    
+                    if next_time is not None and word_count > 0:
+                        time_duration = next_time - turn['time']
+                        if time_duration > 0:  # Avoid division by zero
+                            words_per_time = word_count / time_duration
+                            words_per_time_data.append(words_per_time)
+                            
+                            # Store examples for debugging (high WPS cases)
+                            if words_per_time > 50:  # Very high WPS
+                                example_cases.append({
+                                    'word_count': word_count,
+                                    'time_duration': time_duration,
+                                    'words_per_time': words_per_time,
+                                    'response_content': turn['content'][:100] + "..." if len(turn['content']) > 100 else turn['content'],
+                                    'response_time': turn['time'],
+                                    'next_time': next_time
+                                })
+        
+        print(f"📊 Processed {len(words_per_time_data)} GT responses from {len(all_conversations)} conversations")
+        
+        # Print examples of high WPS cases
+        if example_cases:
+            print(f"📊 Found {len(example_cases)} cases with WPS > 50. Examples:")
+            for i, case in enumerate(example_cases[:5]):  # Show first 5 examples
+                print(f"   Example {i+1}: {case['word_count']} words / {case['time_duration']:.3f}s = {case['words_per_time']:.1f} wps")
+                print(f"     Response: '{case['response_content']}'")
+                print(f"     Time: {case['response_time']:.1f}s -> {case['next_time']:.1f}s")
+                print()
+        
+    else:  # narration
+        print("📊 Loading narration conversation data from JSON files...")
+        data_path = "datasets/ego4d/v2/annotations/refined_narration_stream_val.json"
+        with open(data_path, 'r') as f:
+            narration_data = json.load(f)
+        
+        # Collect words per time data from narration data
+        words_per_time_data = []
+        example_cases = []  # Store examples for debugging
+        
+        for video_uid, conversations in narration_data.items():
+            # Each video can have multiple conversations
+            for conversation_id, conversation_data in conversations.items():
+                # conversation_data is a list of narration entries
+                if isinstance(conversation_data, list):
+                    # Sort entries by time
+                    timed_entries = []
+                    for entry in conversation_data:
+                        if isinstance(entry, dict) and 'time' in entry and 'text' in entry:
+                            timed_entries.append({
+                                'time': entry['time'],
+                                'text': entry['text']
+                            })
+                    
+                    timed_entries.sort(key=lambda x: x['time'])
+                    
+                    # Calculate words per time for each response
+                    for i, entry in enumerate(timed_entries):
+                        # Count words in this response
+                        word_count = len(entry['text'].split())
+                        
+                        # Find next entry to calculate time duration
+                        next_time = None
+                        if i + 1 < len(timed_entries):
+                            next_time = timed_entries[i + 1]['time']
+                        
+                        if next_time is not None and word_count > 0:
+                            time_duration = next_time - entry['time']
+                            if time_duration > 0:  # Avoid division by zero
+                                words_per_time = word_count / time_duration
+                                words_per_time_data.append(words_per_time)
+                                
+                                # Store examples for debugging (high WPS cases)
+                                if words_per_time > 50:  # Very high WPS
+                                    example_cases.append({
+                                        'word_count': word_count,
+                                        'time_duration': time_duration,
+                                        'words_per_time': words_per_time,
+                                        'response_content': entry['text'][:100] + "..." if len(entry['text']) > 100 else entry['text'],
+                                        'response_time': entry['time'],
+                                        'next_time': next_time
+                                    })
+        
+        # Print examples of high WPS cases
+        if example_cases:
+            print(f"📊 Found {len(example_cases)} cases with WPS > 50. Examples:")
+            for i, case in enumerate(example_cases[:5]):  # Show first 5 examples
+                print(f"   Example {i+1}: {case['word_count']} words / {case['time_duration']:.3f}s = {case['words_per_time']:.1f} wps")
+                print(f"     Response: '{case['response_content']}'")
+                print(f"     Time: {case['response_time']:.1f}s -> {case['next_time']:.1f}s")
+                print()
+    
+    if not words_per_time_data:
+        print("⚠️ No words per time data found")
+        return None
+    
+    # Calculate conversation-level WPS data
+    conversation_wps_data = []
+    
+    if data_source == 'goalstep':
+        # Re-process to get conversation-level data
+        for conversation_data in goalstep_data:
+            if isinstance(conversation_data, dict):
+                conversation = conversation_data.get('conversation', [])
+                if conversation:
+                    # Get all turns with timestamps
+                    timed_turns = []
+                    for turn in conversation:
+                        if 'time' in turn and 'content' in turn:
+                            timed_turns.append({
+                                'time': turn['time'],
+                                'role': turn['role'],
+                                'content': turn['content']
+                            })
+                    
+                    # Sort by time
+                    timed_turns.sort(key=lambda x: x['time'])
+                    
+                    # Calculate conversation-level WPS
+                    conv_words_per_time = []
+                    for i, turn in enumerate(timed_turns):
+                        if turn['role'] == 'assistant':
+                            word_count = len(turn['content'].split())
+                            next_time = None
+                            for j in range(i + 1, len(timed_turns)):
+                                if timed_turns[j]['role'] in ['assistant', 'user']:
+                                    next_time = timed_turns[j]['time']
+                                    break
+                            
+                            if next_time is not None and word_count > 0:
+                                time_duration = next_time - turn['time']
+                                if time_duration > 0:
+                                    wpt = word_count / time_duration
+                                    conv_words_per_time.append(wpt)
+                    
+                    if conv_words_per_time:
+                        conversation_wps_data.append(np.mean(conv_words_per_time))
+    
+    else:  # narration
+        # Re-process to get conversation-level data
+        for video_uid, conversations in narration_data.items():
+            for conversation_id, conversation_data in conversations.items():
+                if isinstance(conversation_data, list):
+                    # Sort entries by time
+                    timed_entries = []
+                    for entry in conversation_data:
+                        if isinstance(entry, dict) and 'time' in entry and 'text' in entry:
+                            timed_entries.append({
+                                'time': entry['time'],
+                                'text': entry['text']
+                            })
+                    
+                    timed_entries.sort(key=lambda x: x['time'])
+                    
+                    # Calculate conversation-level WPS
+                    conv_words_per_time = []
+                    for i, entry in enumerate(timed_entries):
+                        word_count = len(entry['text'].split())
+                        next_time = None
+                        if i + 1 < len(timed_entries):
+                            next_time = timed_entries[i + 1]['time']
+                        
+                        if next_time is not None and word_count > 0:
+                            time_duration = next_time - entry['time']
+                            if time_duration > 0:
+                                wpt = word_count / time_duration
+                                conv_words_per_time.append(wpt)
+                    
+                    if conv_words_per_time:
+                        conversation_wps_data.append(np.mean(conv_words_per_time))
+    
+    # Create simplified analysis plot
+    plt.style.use(Config.PLOT_STYLE)
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+    fig.suptitle(f'GT Words per Time Analysis - {data_source.title()}', fontsize=16, fontweight='bold')
+    
+    # 1. Response-level WPS distribution
+    ax1 = axes[0]
+    ax1.hist(words_per_time_data, bins=50, alpha=0.7, color='lightblue', edgecolor='black')
+    ax1.set_xlabel('Words per Second')
+    ax1.set_ylabel('Frequency')
+    ax1.set_title('Response-Level WPS Distribution')
+    ax1.grid(True, alpha=0.3)
+    
+    # Add basic statistics
+    mean_wpt = np.mean(words_per_time_data)
+    median_wpt = np.median(words_per_time_data)
+    ax1.axvline(mean_wpt, color='red', linestyle='--', label=f'Mean: {mean_wpt:.2f}')
+    ax1.axvline(median_wpt, color='orange', linestyle='--', label=f'Median: {median_wpt:.2f}')
+    ax1.legend()
+    
+    # 2. Conversation-level WPS distribution
+    ax2 = axes[1]
+    ax2.hist(conversation_wps_data, bins=50, alpha=0.7, color='lightcoral', edgecolor='black')
+    ax2.set_xlabel('Words per Second')
+    ax2.set_ylabel('Frequency')
+    ax2.set_title('Conversation-Level WPS Distribution')
+    ax2.grid(True, alpha=0.3)
+    
+    # Add basic statistics
+    mean_conv_wpt = np.mean(conversation_wps_data)
+    median_conv_wpt = np.median(conversation_wps_data)
+    ax2.axvline(mean_conv_wpt, color='red', linestyle='--', label=f'Mean: {mean_conv_wpt:.2f}')
+    ax2.axvline(median_conv_wpt, color='orange', linestyle='--', label=f'Median: {median_conv_wpt:.2f}')
+    ax2.legend()
+    
+    plt.tight_layout()
+    
+    output_file = os.path.join(output_dir, f'gt_words_per_time_analysis_{data_source}.png')
+    plt.savefig(output_file, dpi=Config.FIGURE_DPI, bbox_inches='tight')
+    plt.close()
+    
+    print(f"📊 GT words per time analysis saved to: {output_file}")
+    print(f"📊 Response-Level Summary: Mean={np.mean(words_per_time_data):.3f} wps, Median={np.median(words_per_time_data):.3f} wps")
+    print(f"📊 Conversation-Level Summary: Mean={np.mean(conversation_wps_data):.3f} wps, Median={np.median(conversation_wps_data):.3f} wps")
+    return output_file
+
+
 def analyze_datasets():
     """
     Analyze both goalstep and narration datasets in one run.
@@ -406,6 +680,9 @@ def analyze_datasets():
         try:
             # Create ground truth word count analysis
             create_gt_word_count_analysis(data_source)
+            
+            # Create GT words per time analysis
+            create_gt_words_per_time_analysis(data_source)
             
             print(f"✅ {data_source} analysis completed successfully")
             
@@ -425,6 +702,8 @@ def main():
                        default='both', help='Dataset to analyze')
     parser.add_argument('--output_dir', default='timing_plots', 
                        help='Output directory for plots')
+    parser.add_argument('--analysis_type', choices=['word_count', 'words_per_time', 'both'], 
+                       default='both', help='Type of analysis to run')
     
     args = parser.parse_args()
     
@@ -432,10 +711,22 @@ def main():
     Config.OUTPUT_DIR = args.output_dir
     
     if args.data_source == 'both':
-        analyze_datasets()
+        if args.analysis_type == 'both':
+            analyze_datasets()
+        else:
+            # Run specific analysis on both datasets
+            for data_source in ['goalstep', 'narration']:
+                print(f"📊 Analyzing {data_source} dataset...")
+                if args.analysis_type == 'word_count':
+                    create_gt_word_count_analysis(data_source)
+                elif args.analysis_type == 'words_per_time':
+                    create_gt_words_per_time_analysis(data_source)
     else:
         print(f"📊 Analyzing {args.data_source} dataset...")
-        create_gt_word_count_analysis(args.data_source)
+        if args.analysis_type == 'word_count' or args.analysis_type == 'both':
+            create_gt_word_count_analysis(args.data_source)
+        if args.analysis_type == 'words_per_time' or args.analysis_type == 'both':
+            create_gt_words_per_time_analysis(args.data_source)
 
 
 if __name__ == "__main__":

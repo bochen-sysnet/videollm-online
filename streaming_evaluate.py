@@ -47,7 +47,7 @@ class Config:
     
     # Streaming thresholds for different dataset types
     STREAMING_THRESHOLD_GOALSTEP = 0.725  # Threshold for goalstep dataset (works well with user queries)
-    STREAMING_THRESHOLD_NARRATION = 0.95  # Threshold for narration dataset (needs higher threshold for generation)
+    STREAMING_THRESHOLD_NARRATION = 0.95  # Threshold for narration dataset (testing higher threshold)
     
     # Visualization
     OUTPUT_DIR = "timing_plots"
@@ -57,7 +57,7 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 100                # Max frames for evaluation to avoid OOM
+    MAX_EVAL_FRAMES = 50              # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 50           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
@@ -280,87 +280,7 @@ class FilteredEgo4DRefinedNarrationStream:
                 conversations_per_video[video_uid] = 0
             conversations_per_video[video_uid] += 1
         
-        # print(f"📊 Dataset Statistics:")
-        # print(f"   • Total videos: {len(unique_videos)}")
         print(f"   • Total conversations: {len(self.conversations)}")
-        # print(f"   • Average conversations per video: {len(self.conversations) / len(unique_videos):.2f}")
-        # print(f"   • Min conversations per video: {min(conversations_per_video.values())}")
-        # print(f"   • Max conversations per video: {max(conversations_per_video.values())}")
-        # print(f"   • Average conversation duration: {sum(c['duration'] for c in self.conversations) / len(self.conversations):.2f}s")
-        
-        # Create and show conversation distribution analysis at the beginning
-#         self.create_initial_distribution_analysis(conversations_per_video, unique_videos)
-    
-#     def create_initial_distribution_analysis(self, conversations_per_video, unique_videos):
-#         """Create initial distribution analysis showing all videos and their conversation counts"""
-#         import matplotlib.pyplot as plt
-#         import numpy as np
-#         import os
-        
-#         # Create output directory if it doesn't exist
-#         os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
-        
-#         # Sort videos by conversation count for better visualization
-#         sorted_videos = sorted(unique_videos, key=lambda x: conversations_per_video[x], reverse=True)
-#         video_indices = list(range(1, len(sorted_videos) + 1))
-#         conversation_counts = [conversations_per_video[vid] for vid in sorted_videos]
-        
-#         # Create the plot
-#         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_MEDIUM[1]))
-#         fig.suptitle(f'Conversation Distribution Analysis - {self.data_source.upper()} Dataset', fontsize=16, fontweight='bold')
-        
-#         # Plot 1: Video Index vs Number of Conversations (as requested)
-#         bars = ax1.bar(video_indices, conversation_counts, color='skyblue', alpha=0.7)
-#         ax1.set_xlabel('Video Index (sorted by conversation count)')
-#         ax1.set_ylabel('Number of Conversations')
-#         ax1.set_title('Conversations per Video')
-#         ax1.grid(True, alpha=0.3)
-        
-#         # Add value labels on bars (only for bars with height > 0)
-#         for i, (bar, count) in enumerate(zip(bars, conversation_counts)):
-#             if count > 0:
-#                 ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.05, 
-#                         str(count), ha='center', va='bottom', fontsize=8)
-        
-#         # Plot 2: Distribution of conversation counts
-#         unique_counts, count_frequencies = np.unique(conversation_counts, return_counts=True)
-#         ax2.bar(unique_counts, count_frequencies, color='lightcoral', alpha=0.7)
-#         ax2.set_xlabel('Number of Conversations per Video')
-#         ax2.set_ylabel('Number of Videos')
-#         ax2.set_title('Distribution of Conversation Counts')
-#         ax2.grid(True, alpha=0.3)
-        
-#         # Add value labels
-#         for count, freq in zip(unique_counts, count_frequencies):
-#             ax2.text(count, freq + 0.1, str(freq), ha='center', va='bottom', fontsize=8)
-        
-#         # Add summary statistics
-#         total_videos = len(unique_videos)
-#         total_conversations = sum(conversation_counts)
-#         avg_conversations = total_conversations / total_videos if total_videos > 0 else 0
-#         max_conversations = max(conversation_counts) if conversation_counts else 0
-#         min_conversations = min(conversation_counts) if conversation_counts else 0
-        
-#         stats_text = f"""Dataset Summary:
-# Total Videos: {total_videos}
-# Total Conversations: {total_conversations}
-# Avg Conversations/Video: {avg_conversations:.2f}
-# Max Conversations/Video: {max_conversations}
-# Min Conversations/Video: {min_conversations}"""
-        
-#         fig.text(0.02, 0.02, stats_text, fontsize=10, verticalalignment='bottom',
-#                  bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
-        
-#         plt.tight_layout()
-        
-#         # Save the plot
-#         output_path = os.path.join(Config.OUTPUT_DIR, f'initial_conversation_distribution_{self.data_source}.png')
-#         plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
-#         print(f"📊 Initial conversation distribution analysis saved to: {output_path}")
-        
-#         plt.show()
-        
-#         return output_path
     
     def __len__(self):
         return len(self.conversations)
@@ -1111,7 +1031,7 @@ def process_query_response(model, tokenizer, device, query_text, video_time, pas
     
     return f"(Video Time = {video_time}s) User: {query_text}", f"(Video Time = {video_time}s) Assistant: {cleaned_response}"
 
-def process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, data_source='goalstep'):
+def process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, data_source='goalstep', custom_threshold=None):
     """Process a single conversation with continuous frame-by-frame processing and response generation."""
     
     video_uid = conversation_data['video_uid']
@@ -1160,7 +1080,7 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
         user_prompts = [(0.0, user_prompt)]  # Add at time 0.0
     
     # Create LiveInfer instance for continuous processing
-    liveinfer = SimpleLiveInfer(model, tokenizer, device)
+    liveinfer = SimpleLiveInfer(model, tokenizer, device, dataset, custom_threshold)
     liveinfer.load_video(video_path)
     
     # Add user prompts to the query queue at their normalized times (for processing)
@@ -1434,496 +1354,15 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
     
     return result, memory_data
 
-def process_goalstep_video(model, tokenizer, video_uid, video_path, dataset, device):
-    """Process a single goalstep video with continuous frame-by-frame processing and response generation."""
-    
-    # Create a conversation_id from video_uid for consistency
-    conversation_id = f"goalstep_video_{video_uid}"
-    
-    print(f"📹 Loading video metadata: {video_path}")
-    
-    # Get video metadata without loading the entire video
-    from torchvision.io import read_video
-    try:
-        # Load only metadata first
-        video_reader = read_video(video_path, pts_unit='sec', output_format='TCHW')
-        num_frames = video_reader[0].size(0)
-        video_duration = num_frames / Config.FRAME_FPS
-        print(f"Video metadata: {num_frames} frames, {video_duration:.2f}s duration")
-        
-        # Don't load the entire video tensor - we'll load frames on-demand
-        video_tensor = None
-    except Exception as e:
-        print(f"Error loading video metadata: {e}")
-        return None
-    
-    # Get the normalized conversation for this video (first user prompt at time 0)
-    if video_uid not in dataset.goalstep_normalized_conversations:
-        print(f"❌ No normalized conversation found for video {video_uid}")
-        return None
-    
-    normalized_conversation = list(dataset.goalstep_normalized_conversations[video_uid].values())[0]  # Get first conversation
-    
-    # Get timestamp offset for converting back to original timestamps for visualization
-    timestamp_offset = dataset.goalstep_timestamp_offsets.get(video_uid, 0.0)
-    
-    # Extract user prompts and their normalized timestamps
-    user_prompts = [(turn['time'], turn['content']) for turn in normalized_conversation if turn['role'] == 'user']
-    
-    # Create LiveInfer instance for continuous processing
-    liveinfer = SimpleLiveInfer(model, tokenizer, device)
-    liveinfer.load_video(video_path)
-    
-    # Add user prompts to the query queue at their normalized times (for processing)
-    for prompt_time, prompt_content in user_prompts:
-        liveinfer.input_query_stream(prompt_content, video_time=prompt_time)
-    
-    # Process frames continuously with timing measurements
-    total_visual_embedding_time = 0.0
-    total_model_forward_time = 0.0
-    total_generation_time = 0.0
-    frame_processing_times = []
-    generated_turns = []
-    frame_scores_data = None  # Will store frame_token_interval_score data
-    
-    # Process frames one by one (like benchmark.py)
-    # Use the actual conversation duration from goalstep data to determine how many frames to process
-    conversation_duration = None
-    if (hasattr(dataset, 'goalstep_durations') and video_uid in dataset.goalstep_durations):
-        # Get the duration for the first conversation of this video
-        conversation_duration = list(dataset.goalstep_durations[video_uid].values())[0]
-        conversation_based_limit = int(conversation_duration * 2)  # 2fps = 0.5 second per frame
-        print(f"📊 Using conversation duration {conversation_duration:.1f}s for video {video_uid}")
-    else:
-        # Fallback to max normalized time if duration not available
-        max_normalized_time = max([turn['time'] for turn in normalized_conversation]) if normalized_conversation else 100.0
-        conversation_based_limit = int(max_normalized_time * 2) + 50
-        print(f"📊 Using max normalized time {max_normalized_time:.1f}s for video {video_uid}")
-    
-    # Calculate dynamic frame limit based on available memory
-    memory_based_limit = calculate_max_frames_for_memory()
-    
-    # Use conversation duration as the primary limit, but don't exceed video frames or memory
-    test_frames = min(num_frames, conversation_based_limit, memory_based_limit, Config.MAX_EVAL_FRAMES)
-    
-    # Print memory information
-    memory_info = get_gpu_memory_info()
-    if memory_info:
-        print_memory_status()
-        print(f"📊 Memory-based frame limit: {memory_based_limit}")
-    
-    print(f"🔄 Processing {test_frames} frames continuously...")
-    
-    # Track initial memory for growth analysis
-    initial_memory = get_gpu_memory()
-    
-    # Collect memory data for visualization
-    memory_data = {
-        'frames': [],
-        'memory_usage': [],
-        'memory_growth': [],
-        'memory_per_frame': []
-    }
-    
-    # Collect frame score data for visualization
-    frame_scores_data = {
-        'frame_scores': [],
-        'frame_times': [],
-        'threshold': 0.0,
-        'response_triggers': [],
-        'response_times': []
-    }
-    
-    for frame_idx in range(test_frames):
-        video_time = frame_idx / Config.FRAME_FPS  # Convert frame index to time
-        
-        # Monitor memory usage at regular intervals
-        if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
-            current_memory = get_gpu_memory()
-            memory_growth = current_memory - initial_memory
-            memory_per_frame = memory_growth / max(1, frame_idx) if frame_idx > 0 else 0
-            
-            # Store data for visualization
-            memory_data['frames'].append(frame_idx)
-            memory_data['memory_usage'].append(current_memory)
-            memory_data['memory_growth'].append(memory_growth)
-            memory_data['memory_per_frame'].append(memory_per_frame)
-            
-            # Dynamic frame limit adjustment based on actual memory growth
-            if frame_idx > 100:  # After 100 frames, we have good data
-                remaining_memory = 24000 - current_memory  # Assume 24GB total
-        
-        # Measure total frame processing time (RGB to processed)
-        frame_start_time = time.time()
-        
-        try:
-            # Process the frame with detailed timing (like benchmark.py)
-            liveinfer.input_video_stream(video_time)
-            query, response = liveinfer()
-            
-            frame_processing_time = time.time() - frame_start_time
-            
-            # Get detailed timing data
-            timing_data = liveinfer.get_timing_data()
-            
-            # Extract detailed metrics (like benchmark.py)
-            visual_embedding_time = timing_data.get('visual_embedding_time', 0.0)
-            streaming_time = timing_data.get('streaming_time', 0.0)  # This is model forward time
-            generation_time = timing_data.get('generation_time', 0.0)
-            
-            # Accumulate timing data
-            total_visual_embedding_time += visual_embedding_time
-            total_model_forward_time += streaming_time  # Use streaming_time as model forward time
-            total_generation_time += generation_time
-            
-            # Store per-frame processing time
-            frame_processing_times.append(frame_processing_time)
-            
-            # Record response generation separately (like benchmark.py)
-            if response:
-                response_time = video_time  # Use actual video time
-                generated_turns.append({
-                    'time': response_time,
-                    'text': response,
-                    'user_prompt': query or "Frame processing",
-                    'generation_time': generation_time
-                })
-            
-            # Record conversation if there's a query or response (like benchmark.py)
-            if query or response:
-                print(f"[{video_time:.2f}s] Query: {query}")
-                print(f"[{video_time:.2f}s] Response: {response}")
-                if generation_time > 0:
-                    print(f"  └─ Generation time: {generation_time:.3f}s")
-                
-        except Exception as e:
-            print(f"❌ Error processing frame {frame_idx} at time {video_time:.2f}s: {e}")
-            import traceback
-            traceback.print_exc()
-            # Continue processing other frames
-            frame_processing_time = time.time() - frame_start_time
-            frame_processing_times.append(frame_processing_time)
-    
-    # Collect frame scores data after processing
-    frame_scores_data = liveinfer.get_frame_scores()
-    
-    # Calculate the correct total processing time
-    total_frame_processing_time = sum(frame_processing_times)
-    total_processing_time = total_frame_processing_time
-    
-    # Calculate overhead time (time not captured in individual components)
-    total_measured_components = total_visual_embedding_time + total_model_forward_time + total_generation_time
-    overhead_time = total_frame_processing_time - total_measured_components
-    
-    visual_embedding_time = total_visual_embedding_time
-    model_forward_time = total_model_forward_time
-    generation_time = total_generation_time
-    num_processed_frames = len(frame_processing_times)
-    
-    # Print detailed timing metrics for verification
-    print(f"🔍 GOALSTEP TIMING METRICS FOR VIDEO {video_uid[:8]}...:")
-    print(f"   • Video duration: {num_frames / Config.FRAME_FPS:.2f}s")
-    print(f"   • Frames processed: {num_processed_frames}")
-    print(f"   • Generated responses: {len(generated_turns)}")
-    print_timing_metrics(visual_embedding_time, model_forward_time, generation_time, num_processed_frames, len(generated_turns))
-    print(f"   • Total processing time: {total_processing_time:.3f}s")
-    print(f"   • Timing breakdown: Visual={visual_embedding_time/total_processing_time*100:.1f}%, Model={model_forward_time/total_processing_time*100:.1f}%, Generation={generation_time/total_processing_time*100:.1f}%")
-    print("-" * 60)
-    
-    # Calculate content-based metrics using model evaluation
-    content_metrics = calculate_metrics_like_benchmark(
-        model, tokenizer, liveinfer.video_tensor, normalized_conversation, generated_turns, device, normalized_conversation
-    )
-    
-    # Convert generated turns back to original timestamps for visualization
-    generated_turns_original = []
-    for turn in generated_turns:
-        turn_original = turn.copy()
-        turn_original['time'] = turn['time'] + timestamp_offset
-        turn_original['original_time'] = turn['time'] + timestamp_offset
-        generated_turns_original.append(turn_original)
-    
-    # Convert normalized conversation back to original timestamps for visualization
-    ground_truth_conversation_original = []
-    for turn in normalized_conversation:
-        turn_original = turn.copy()
-        turn_original['time'] = turn['original_time']  # Use stored original time
-        ground_truth_conversation_original.append(turn_original)
-    
-    # Find first user time for normalization
-    first_user_time = None
-    for turn in ground_truth_conversation_original:
-        if turn['role'] == 'user' and 'time' in turn:
-            if first_user_time is None:
-                first_user_time = turn['time']
-            break
-    
-    # Create result summary with all required keys
-    result = {
-        'conversation_id': conversation_id,
-        'video_id': video_uid,
-        'num_frames': num_frames,
-        'generated_turns': len(generated_turns),
-        'ground_truth_turns': len(normalized_conversation),
-        'generated_responses': generated_turns_original,  # Use original timestamps for visualization
-        'ground_truth_conversation': ground_truth_conversation_original,  # Use original timestamps for visualization
-        'first_user_time': first_user_time,  # Add first user time for normalization
-        'lm_ppl': content_metrics.get('lm_ppl', 0.0) if content_metrics else 0.0,
-        'fluency': fluency_score,  # Use actual calculated fluency with temporal alignment
-            'ppl_data': content_metrics.get('ppl_data', {}) if content_metrics else {},  # Include PPL data for visualization
-        'total_tokens': 0,  # Placeholder
-        'visual_embedding_time': visual_embedding_time,
-        'model_forward_time': model_forward_time,
-        'generation_time': generation_time,
-        'total_processing_time': total_processing_time,
-        'frame_processing_times': frame_processing_times,  # Real per-frame times from actual measurements
-        'eos_timing': {'eos_detection_time': 0.0, 'with_eos': 0.0, 'without_eos': 0.0},  # Placeholder
-        'conversation_turns': len(generated_turns),
-        'video_duration': num_frames / Config.FRAME_FPS,  # Add video duration for consistency
-        'frame_scores_data': frame_scores_data  # Add frame_token_interval_score data
-    }
-    
-    # Create timeline with interleaved user prompts, ground truth, and generated responses
-    # Use original timestamps for visualization
-    timeline_events = []
-    
-    # Add user prompts (using original timestamps for visualization)
-    for turn in ground_truth_conversation_original:
-        if turn['role'] == 'user':
-            timeline_events.append({
-                'time': turn['time'],
-                'type': 'user_prompt',
-                'content': turn['content']
-            })
-    
-    # Add ground truth responses (using original timestamps for visualization)
-    for turn in ground_truth_conversation_original:
-        if turn['role'] == 'assistant':
-            timeline_events.append({
-                'time': turn['time'],
-                'type': 'ground_truth',
-                'content': turn['content']
-            })
-    
-    # Add generated responses (using original timestamps for visualization)
-    for turn in generated_turns_original:
-        timeline_events.append({
-            'time': turn['time'],
-            'type': 'generated',
-            'content': turn['text']
-        })
-    
-    # Sort by time
-    timeline_events.sort(key=lambda x: x['time'])
-    
-    # Calculate and print fluency details with temporal alignment
-    total_turns = len(generated_turns)
-    total_gt_turns = len([t for t in original_conversation if t['role'] == 'assistant'])
-    
-    # Get GT response times and normalize them to start from 0s (when user prompt is given)
-    first_user_time = None
-    for turn in original_conversation:
-        if turn['role'] == 'user':
-            if first_user_time is None:
-                first_user_time = turn['time']
-                break
-    
-    # Fallback: if no user prompt found, use the first assistant response time as reference
-    if first_user_time is None:
-        assistant_times = [t['time'] for t in original_conversation if t['role'] == 'assistant']
-        first_user_time = min(assistant_times) if assistant_times else 0.0
-    
-    # Normalize GT response times to start from 0s
-    gt_response_times = [t['time'] - first_user_time for t in original_conversation if t['role'] == 'assistant']
-    generated_response_times = [t['time'] for t in generated_turns]
-    
-    # Temporal alignment threshold (in seconds) - more lenient alignment
-    temporal_threshold = 1.0  # Allow 1.0 seconds tolerance
-    
-    # Count successful responses that align temporally with GT responses (one-to-one mapping)
-    successful_responses = 0
-    aligned_pairs = []
-    used_gt_times = set()  # Track which GT times have been used
-    
-    for gen_time in generated_response_times:
-        # Find the closest unused GT response time
-        available_gt_times = [t for t in gt_response_times if t not in used_gt_times]
-        if not available_gt_times:
-            break  # No more GT responses available for mapping
-            
-        closest_gt_time = min(available_gt_times, key=lambda x: abs(x - gen_time))
-        time_diff = abs(gen_time - closest_gt_time)
-        
-        if time_diff <= temporal_threshold:
-            # Check if response has reasonable content (≥2 words)
-            gen_turn = next((t for t in generated_turns if t['time'] == gen_time), None)
-            if gen_turn:
-                response_text = gen_turn.get('text', gen_turn.get('content', ''))
-                if response_text and len(response_text.split()) >= 2:
-                    successful_responses += 1
-    # print(f"   • Total processing time: {total_processing_time:.3f}s")
-    # print(f"   • Timing breakdown: Visual={visual_embedding_time/total_processing_time*100:.1f}%, Model={model_forward_time/total_processing_time*100:.1f}%, Generation={generation_time/total_processing_time*100:.1f}%")
-    # print("-" * 60)
-    
-    # Calculate content-based metrics using model evaluation
-    content_metrics = calculate_metrics_like_benchmark(
-        model, tokenizer, liveinfer.video_tensor, conversation, generated_turns, device, original_conversation, 'narration'
-    )
-    
-    # Calculate and print fluency details with temporal alignment
-    total_turns = len(generated_turns)
-    total_gt_turns = len([t for t in original_conversation if t['role'] == 'assistant'])
-    
-    # Get GT response times and normalize them to start from 0s (when user prompt is given)
-    first_user_time_fluency = None
-    for turn in original_conversation:
-        if turn['role'] == 'user':
-            if first_user_time_fluency is None:
-                first_user_time_fluency = turn['time']
-                break
-    
-    # Fallback: if no user prompt found, use the first assistant response time as reference
-    if first_user_time_fluency is None:
-        assistant_times = [t['time'] for t in original_conversation if t['role'] == 'assistant']
-        first_user_time_fluency = min(assistant_times) if assistant_times else 0.0
-    
-    # Normalize GT response times to start from 0s
-    gt_response_times = [t['time'] - first_user_time_fluency for t in original_conversation if t['role'] == 'assistant']
-    generated_response_times = [t['time'] for t in generated_turns]
-    
-    # Temporal alignment threshold (in seconds) - more lenient alignment
-    temporal_threshold = 1.0  # Allow 1.0 seconds tolerance
-    
-    # Count successful responses that align temporally with GT responses (one-to-one mapping)
-    successful_responses = 0
-    aligned_pairs = []
-    used_gt_times = set()  # Track which GT times have been used
-    
-    for gen_time in generated_response_times:
-        # Find the closest unused GT response time
-        available_gt_times = [t for t in gt_response_times if t not in used_gt_times]
-        if not available_gt_times:
-            break  # No more GT responses available for mapping
-            
-        closest_gt_time = min(available_gt_times, key=lambda x: abs(x - gen_time))
-        time_diff = abs(gen_time - closest_gt_time)
-        
-        if time_diff <= temporal_threshold:
-            # Check if response has reasonable content (≥2 words)
-            gen_turn = next((t for t in generated_turns if t['time'] == gen_time), None)
-            if gen_turn:
-                response_text = gen_turn.get('text', gen_turn.get('content', ''))
-                if response_text and len(response_text.split()) >= 2:
-                    successful_responses += 1
-                    aligned_pairs.append((gen_time, closest_gt_time, time_diff))
-                    used_gt_times.add(closest_gt_time)  # Mark this GT time as used
-    
-    fluency_score = successful_responses / total_gt_turns if total_gt_turns > 0 else 0.0
-    fluency_score = max(0.0, min(1.0, fluency_score))  # Clamp to [0, 1]
-    
-    print(f"\n📊 FLUENCY CALCULATION (Temporal Alignment):")
-    print(f"   • Total Generated Responses: {total_turns}")
-    print(f"   • Total GT Responses: {total_gt_turns}")
-    print(f"   • Temporally Aligned Responses (≤{temporal_threshold}s): {successful_responses}")
-    print(f"   • Fluency Score: {fluency_score:.3f} ({successful_responses}/{total_gt_turns})")
-    
-    # Debug: Print first few aligned pairs
-    if aligned_pairs:
-        print(f"   • Sample Aligned Pairs (Gen Time → GT Time, Diff):")
-        for i, (gen_time, gt_time, diff) in enumerate(aligned_pairs[:5]):
-            print(f"     {i+1}. {gen_time:.1f}s → {gt_time:.1f}s (diff: {diff:.1f}s)")
-    
-    # Debug: Print GT and generated times (normalized)
-    print(f"   • GT Response Times (normalized): {[f'{t:.1f}s' for t in gt_response_times[:10]]}")
-    print(f"   • Generated Response Times: {[f'{t:.1f}s' for t in generated_response_times[:10]]}")
-    
-    # Create result summary with all required keys
-    result = {
-        'conversation_id': conversation_id,
-        'video_id': video_uid,
-        'num_frames': num_processed_frames,
-        'generated_turns': len(generated_turns),
-        'ground_truth_turns': len(conversation),
-        'generated_responses': generated_turns,  # Use generated turns as is
-        'ground_truth_conversation': original_conversation,  # Use original conversation
-        'lm_ppl': content_metrics.get('lm_ppl', 0.0) if content_metrics else 0.0,
-        'fluency': fluency_score,  # Use actual calculated fluency with temporal alignment
-        'ppl_data': content_metrics.get('ppl_data', {}) if content_metrics else {},  # Include PPL data for visualization
-        'total_tokens': 0,  # Placeholder
-        'visual_embedding_time': visual_embedding_time,
-        'model_forward_time': model_forward_time,
-        'generation_time': generation_time,
-        'total_processing_time': total_processing_time,
-        'frame_processing_times': frame_processing_times,  # Real per-frame times from actual measurements
-        'eos_timing': {'eos_detection_time': 0.0, 'with_eos': 0.0, 'without_eos': 0.0},  # Placeholder
-        'conversation_turns': len(generated_turns),
-        'generated_turns': generated_turns,  # Add actual generated turns data
-        'video_duration': duration,  # Use conversation duration
-        'frame_scores_data': frame_scores_data,  # Add frame_token_interval_score data
-        'frame_timing_data': frame_timing_data  # Add per-frame component timing data
-    }
-    
-    # Create timeline with interleaved user prompts, ground truth, and generated responses
-    timeline_events = []
-    
-    # Add user prompt at the beginning
-    timeline_events.append({
-        'time': 0.0,
-        'type': 'user_prompt',
-        'content': user_prompt
-    })
-    
-    # Add ground truth responses (narration entries)
-    for turn in original_conversation:
-        if turn['role'] == 'assistant':
-            timeline_events.append({
-                'time': turn['time'],
-                'type': 'ground_truth',
-                'content': turn['content']
-            })
-    
-    # Add generated responses
-    for turn in generated_turns:
-        timeline_events.append({
-            'time': turn['time'],
-            'type': 'generated',
-            'content': turn['text']
-        })
-    
-    # Sort by time
-    timeline_events.sort(key=lambda x: x['time'])
-    
-    # Display summary only
-    print(f"\n📊 CONVERSATION SUMMARY:")
-    print(f"   Total events: {len(timeline_events)} (Generated: {len(generated_turns)}, Ground Truth: {len([t for t in original_conversation if t['role'] == 'assistant'])})")
-    print(f"   User prompts: 1")
-    
-    # Clean up memory more aggressively
-    liveinfer.reset()  # Reset internal state
-    del liveinfer
-    
-    # Force garbage collection and memory cleanup
-    import gc
-    gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()  # Ensure all operations complete
-    
-    # Print memory status after cleanup
-    memory_info = get_gpu_memory_info()
-    if memory_info:
-        print_memory_status("🧹", "Memory after cleanup")
-    
-    return result, memory_data
-
-def process_goalstep_conversation(model, tokenizer, conversation_data, video_path, dataset, device):
+def process_goalstep_conversation(model, tokenizer, conversation_data, video_path, dataset, device, custom_threshold=None):
     """Wrapper for goalstep conversation processing."""
-    return process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, 'goalstep')
+    return process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, 'goalstep', custom_threshold)
 
-def process_narration_conversation(model, tokenizer, conversation_data, video_path, dataset, device):
+def process_narration_conversation(model, tokenizer, conversation_data, video_path, dataset, device, custom_threshold=None):
     """Wrapper for narration conversation processing."""
-    return process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, 'narration')
+    return process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, 'narration', custom_threshold)
 
-def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', num_conversations=3, random_selection=False, specific_indices=None, data_source='goalstep'):
+def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', num_conversations=3, random_selection=False, specific_indices=None, data_source='goalstep', custom_threshold=None):
     """Evaluate multiple conversations using streaming approach - one frame at a time."""
     
     results = []
@@ -1973,7 +1412,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         # Handle goalstep vs narration differently
         if hasattr(dataset, 'data_source') and dataset.data_source == 'goalstep':
             # For goalstep, process the conversation with proper frame limits
-            result, memory_data = process_goalstep_conversation(model, tokenizer, conversation_data, video_path, dataset, device)
+            result, memory_data = process_goalstep_conversation(model, tokenizer, conversation_data, video_path, dataset, device, custom_threshold)
             if result:
                 results.append(result)
                 # Use unique key combining video and conversation ID
@@ -1985,7 +1424,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             continue
         else:
             # For narration, process the conversation with proper frame limits
-            result, memory_data = process_narration_conversation(model, tokenizer, conversation_data, video_path, dataset, device)
+            result, memory_data = process_narration_conversation(model, tokenizer, conversation_data, video_path, dataset, device, custom_threshold)
             if result:
                 results.append(result)
                 # Use unique key combining video and conversation ID
@@ -2008,9 +1447,107 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
     
     return results
 
+def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda', num_conversations=3, random_selection=False, specific_indices=None, data_source='goalstep', threshold_range=None, num_thresholds=10):
+    """Evaluate conversations across different streaming thresholds to analyze threshold sensitivity."""
+    import torch
+    
+    # Define threshold range if not provided
+    if threshold_range is None:
+        threshold_range = (0.5, 0.99)  # Focus on 0.5-1.0 range for both datasets
+    
+    # Generate threshold values - test more thresholds for verification
+    if num_thresholds == 10:  # Default case
+        thresholds = np.array([0.8, 0.9, 0.95])  # Test 6 thresholds for verification
+        num_thresholds = 3
+    else:
+        thresholds = np.linspace(threshold_range[0], threshold_range[1], num_thresholds)
+    
+    print(f"🔄 Starting threshold sweep analysis for {data_source} dataset")
+    print(f"📊 Threshold range: {threshold_range[0]:.3f} to {threshold_range[1]:.3f} ({num_thresholds} points)")
+    print(f"📊 Thresholds: {[f'{t:.3f}' for t in thresholds]}")
+    print("=" * 80)
+    
+    # CRITICAL: Select conversations ONCE for all thresholds to ensure independence
+    # This prevents data leakage where different thresholds get different conversations
+    actual_num_conversations = min(num_conversations, len(dataset.conversations))
+    
+    if specific_indices is not None:
+        conversation_indices = specific_indices
+        actual_num_conversations = len(conversation_indices)
+        print(f"🎯 Using specific conversation indices: {conversation_indices}")
+    elif random_selection:
+        import random
+        # Set seed for reproducibility and select conversations once
+        random.seed(42)
+        conversation_indices = random.sample(range(len(dataset.conversations)), actual_num_conversations)
+        print(f"🎲 Selected conversation indices for ALL thresholds: {conversation_indices}")
+    else:
+        conversation_indices = list(range(actual_num_conversations))
+        print(f"📊 Using sequential conversation indices: {conversation_indices}")
+    
+    # Store results for each threshold
+    all_threshold_results = {}
+    all_frame_scores_data = {}  # Collect frame scores data for all thresholds
+    
+    for i, threshold in enumerate(thresholds):
+        print(f"\n🎯 THRESHOLD {i+1}/{num_thresholds}: {threshold:.3f}")
+        print("-" * 60)
+        
+        # Set PyTorch random seed for deterministic behavior BEFORE each threshold
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(42)
+            torch.cuda.manual_seed_all(42)
+        print(f"🎲 Set random seeds for deterministic behavior")
+        
+        # Run evaluation with this threshold using the SAME conversations
+        results = streaming_evaluate_conversations(
+            model=model,
+            tokenizer=tokenizer,
+            dataset=dataset,
+            device=device,
+            num_conversations=num_conversations,
+            random_selection=False,  # Force sequential selection
+            specific_indices=conversation_indices,  # Use the same conversations
+            data_source=data_source,
+            custom_threshold=threshold
+        )
+        
+        # Store results for this threshold
+        all_threshold_results[threshold] = results
+        
+        # Collect frame scores data for this threshold
+        threshold_frame_scores = {}
+        for j, result in enumerate(results):
+            if 'frame_scores_data' in result and result['frame_scores_data']:
+                conv_key = f"conv_{j}"
+                threshold_frame_scores[conv_key] = result['frame_scores_data']
+        all_frame_scores_data[threshold] = threshold_frame_scores
+        
+        # Print summary for this threshold
+        if results:
+            avg_ppl = sum(r['lm_ppl'] for r in results) / len(results)
+            avg_fluency = sum(r['fluency'] for r in results) / len(results)
+            avg_responses = sum(len(r['generated_turns']) for r in results) / len(results)
+            
+            print(f"📊 Threshold {threshold:.3f} Summary:")
+            print(f"   • Average PPL: {avg_ppl:.3f}")
+            print(f"   • Average Fluency: {avg_fluency:.3f}")
+            print(f"   • Average Responses: {avg_responses:.1f}")
+        
+        # Clean up memory between thresholds
+        if i < len(thresholds) - 1:  # Don't clean up after the last threshold
+            defragment_gpu_memory()
+    
+    # Create comprehensive threshold analysis visualization
+    print(f"\n📊 Creating threshold sensitivity analysis...")
+    create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data, data_source=data_source)
+    
+    return all_threshold_results
+
 # Define SimpleLiveInfer class outside the function for reuse
 class SimpleLiveInfer:
-    def __init__(self, model, tokenizer, device, dataset=None):
+    def __init__(self, model, tokenizer, device, dataset=None, custom_threshold=None):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
@@ -2028,8 +1565,11 @@ class SimpleLiveInfer:
         # generation
         self.system_prompt = ""  # Will be set dynamically based on dataset
         self.inplace_output_ids = torch.zeros(1, Config.INPLACE_OUTPUT_SIZE, device=device, dtype=torch.long)
-        # Use dataset-specific thresholds
-        if hasattr(dataset, 'data_source') and dataset.data_source == 'narration':
+        # Use custom threshold if provided, otherwise use dataset-specific thresholds
+        if custom_threshold is not None:
+            self.frame_token_interval_threshold = custom_threshold
+            print(f"🎯 Using custom threshold: {self.frame_token_interval_threshold}")
+        elif hasattr(dataset, 'data_source') and dataset.data_source == 'narration':
             self.frame_token_interval_threshold = Config.STREAMING_THRESHOLD_NARRATION
             print(f"🎯 Using narration threshold: {self.frame_token_interval_threshold}")
         else:
@@ -2188,10 +1728,10 @@ class SimpleLiveInfer:
         # DEBUG: Print context information for PPL calculation
         context_info = self._get_context_info()
         print(f"📊 CONTEXT FOR GENERATION (Time: {video_time}s):")
-        print(f"   • Streamed frames processed: {context_info['num_frames']}")
-        print(f"   • User prompts in history: {context_info['num_prompts']}")
-        print(f"   • Previous responses: {context_info['num_responses']}")
-        print(f"   • Total tokens in past_key_values: {context_info['total_tokens']}")
+        print(f"   • Streamed frames processed: {context_info['num_frames']}", end=", ")
+        print(f"User prompts in history: {context_info['num_prompts']}", end=", ")
+        print(f"Previous responses: {context_info['num_responses']}", end=", ")
+        print(f"Total tokens in past_key_values: {context_info['total_tokens']}")
         
         inputs_embeds = self.model.get_input_embeddings()(self.last_ids)
         output_ids, self.past_key_values = fast_greedy_generate(model=self.model, inputs_embeds=inputs_embeds, past_key_values=self.past_key_values, eos_token_id=self.eos_token_id, inplace_output_ids=self.inplace_output_ids)
@@ -2319,8 +1859,10 @@ class SimpleLiveInfer:
 def main():
     import sys
     
-    # Extract data_source from command line args
+    # Extract custom arguments from command line args
     data_source = 'narration'  # default
+    threshold_sweep = False
+    
     if '--data_source' in sys.argv:
         idx = sys.argv.index('--data_source')
         if idx + 1 < len(sys.argv):
@@ -2329,11 +1871,17 @@ def main():
             sys.argv.pop(idx)
             sys.argv.pop(idx)
     
+    if '--threshold_sweep' in sys.argv:
+        threshold_sweep = True
+        # Remove this arg to avoid conflicts with parse_args()
+        sys.argv.remove('--threshold_sweep')
+    
     # Parse the main args
     args = parse_args()
     
-    # Add data_source to args
+    # Add custom args to args object
     args.data_source = data_source
+    args.threshold_sweep = threshold_sweep
     
     print("🚀 Starting Streaming Evaluation")
     print("=" * 50)
@@ -2386,6 +1934,24 @@ def main():
         print(f"💬 Processing {num_videos} conversation{'s' if num_videos > 1 else ''} for PPL analysis...")
         import random
         random.seed(42)  # For reproducibility
+        
+        # Check if threshold sweep is requested
+        if hasattr(args, 'threshold_sweep') and args.threshold_sweep:
+            print("🔄 Running threshold sweep analysis...")
+            threshold_results = streaming_evaluate_threshold_sweep(
+                model=model,
+                tokenizer=tokenizer,
+                dataset=dataset,
+                device=device,
+                num_conversations=num_videos,
+                random_selection=True,
+                data_source=data_source,
+                num_thresholds=10  # Use fewer thresholds for faster execution
+            )
+            print("✅ Threshold sweep analysis completed!")
+            return
+        
+        # Regular single-threshold evaluation
         results = streaming_evaluate_conversations(model, tokenizer, dataset, device, num_conversations=num_videos, random_selection=True, data_source=data_source)
         print("\n" + "=" * 60)
         print("📊 EVALUATION RESULTS")
@@ -2427,12 +1993,12 @@ def main():
                         response_latency = visual_per_frame + model_per_frame + generation_per_response
                         response_timings.append(response_latency)
                         
-                        print(f"   📊 Response {len(response_timings)}: latency = {response_latency:.3f}s (vis={visual_per_frame:.3f}s + model={model_per_frame:.3f}s + gen={generation_per_response:.3f}s)")
-                        print(f"       Breakdown: {num_frames} frames, {num_responses} responses")
+                        # print(f"   📊 Response {len(response_timings)}: latency = {response_latency:.3f}s (vis={visual_per_frame:.3f}s + model={model_per_frame:.3f}s + gen={generation_per_response:.3f}s)")
+                        # print(f"       Breakdown: {num_frames} frames, {num_responses} responses")
             
             if response_timings:
                 avg_time_diff = sum(response_timings) / len(response_timings)
-                print(f"   📊 Individual response latencies: {[f'{t:.3f}s' for t in response_timings]}")
+                # print(f"   📊 Individual response latencies: {[f'{t:.3f}s' for t in response_timings]}")
             else:
                 avg_time_diff = 0.0
         else:
@@ -2481,6 +2047,276 @@ def main():
         print(f"❌ Error during evaluation: {e}")
         import traceback
         traceback.print_exc()
+
+def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data=None, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
+    """Create unified comprehensive threshold analysis with frame score trends and error bars."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Extract data for plotting
+    thresholds = sorted(all_threshold_results.keys())
+    
+    # Collect detailed metrics for each threshold
+    detailed_metrics = {
+        'thresholds': thresholds,
+        'gt_ppl_means': [],
+        'gt_ppl_stds': [],
+        'fluency_means': [],
+        'fluency_stds': [],
+        'response_means': [],
+        'response_stds': [],
+        'gt_prefix_ppl_means': [],
+        'gt_prefix_ppl_stds': [],
+        'vlm_prefix_ppl_means': [],
+        'vlm_prefix_ppl_stds': [],
+        'frame_score_means': [],
+        'frame_score_stds': [],
+        'frame_score_below_threshold_ratios': []
+    }
+    
+    for threshold in thresholds:
+        results = all_threshold_results[threshold]
+        if not results:
+            continue
+        
+        # Collect all individual values for this threshold
+        gt_ppls = [r.get('lm_ppl', 0.0) for r in results]
+        fluencies = [r.get('fluency', 0.0) for r in results]
+        response_counts = [len(r.get('generated_turns', [])) for r in results]
+        
+        gt_prefix_ppls = []
+        vlm_prefix_ppls = []
+        frame_scores = []
+        below_threshold_ratios = []
+        
+        for result in results:
+            if 'ppl_data' in result:
+                ppl_data = result['ppl_data']
+                if 'gt_ppls_gt_prefix_visual' in ppl_data and ppl_data['gt_ppls_gt_prefix_visual']:
+                    gt_prefix_ppls.extend(ppl_data['gt_ppls_gt_prefix_visual'])
+                if 'gt_ppls_vlm_prefix_visual' in ppl_data and ppl_data['gt_ppls_vlm_prefix_visual']:
+                    vlm_prefix_ppls.extend(ppl_data['gt_ppls_vlm_prefix_visual'])
+            
+            # Collect frame scores if available
+            if 'frame_scores_data' in result and result['frame_scores_data']:
+                conv_frame_scores = result['frame_scores_data']['frame_scores']
+                if conv_frame_scores:
+                    frame_scores.extend(conv_frame_scores)
+                    # Calculate ratio of frames below threshold
+                    below_threshold_count = sum(1 for score in conv_frame_scores if score < threshold)
+                    below_threshold_ratios.append(below_threshold_count / len(conv_frame_scores))
+        
+        # Calculate means and standard deviations
+        detailed_metrics['gt_ppl_means'].append(np.mean(gt_ppls) if gt_ppls else 0.0)
+        detailed_metrics['gt_ppl_stds'].append(np.std(gt_ppls) if gt_ppls else 0.0)
+        detailed_metrics['fluency_means'].append(np.mean(fluencies) if fluencies else 0.0)
+        detailed_metrics['fluency_stds'].append(np.std(fluencies) if fluencies else 0.0)
+        detailed_metrics['response_means'].append(np.mean(response_counts) if response_counts else 0.0)
+        detailed_metrics['response_stds'].append(np.std(response_counts) if response_counts else 0.0)
+        detailed_metrics['gt_prefix_ppl_means'].append(np.mean(gt_prefix_ppls) if gt_prefix_ppls else 0.0)
+        detailed_metrics['gt_prefix_ppl_stds'].append(np.std(gt_prefix_ppls) if gt_prefix_ppls else 0.0)
+        detailed_metrics['vlm_prefix_ppl_means'].append(np.mean(vlm_prefix_ppls) if vlm_prefix_ppls else 0.0)
+        detailed_metrics['vlm_prefix_ppl_stds'].append(np.std(vlm_prefix_ppls) if vlm_prefix_ppls else 0.0)
+        detailed_metrics['frame_score_means'].append(np.mean(frame_scores) if frame_scores else 0.0)
+        detailed_metrics['frame_score_stds'].append(np.std(frame_scores) if frame_scores else 0.0)
+        detailed_metrics['frame_score_below_threshold_ratios'].append(np.mean(below_threshold_ratios) if below_threshold_ratios else 0.0)
+    
+    # Create comprehensive visualization with 2x3 grid (removed GT PPL and PPL difference)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+    fig.suptitle(f'Unified Threshold Analysis - {data_source.upper()} Dataset', fontsize=18, fontweight='bold')
+    
+    # 1. Decomposed VLM PPL - One line per video
+    ax1 = axes[0, 0]
+    if all_threshold_results:
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        # Collect VLM PPL data for each video across thresholds
+        video_vlm_ppls = {}  # {video_idx: {threshold: vlm_ppl}}
+        
+        for threshold in thresholds:
+            results = all_threshold_results[threshold]
+            for j, result in enumerate(results):
+                if j not in video_vlm_ppls:
+                    video_vlm_ppls[j] = {}
+                
+                # Get VLM PPL for this video at this threshold
+                if 'ppl_data' in result and 'gt_ppls_vlm_prefix_visual' in result['ppl_data']:
+                    vlm_ppls = result['ppl_data']['gt_ppls_vlm_prefix_visual']
+                    if vlm_ppls:
+                        video_vlm_ppls[j][threshold] = np.mean(vlm_ppls)
+        
+        # Plot each video's VLM PPL trajectory
+        for j, video_data in video_vlm_ppls.items():
+            if len(video_data) > 1:  # Only plot if we have data for multiple thresholds
+                video_thresholds = sorted(video_data.keys())
+                video_ppls = [video_data[t] for t in video_thresholds]
+                color = colors[j % len(colors)]
+                ax1.plot(video_thresholds, video_ppls, 'o-', color=color, linewidth=2, markersize=4, 
+                        label=f'Video {j+1}', alpha=0.8)
+        
+        # Add average VLM PPL line
+        if detailed_metrics['vlm_prefix_ppl_means']:
+            ax1.errorbar(thresholds, detailed_metrics['vlm_prefix_ppl_means'], yerr=detailed_metrics['vlm_prefix_ppl_stds'], 
+                        fmt='s-', color='black', linewidth=3, markersize=8, capsize=5, 
+                        label='Average VLM PPL ± Std', alpha=0.9)
+        
+        # Add GT PPL as reference line (should be constant)
+        if detailed_metrics['gt_prefix_ppl_means']:
+            avg_gt_ppl = np.mean(detailed_metrics['gt_prefix_ppl_means'])
+            ax1.axhline(y=avg_gt_ppl, color='red', linestyle='--', linewidth=2, alpha=0.8, 
+                       label=f'GT PPL Reference ({avg_gt_ppl:.2f})')
+        
+        ax1.set_xlabel('Streaming Threshold')
+        ax1.set_ylabel('PPL')
+        ax1.set_title('VLM PPL vs Threshold (Per Video) with GT Reference')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(fontsize=9)
+    else:
+        ax1.text(0.5, 0.5, 'No threshold data available', ha='center', va='center', transform=ax1.transAxes)
+        ax1.set_title('VLM PPL vs Threshold (Per Video)')
+    
+    # 2. Fluency with per-video breakdown
+    ax2 = axes[0, 1]
+    if all_threshold_results:
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        # Collect fluency data for each video across thresholds
+        video_fluencies = {}  # {video_idx: {threshold: fluency}}
+        
+        for threshold in thresholds:
+            results = all_threshold_results[threshold]
+            for j, result in enumerate(results):
+                if j not in video_fluencies:
+                    video_fluencies[j] = {}
+                
+                # Get fluency for this video at this threshold
+                if 'fluency' in result:
+                    video_fluencies[j][threshold] = result['fluency']
+        
+        # Plot each video's fluency trajectory
+        for j, video_data in video_fluencies.items():
+            if len(video_data) > 1:  # Only plot if we have data for multiple thresholds
+                video_thresholds = sorted(video_data.keys())
+                video_fluencies_list = [video_data[t] for t in video_thresholds]
+                color = colors[j % len(colors)]
+                ax2.plot(video_thresholds, video_fluencies_list, 'o-', color=color, linewidth=2, markersize=4, 
+                        label=f'Video {j+1}', alpha=0.8)
+        
+        # Add average line with error bars
+        if detailed_metrics['fluency_means']:
+            ax2.errorbar(thresholds, detailed_metrics['fluency_means'], yerr=detailed_metrics['fluency_stds'], 
+                        fmt='s-', color='black', linewidth=3, markersize=8, capsize=5, 
+                        label='Average Fluency ± Std', alpha=0.9)
+        
+        ax2.set_xlabel('Streaming Threshold')
+        ax2.set_ylabel('Fluency Score')
+        ax2.set_title('Fluency vs Threshold (Per Video)')
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(fontsize=9)
+        ax2.set_ylim(0, 1.0)
+    else:
+        ax2.text(0.5, 0.5, 'No threshold data available', ha='center', va='center', transform=ax2.transAxes)
+        ax2.set_title('Fluency vs Threshold (Per Video)')
+    
+    # 3. Response count with per-video breakdown
+    ax3 = axes[1, 1]
+    if all_threshold_results:
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        # Collect response count data for each video across thresholds
+        video_responses = {}  # {video_idx: {threshold: response_count}}
+        
+        for threshold in thresholds:
+            results = all_threshold_results[threshold]
+            for j, result in enumerate(results):
+                if j not in video_responses:
+                    video_responses[j] = {}
+                
+                # Get response count for this video at this threshold
+                if 'response_count' in result:
+                    video_responses[j][threshold] = result['response_count']
+        
+        # Plot each video's response count trajectory
+        for j, video_data in video_responses.items():
+            if len(video_data) > 1:  # Only plot if we have data for multiple thresholds
+                video_thresholds = sorted(video_data.keys())
+                video_responses_list = [video_data[t] for t in video_thresholds]
+                color = colors[j % len(colors)]
+                ax3.plot(video_thresholds, video_responses_list, 'o-', color=color, linewidth=2, markersize=4, 
+                        label=f'Video {j+1}', alpha=0.8)
+        
+        # Add average line with error bars
+        if detailed_metrics['response_means']:
+            ax3.errorbar(thresholds, detailed_metrics['response_means'], yerr=detailed_metrics['response_stds'], 
+                        fmt='s-', color='black', linewidth=3, markersize=8, capsize=5, 
+                        label='Average Response Count ± Std', alpha=0.9)
+        
+        ax3.set_xlabel('Streaming Threshold')
+        ax3.set_ylabel('Response Count')
+        ax3.set_title('Response Count vs Threshold (Per Video)')
+        ax3.grid(True, alpha=0.3)
+        ax3.legend(fontsize=9)
+    else:
+        ax3.text(0.5, 0.5, 'No threshold data available', ha='center', va='center', transform=ax3.transAxes)
+        ax3.set_title('Response Count vs Threshold (Per Video)')
+    
+    # 4. Frame Score Trends - Time vs Frame Score for Different Videos
+    ax4 = axes[2, 2]
+    if all_frame_scores_data:
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        for i, (threshold, threshold_data) in enumerate(all_frame_scores_data.items()):
+            for j, (conv_key, conv_data) in enumerate(threshold_data.items()):
+                if 'frame_scores' in conv_data and 'frame_times' in conv_data and conv_data['frame_scores']:
+                    frame_times = conv_data['frame_times']
+                    frame_scores = conv_data['frame_scores']
+                    color = colors[j % len(colors)]
+                    alpha = 0.3 + 0.7 * (i / (len(all_frame_scores_data) - 1)) if len(all_frame_scores_data) > 1 else 0.8
+                    ax4.plot(frame_times, frame_scores, color=color, linewidth=1.5, alpha=alpha, 
+                            label=f'Video {j+1} (T={threshold:.2f})' if i == 0 else "")
+        
+        ax4.set_xlabel('Time (seconds)')
+        ax4.set_ylabel('Frame Score')
+        ax4.set_title('Frame Score Trends Over Time (Per Video & Threshold)')
+        ax4.grid(True, alpha=0.3)
+        ax4.set_ylim(0, 1.0)
+        
+        # Create dual legend: videos and thresholds
+        video_legend_elements = []
+        threshold_legend_elements = []
+        
+        # Video legend (using first threshold data)
+        first_threshold = list(all_frame_scores_data.keys())[0]
+        for j in range(len(all_frame_scores_data[first_threshold])):
+            color = colors[j % len(colors)]
+            video_legend_elements.append(plt.Line2D([0], [0], color=color, linewidth=2, 
+                                                   label=f'Video {j+1}'))
+        
+        # Threshold legend
+        for i, threshold in enumerate(all_frame_scores_data.keys()):
+            alpha = 0.3 + 0.7 * (i / (len(all_frame_scores_data) - 1)) if len(all_frame_scores_data) > 1 else 0.8
+            linewidth = 1.0 + 0.5 * (i / (len(all_frame_scores_data) - 1)) if len(all_frame_scores_data) > 1 else 1.5
+            threshold_legend_elements.append(plt.Line2D([0], [0], color='black', linewidth=linewidth, alpha=alpha, 
+                                                       label=f'Threshold {threshold:.2f}'))
+        
+        # Create combined legend
+        legend1 = ax4.legend(handles=video_legend_elements, title='Videos', loc='lower left', fontsize=8)
+        legend2 = ax4.legend(handles=threshold_legend_elements, title='Thresholds', loc='lower right', fontsize=8)
+        ax4.add_artist(legend1)  # Add first legend back after second one overwrites it
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    output_path = os.path.join(output_dir, f'unified_threshold_analysis_{data_source}.png')
+    plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
+    print(f"📊 Unified threshold analysis saved to: {output_path}")
+    
+    plt.show()
+    
+    return output_path
 
 def calculate_fluency_score(generated_turns, original_conversation, data_source='goalstep'):
     """Calculate fluency score with temporal alignment for both goalstep and narration datasets."""
@@ -2536,27 +2372,12 @@ def calculate_fluency_score(generated_turns, original_conversation, data_source=
     fluency_score = successful_responses / total_gt_turns if total_gt_turns > 0 else 0.0
     fluency_score = max(0.0, min(1.0, fluency_score))  # Clamp to [0, 1]
     
-    print(f"\n📊 FLUENCY CALCULATION (Temporal Alignment):")
-    if data_source == 'narration':
-        print(f"   • Total Generated Responses: {total_turns}")
-        print(f"   • Total GT Responses: {total_gt_turns}")
-        print(f"   • Temporally Aligned Responses (≤{temporal_threshold}s): {successful_responses}")
-    print(f"   • Fluency Score: {fluency_score:.3f} ({successful_responses}/{total_gt_turns})")
-    
-    # Debug: Print first few aligned pairs
-    if aligned_pairs:
-        print(f"   • Sample Aligned Pairs (Gen Time → GT Time, Diff):")
-        for i, (gen_time, gt_time, diff) in enumerate(aligned_pairs[:5]):
-            print(f"     {i+1}. {gen_time:.1f}s → {gt_time:.1f}s (diff: {diff:.1f}s)")
-    
-    # Debug: Print GT and generated times (normalized) - only for narration
-    if data_source == 'narration':
-        print(f"   • GT Response Times (normalized): {[f'{t:.1f}s' for t in gt_response_times[:10]]}")
-        print(f"   • Generated Response Times: {[f'{t:.1f}s' for t in generated_response_times[:10]]}")
+    # print(f"\n📊 FLUENCY CALCULATION (Temporal Alignment):")
+    # print(f"   • Fluency Score: {fluency_score:.3f} ({successful_responses}/{total_gt_turns})")
     
     return fluency_score
 
-def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, device, data_source='goalstep', use_visual=True):
+def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, device, data_source='goalstep', use_visual=True, custom_threshold=None):
     """Calculate PPL for a single response using the proper conversation format."""
     try:
         # Limit conversation length to avoid OOM in stream_evaluate
@@ -2642,8 +2463,10 @@ def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, dev
                 single_frame_cpu = video_tensor[frame_range]  # Shape: [1, 3, H, W] on CPU
                 single_frame_gpu = single_frame_cpu.to(device)  # Move to GPU
             
-                # Use appropriate threshold based on data source
-                if data_source == 'narration':
+                # Use custom threshold if provided, otherwise use data source default
+                if custom_threshold is not None:
+                    threshold = custom_threshold
+                elif data_source == 'narration':
                     threshold = Config.STREAMING_THRESHOLD_NARRATION
                 else:  # goalstep or default
                     threshold = Config.STREAMING_THRESHOLD_GOALSTEP
@@ -2717,20 +2540,27 @@ def create_conversation_with_vlm_prefix(generated_turns, gt_time, user_prompt, g
         if turn['time'] < gt_time:  # Only previous responses
             # Extract user prompt from turn
             turn_user_prompt = turn.get('user_prompt', 'Please help with the video analysis.')
-            if turn_user_prompt != "Frame processing":  # Skip frame-triggered responses
+            # Include ALL responses, not just the ones with user queries
+            # This ensures VLM context changes with threshold
+            if turn_user_prompt != "Frame processing":
                 # Only add user prompt if last added was not user
                 if last_added_role != 'user':
                     conversation.append({'role': 'user', 'content': turn_user_prompt})
                     last_added_role = 'user'
-                
-                # Extract assistant response (remove the video time prefix)
-                assistant_text = turn['text']
-                if 'Assistant:' in assistant_text:
-                    assistant_content = assistant_text.split('Assistant:', 1)[1].strip()
-                else:
-                    assistant_content = assistant_text
-                conversation.append({'role': 'assistant', 'content': assistant_content, 'learn': True})
-                last_added_role = 'assistant'
+            else:
+                # For frame-triggered responses, use a generic user prompt
+                if last_added_role != 'user':
+                    conversation.append({'role': 'user', 'content': 'Please help with the video analysis.'})
+                    last_added_role = 'user'
+            
+            # Extract assistant response (remove the video time prefix)
+            assistant_text = turn['text']
+            if 'Assistant:' in assistant_text:
+                assistant_content = assistant_text.split('Assistant:', 1)[1].strip()
+            else:
+                assistant_content = assistant_text
+            conversation.append({'role': 'assistant', 'content': assistant_content, 'learn': True})
+            last_added_role = 'assistant'
     
     # Add current user prompt and GT response
     if last_added_role != 'user':
@@ -2860,7 +2690,6 @@ Responses: {len(all_gt_prefix_visual)}"""
     # Print summary statistics
     print(f"\n📊 DUAL PPL ANALYSIS SUMMARY ({data_source.upper()}):")
     print(f"   • Total responses analyzed: {len(all_gt_prefix_visual)}")
-    print(f"   • Videos with PPL data: {len(video_data)}")
     print(f"   • GT Prefix PPL: {np.mean(all_gt_prefix_visual):.3f} ± {np.std(all_gt_prefix_visual):.3f}")
     print(f"   • VLM Prefix PPL: {np.mean(all_vlm_prefix_visual):.3f} ± {np.std(all_vlm_prefix_visual):.3f}")
     
@@ -2933,220 +2762,212 @@ def create_ppl_over_time_visualization(video_data, output_dir="timing_plots", da
 def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversation, generated_turns, device, normalized_conversation=None, data_source='goalstep'):
     """Calculate metrics exactly like evaluate.py using stream_evaluate and compute_metrics."""
     
-    try:
-        # Prepare conversation for evaluation exactly like the dataset does
-        # The dataset expects a specific conversation format with stream messages
-        eval_conversation = []
-        
-        # Add system message first (like the dataset does)
+    # Prepare conversation for evaluation exactly like the dataset does
+    # The dataset expects a specific conversation format with stream messages
+    eval_conversation = []
+    
+    # Add system message first (like the dataset does)
+    eval_conversation.append({
+        'role': 'system', 
+        'content': 'Please help with the video analysis.'
+    })
+    
+    # Add stream message for the first frame (like the dataset does)
+    eval_conversation.append({
+        'role': 'stream',
+        'num_frames': 1,
+        'learn': False
+    })
+    
+    # Add user instruction (like the dataset does)
+    eval_conversation.append({
+        'role': 'user',
+        'content': 'Please help with the video analysis.'
+    })
+    
+    # Add ground truth assistant messages with learn=True
+    # Convert ground truth annotations to the expected format
+    if conversation:  # Only if we have ground truth annotations
+        for ann in conversation:
+            if isinstance(ann, dict) and 'text' in ann:
+                # This is a ground truth annotation
+                eval_conversation.append({
+                    'role': 'assistant',
+                    'content': ann['text'],
+                    'learn': True
+                })
+            elif isinstance(ann, dict) and 'role' in ann and ann['role'] == 'assistant':
+                # This is already in the expected format
+                eval_conversation.append({
+                    'role': 'assistant',
+                    'content': ann['content'],
+                    'learn': True
+                })
+    
+    # Add generated turns as assistant messages with learn=True
+    for turn in generated_turns:
+        # Handle both 'content' and 'text' keys for generated turns
+        content = turn.get('content', turn.get('text', ''))
         eval_conversation.append({
-            'role': 'system', 
-            'content': 'Please help with the video analysis.'
+            'role': 'assistant',
+            'content': content,
+            'learn': True
         })
-        
-        # Add stream message for the first frame (like the dataset does)
-        eval_conversation.append({
-            'role': 'stream',
-            'num_frames': 1,
-            'learn': False
-        })
-        
-        # Add user instruction (like the dataset does)
-        eval_conversation.append({
-            'role': 'user',
-            'content': 'Please help with the video analysis.'
-        })
-        
-        # Add ground truth assistant messages with learn=True
-        # Convert ground truth annotations to the expected format
-        if conversation:  # Only if we have ground truth annotations
-            for ann in conversation:
-                if isinstance(ann, dict) and 'text' in ann:
-                    # This is a ground truth annotation
-                    eval_conversation.append({
-                        'role': 'assistant',
-                        'content': ann['text'],
-                        'learn': True
-                    })
-                elif isinstance(ann, dict) and 'role' in ann and ann['role'] == 'assistant':
-                    # This is already in the expected format
-                    eval_conversation.append({
-                        'role': 'assistant',
-                        'content': ann['content'],
-                        'learn': True
-                    })
-        
-        # Add generated turns as assistant messages with learn=True
-        for turn in generated_turns:
-            # Handle both 'content' and 'text' keys for generated turns
-            content = turn.get('content', turn.get('text', ''))
-            eval_conversation.append({
-                'role': 'assistant',
-                'content': content,
-                'learn': True
-            })
-        
-        # Extract ground truth assistant responses from the conversation
-        ground_truth_responses = []
-        if normalized_conversation:
-            for turn in normalized_conversation:
-                if turn['role'] == 'assistant':
-                    ground_truth_responses.append({
-                        'content': turn['content'],
-                        'time': turn['time'],
-                        'original_time': turn.get('original_time', turn['time'])
-                    })
-        
-        # Calculate DUAL PPL for ALL GROUND TRUTH responses in the dataset
-        gt_ppls_gt_prefix_visual = []  # PPL using GT responses as context (golden prefix) with visual
-        gt_ppls_vlm_prefix_visual = []  # PPL using VLM responses as context with visual
-    # No visual PPL collection removed for simplification
-        
-        print(f"📊 Calculating dual PPL (visual context) for {len(ground_truth_responses)} ground truth responses...")
-        
-        for i, gt_response in enumerate(ground_truth_responses):
-            try:
-                gt_content = gt_response['content']
-                gt_time = gt_response['time']
-                
-                # Find the user prompt that this ground truth response was answering
-                user_prompt = "Please help with the video analysis."  # Default fallback
-                if normalized_conversation:
-                    # Find the most recent user prompt before this response time
-                    for conv_turn in reversed(normalized_conversation):
-                        if conv_turn['role'] == 'user' and conv_turn['time'] <= gt_time:
-                            user_prompt = conv_turn['content']
-                            break
-                
-                # 1. PPL with GT prefix (golden context) - WITH VISUAL
-                gt_conversation = create_conversation_with_gt_prefix(
-                    normalized_conversation, gt_time, user_prompt, gt_content
-                )
-                ppl_gt_prefix_visual = calculate_ppl_for_response(model, tokenizer, gt_conversation, video_tensor, device, data_source, use_visual=True)
-                
-                # 2. PPL with VLM prefix (actual generated responses as context) - WITH VISUAL
-                vlm_conversation = create_conversation_with_vlm_prefix(
-                    generated_turns, gt_time, user_prompt, gt_content
-                )
-                ppl_vlm_prefix_visual = calculate_ppl_for_response(model, tokenizer, vlm_conversation, video_tensor, device, data_source, use_visual=True)
-                
-                if ppl_gt_prefix_visual is not None:
-                    gt_ppls_gt_prefix_visual.append(ppl_gt_prefix_visual)
-                if ppl_vlm_prefix_visual is not None:
-                    gt_ppls_vlm_prefix_visual.append(ppl_vlm_prefix_visual)
-                    
-                if i % 10 == 0:  # Progress indicator
-                    # print(f"   Processed {i+1}/{len(ground_truth_responses)} GT responses...")
-                    # Clean up GPU memory periodically
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                
-                # Clean up memory after each response to prevent OOM
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    
-            except Exception as e:
-                print(f"Error processing GT response {i}: {e}")
-                # Clean up GPU memory on error
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                continue
-        
-        # Calculate average PPLs for all four contexts
-        if gt_ppls_gt_prefix_visual:
-            avg_gt_ppl_gt_prefix_visual = sum(gt_ppls_gt_prefix_visual) / len(gt_ppls_gt_prefix_visual)
-            print(f"📊 GT Prefix PPL (Visual): {len(gt_ppls_gt_prefix_visual)} responses, avg PPL: {avg_gt_ppl_gt_prefix_visual:.3f}")
-            print(f"📊 GT Prefix PPL (Visual) range: {min(gt_ppls_gt_prefix_visual):.3f} - {max(gt_ppls_gt_prefix_visual):.3f}")
-        else:
-            avg_gt_ppl_gt_prefix_visual = 0.0
-            print("📊 GT Prefix PPL (Visual): No valid calculations")
+    
+    # Extract ground truth assistant responses from the conversation
+    ground_truth_responses = []
+    if normalized_conversation:
+        for turn in normalized_conversation:
+            if turn['role'] == 'assistant':
+                ground_truth_responses.append({
+                    'content': turn['content'],
+                    'time': turn['time'],
+                    'original_time': turn.get('original_time', turn['time'])
+                })
+    
+    # Calculate DUAL PPL for ALL GROUND TRUTH responses in the dataset
+    gt_ppls_gt_prefix_visual = []  # PPL using GT responses as context (golden prefix) with visual
+    gt_ppls_vlm_prefix_visual = []  # PPL using VLM responses as context with visual
+    
+    
+    print(f"📊 Calculating dual PPL (visual context) for {len(ground_truth_responses)} ground truth responses...")
+    
+    for i, gt_response in enumerate(ground_truth_responses):
+        try:
+            gt_content = gt_response['content']
+            gt_time = gt_response['time']
             
-        if gt_ppls_vlm_prefix_visual:
-            avg_gt_ppl_vlm_prefix_visual = sum(gt_ppls_vlm_prefix_visual) / len(gt_ppls_vlm_prefix_visual)
-            print(f"📊 VLM Prefix PPL (Visual): {len(gt_ppls_vlm_prefix_visual)} responses, avg PPL: {avg_gt_ppl_vlm_prefix_visual:.3f}")
-            print(f"📊 VLM Prefix PPL (Visual) range: {min(gt_ppls_vlm_prefix_visual):.3f} - {max(gt_ppls_vlm_prefix_visual):.3f}")
-        else:
-            avg_gt_ppl_vlm_prefix_visual = 0.0
-            print("📊 VLM Prefix PPL (Visual): No valid calculations")
-            
-        # No visual PPL printing removed for simplification
-        
-        # Use average of visual PPLs as the main metric
-        avg_ppl = (avg_gt_ppl_gt_prefix_visual + avg_gt_ppl_vlm_prefix_visual) / 2 if (avg_gt_ppl_gt_prefix_visual > 0 and avg_gt_ppl_vlm_prefix_visual > 0) else max(avg_gt_ppl_gt_prefix_visual, avg_gt_ppl_vlm_prefix_visual)
-        
-        # Calculate other metrics using the same approach
-        
-        # Skip fluency and correctness calculations
-        
-        # Calculate corresponding GT PPLs (GT responses that correspond to generated responses)
-        corresponding_gt_ppls = []
-        if generated_turns and normalized_conversation:
-            # Sort generated turns by time to ensure proper matching
-            sorted_generated_turns = sorted(generated_turns, key=lambda x: x.get('time', 0.0))
-            
-            # Get all ground truth assistant responses sorted by time
-            gt_assistant_responses = []
-            for conv_turn in normalized_conversation:
-                if conv_turn['role'] == 'assistant':
-                    gt_assistant_responses.append(conv_turn)
-            
-            # Sort by time
-            gt_assistant_responses.sort(key=lambda x: x.get('time', 0.0))
-            
-            # Match each generated response to the closest ground truth response
-            for i, turn in enumerate(sorted_generated_turns):
-                response_time = turn.get('time', 0.0)
-                
-                # Find the user prompt that triggered this response
-                user_prompt = "Please help with the video analysis."  # Default fallback
+            # Find the user prompt that this ground truth response was answering
+            user_prompt = "Please help with the video analysis."  # Default fallback
+            if normalized_conversation:
+                # Find the most recent user prompt before this response time
                 for conv_turn in reversed(normalized_conversation):
-                    if conv_turn['role'] == 'user' and conv_turn['time'] <= response_time:
+                    if conv_turn['role'] == 'user' and conv_turn['time'] <= gt_time:
                         user_prompt = conv_turn['content']
                         break
-                
-                # Find the GROUND TRUTH response that corresponds to this generated response
-                # Use simple index-based matching
-                if i < len(gt_assistant_responses):
-                    best_gt_response = gt_assistant_responses[i]
-                elif gt_assistant_responses:
-                    # Use the last available response
-                    best_gt_response = gt_assistant_responses[-1]
-                
-                if best_gt_response:
-                    gt_content = best_gt_response['content']
-                    
-                    # Create conversation using the GROUND TRUTH response
-                    gt_conversation = [
-                        {'role': 'system', 'content': 'Please help with the video analysis.'},
-                        {'role': 'stream', 'num_frames': 1, 'learn': False},
-                        {'role': 'user', 'content': user_prompt},
-                        {'role': 'assistant', 'content': gt_content, 'learn': True}
-                    ]
-                    
-                    # Calculate PPL for this corresponding GROUND TRUTH response
-                    ppl = calculate_ppl_for_response(model, tokenizer, gt_conversation, video_tensor, device, data_source)
-                    if ppl is not None:
-                        corresponding_gt_ppls.append(ppl)
             
-            return {
-                'lm_ppl': avg_ppl,
-            'gt_prefix_ppl_visual': avg_gt_ppl_gt_prefix_visual,
-            'vlm_prefix_ppl_visual': avg_gt_ppl_vlm_prefix_visual,
-            'fluency': 1.0,  # Will be overridden by actual fluency calculation
-                'ppl_data': {
-                'gt_ppls_gt_prefix_visual': gt_ppls_gt_prefix_visual,
-                'gt_ppls_vlm_prefix_visual': gt_ppls_vlm_prefix_visual,
-                    'corresponding_gt_ppls': corresponding_gt_ppls,
-                    'generated_responses': len(generated_turns),
-                    'total_gt_responses': len(ground_truth_responses)
-                }
-            }
+            # 1. PPL with GT prefix (golden context) - WITH VISUAL
+            gt_conversation = create_conversation_with_gt_prefix(
+                normalized_conversation, gt_time, user_prompt, gt_content
+            )
+            ppl_gt_prefix_visual = calculate_ppl_for_response(model, tokenizer, gt_conversation, video_tensor, device, data_source, use_visual=True, custom_threshold=None)
+            
+            # 2. PPL with VLM prefix (actual generated responses as context) - WITH VISUAL
+            vlm_conversation = create_conversation_with_vlm_prefix(
+                generated_turns, gt_time, user_prompt, gt_content
+            )
+            ppl_vlm_prefix_visual = calculate_ppl_for_response(model, tokenizer, vlm_conversation, video_tensor, device, data_source, use_visual=True, custom_threshold=None)
+            
+            if ppl_gt_prefix_visual is not None:
+                gt_ppls_gt_prefix_visual.append(ppl_gt_prefix_visual)
+            if ppl_vlm_prefix_visual is not None:
+                gt_ppls_vlm_prefix_visual.append(ppl_vlm_prefix_visual)
+                
+            if i % 10 == 0:  # Progress indicator
+                # print(f"   Processed {i+1}/{len(ground_truth_responses)} GT responses...")
+                # Clean up GPU memory periodically
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            
+            # Clean up memory after each response to prevent OOM
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+        except Exception as e:
+            print(f"Error processing GT response {i}: {e}")
+            # Clean up GPU memory on error
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            continue
+    
+    # Calculate average PPLs for all four contexts
+    if gt_ppls_gt_prefix_visual:
+        avg_gt_ppl_gt_prefix_visual = sum(gt_ppls_gt_prefix_visual) / len(gt_ppls_gt_prefix_visual)
+        print(f"📊 GT Prefix PPL (Visual): {len(gt_ppls_gt_prefix_visual)} responses, avg PPL: {avg_gt_ppl_gt_prefix_visual:.3f}")
+        print(f"📊 GT Prefix PPL (Visual) range: {min(gt_ppls_gt_prefix_visual):.3f} - {max(gt_ppls_gt_prefix_visual):.3f}")
+    else:
+        avg_gt_ppl_gt_prefix_visual = 0.0
+        print("📊 GT Prefix PPL (Visual): No valid calculations")
         
-    except Exception as e:
-        print(f"Warning: Video evaluation failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return calculate_basic_content_metrics(generated_turns, conversation)
+    if gt_ppls_vlm_prefix_visual:
+        avg_gt_ppl_vlm_prefix_visual = sum(gt_ppls_vlm_prefix_visual) / len(gt_ppls_vlm_prefix_visual)
+        print(f"📊 VLM Prefix PPL (Visual): {len(gt_ppls_vlm_prefix_visual)} responses, avg PPL: {avg_gt_ppl_vlm_prefix_visual:.3f}")
+        print(f"📊 VLM Prefix PPL (Visual) range: {min(gt_ppls_vlm_prefix_visual):.3f} - {max(gt_ppls_vlm_prefix_visual):.3f}")
+    else:
+        avg_gt_ppl_vlm_prefix_visual = 0.0
+        print("📊 VLM Prefix PPL (Visual): No valid calculations")
+        
+    # No visual PPL printing removed for simplification
+    
+    # Use average of visual PPLs as the main metric
+    avg_ppl = (avg_gt_ppl_gt_prefix_visual + avg_gt_ppl_vlm_prefix_visual) / 2 if (avg_gt_ppl_gt_prefix_visual > 0 and avg_gt_ppl_vlm_prefix_visual > 0) else max(avg_gt_ppl_gt_prefix_visual, avg_gt_ppl_vlm_prefix_visual)
+    
+    # Calculate other metrics using the same approach
+    
+    # Skip fluency and correctness calculations
+    
+    # Calculate corresponding GT PPLs (GT responses that correspond to generated responses)
+    corresponding_gt_ppls = []
+    if generated_turns and normalized_conversation:
+        # Sort generated turns by time to ensure proper matching
+        sorted_generated_turns = sorted(generated_turns, key=lambda x: x.get('time', 0.0))
+        
+        # Get all ground truth assistant responses sorted by time
+        gt_assistant_responses = []
+        for conv_turn in normalized_conversation:
+            if conv_turn['role'] == 'assistant':
+                gt_assistant_responses.append(conv_turn)
+        
+        # Sort by time
+        gt_assistant_responses.sort(key=lambda x: x.get('time', 0.0))
+        
+        # Match each generated response to the closest ground truth response
+        for i, turn in enumerate(sorted_generated_turns):
+            response_time = turn.get('time', 0.0)
+            
+            # Find the user prompt that triggered this response
+            user_prompt = "Please help with the video analysis."  # Default fallback
+            for conv_turn in reversed(normalized_conversation):
+                if conv_turn['role'] == 'user' and conv_turn['time'] <= response_time:
+                    user_prompt = conv_turn['content']
+                    break
+            
+            # Find the GROUND TRUTH response that corresponds to this generated response
+            # Use simple index-based matching
+            if i < len(gt_assistant_responses):
+                best_gt_response = gt_assistant_responses[i]
+            elif gt_assistant_responses:
+                # Use the last available response
+                best_gt_response = gt_assistant_responses[-1]
+            
+            if best_gt_response:
+                gt_content = best_gt_response['content']
+                
+                # Create conversation using the GROUND TRUTH response
+                gt_conversation = [
+                    {'role': 'system', 'content': 'Please help with the video analysis.'},
+                    {'role': 'stream', 'num_frames': 1, 'learn': False},
+                    {'role': 'user', 'content': user_prompt},
+                    {'role': 'assistant', 'content': gt_content, 'learn': True}
+                ]
+                
+                # Calculate PPL for this corresponding GROUND TRUTH response
+                ppl = calculate_ppl_for_response(model, tokenizer, gt_conversation, video_tensor, device, data_source)
+                if ppl is not None:
+                    corresponding_gt_ppls.append(ppl)
+        return {
+            'lm_ppl': avg_ppl,
+        'gt_prefix_ppl_visual': avg_gt_ppl_gt_prefix_visual,
+        'vlm_prefix_ppl_visual': avg_gt_ppl_vlm_prefix_visual,
+        'fluency': 1.0,  # Will be overridden by actual fluency calculation
+            'ppl_data': {
+            'gt_ppls_gt_prefix_visual': gt_ppls_gt_prefix_visual,
+            'gt_ppls_vlm_prefix_visual': gt_ppls_vlm_prefix_visual,
+                'corresponding_gt_ppls': corresponding_gt_ppls,
+                'generated_responses': len(generated_turns),
+                'total_gt_responses': len(ground_truth_responses)
+            }
+        }
 
 def evaluate_video_with_model(model, tokenizer, video_tensor, conversation, generated_turns, device, frame_fps=2):
     """Evaluate video using the same approach as evaluate.py - using stream_evaluate and compute_metrics."""
