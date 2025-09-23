@@ -63,7 +63,7 @@ class Config:
     # Processing limits
     MAX_EVAL_FRAMES = 50            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
-    MEMORY_CHECK_INTERVAL = 50           # Check memory every N frames
+    MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
@@ -352,11 +352,15 @@ class FilteredEgo4DRefinedNarrationStream:
 def get_gpu_memory():
     """Get current GPU memory usage in MB"""
     try:
-        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader,nounits'], 
-                              capture_output=True, text=True)
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader,nounits'],
+            capture_output=True,
+            text=True,
+        )
         return int(result.stdout.strip())
-    except:
+    except Exception:
         return 0
+
 
 def get_gpu_memory_info():
     """Get detailed GPU memory information"""
@@ -366,16 +370,84 @@ def get_gpu_memory_info():
             allocated_memory = torch.cuda.memory_allocated()
             cached_memory = torch.cuda.memory_reserved()
             free_memory = total_memory - allocated_memory
-            
+
             return {
                 'total_mb': total_memory / (1024**2),
                 'allocated_mb': allocated_memory / (1024**2),
                 'cached_mb': cached_memory / (1024**2),
-                'free_mb': free_memory / (1024**2)
+                'free_mb': free_memory / (1024**2),
             }
-    except:
+    except Exception:
         pass
     return None
+
+
+def _tensor_numel_bytes(tensor):
+    """Return tensor memory footprint in bytes."""
+    if tensor is None or not hasattr(tensor, 'nelement'):
+        return 0
+    try:
+        return tensor.nelement() * tensor.element_size()
+    except Exception:
+        return 0
+
+
+def calculate_model_memory_mb(model):
+    """Approximate model parameter + buffer memory footprint on GPU in MB."""
+    if hasattr(model, '_parameter_memory_mb'):
+        return model._parameter_memory_mb
+
+    total_bytes = 0
+    try:
+        for param in model.parameters():
+            total_bytes += _tensor_numel_bytes(param)
+        for buffer in model.buffers():
+            total_bytes += _tensor_numel_bytes(buffer)
+    except Exception:
+        pass
+
+    model._parameter_memory_mb = total_bytes / (1024**2)
+    return model._parameter_memory_mb
+
+
+def calculate_kv_cache_memory_mb(past_key_values):
+    """Estimate KV cache footprint in MB."""
+    if past_key_values is None:
+        return 0.0
+
+    total_bytes = 0
+
+    # Handle the variety of cache containers used by transformers
+    if hasattr(past_key_values, 'values') and callable(past_key_values.values):
+        cache_iter = past_key_values.values()
+    else:
+        cache_iter = past_key_values
+
+    for layer in cache_iter:
+        if layer is None:
+            continue
+
+        # Some caches return tuples of tensors, others dict-like objects
+        if isinstance(layer, dict):
+            tensors = layer.values()
+        elif hasattr(layer, 'values') and callable(layer.values):
+            tensors = layer.values()
+        elif isinstance(layer, (list, tuple)):
+            tensors = layer
+        else:
+            tensors = [layer]
+
+        for tensor in tensors:
+            if isinstance(tensor, dict):
+                for nested in tensor.values():
+                    total_bytes += _tensor_numel_bytes(nested)
+            elif isinstance(tensor, (list, tuple)):
+                for nested in tensor:
+                    total_bytes += _tensor_numel_bytes(nested)
+            else:
+                total_bytes += _tensor_numel_bytes(tensor)
+
+    return total_bytes / (1024**2)
 
 def calculate_max_frames_for_memory():
     """Calculate maximum frames that can be processed based on available GPU memory"""
@@ -564,54 +636,101 @@ def calculate_all_rebuffering_times(responses, frame_processing_times, reading_s
     }
 
 def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
-    """Create simplified memory usage visualization for all videos"""
-    
+    """Create detailed memory usage visualization for all videos"""
+
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Create figure with 2 subplots side by side
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=Config.PLOT_FIGSIZE_MEDIUM)
+
+    num_conversations = max(1, len(all_memory_data))
+    figure_height = Config.PLOT_FIGSIZE_SMALL[1] * max(1, num_conversations)
+    fig, axes = plt.subplots(num_conversations, 3, figsize=(Config.PLOT_FIGSIZE_LARGE[0], figure_height))
     fig.suptitle('GPU Memory Usage Analysis - CPU-First Conversation Processing', fontsize=16, fontweight='bold')
-    
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
-    
-    # Plot 1: Memory Usage Over Time
-    for i, (conversation_key, data) in enumerate(all_memory_data.items()):
-        if data['frames']:  # Only plot if we have data
-            ax1.plot(data['frames'], data['memory_usage'], 
-                    color=colors[i % len(colors)], 
-                    label=f'Video {conversation_key}', 
-                    linewidth=2, marker='o', markersize=3)
-    
-    ax1.set_xlabel('Frame Number')
-    ax1.set_ylabel('GPU Memory Usage (MB)')
-    ax1.set_title('Total GPU Memory Usage Over Time')
-    ax1.grid(True, alpha=0.3)
-    ax1.legend()
-    
-    # Plot 2: Memory Per Frame (Efficiency)
-    for i, (conversation_key, data) in enumerate(all_memory_data.items()):
-        if data['frames']:  # Only plot if we have data
-            ax2.plot(data['frames'], data['memory_per_frame'], 
-                    color=colors[i % len(colors)], 
-                    label=f'Video {conversation_key}', 
-                    linewidth=2, marker='^', markersize=3)
-    
-    ax2.set_xlabel('Frame Number')
-    ax2.set_ylabel('Memory Per Frame (MB)')
-    ax2.set_title('Memory Efficiency (Lower is Better)')
-    ax2.grid(True, alpha=0.3)
-    ax2.legend()
-    
-    plt.tight_layout()
-    
+
+    # Normalise axes shape for single conversation runs
+    if num_conversations == 1:
+        axes = np.array([axes])
+
+    component_colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+
+    for row_idx, (conversation_key, data) in enumerate(all_memory_data.items() or {"conversation": {}}.items()):
+        ax_breakdown, ax_efficiency, ax_allocator = axes[row_idx]
+
+        frames = data.get('frames', [])
+        if not frames:
+            ax_breakdown.text(0.5, 0.5, 'No memory data collected', ha='center', va='center', transform=ax_breakdown.transAxes)
+            ax_efficiency.axis('off')
+            ax_allocator.axis('off')
+            continue
+
+        totals = data.get('memory_usage', [])
+        model_memory = data.get('model_memory', [])
+        kv_cache_memory = data.get('kv_cache_memory', [])
+        other_memory = data.get('other_memory', [])
+        memory_per_frame = data.get('memory_per_frame', [])
+        torch_allocated = data.get('torch_allocated', [])
+        torch_reserved = data.get('torch_reserved', [])
+
+        lengths = [len(frames), len(totals), len(model_memory), len(kv_cache_memory), len(other_memory), len(memory_per_frame), len(torch_allocated), len(torch_reserved)]
+        min_length = min(lengths) if all(lengths) else 0
+
+        if min_length == 0:
+            ax_breakdown.text(0.5, 0.5, 'Incomplete memory data', ha='center', va='center', transform=ax_breakdown.transAxes)
+            ax_efficiency.axis('off')
+            ax_allocator.axis('off')
+            continue
+
+        frames = np.array(frames[:min_length])
+        totals = np.array(totals[:min_length])
+        model_memory = np.array(model_memory[:min_length])
+        kv_cache_memory = np.array(kv_cache_memory[:min_length])
+        other_memory = np.array(other_memory[:min_length])
+        memory_per_frame = np.array(memory_per_frame[:min_length])
+        torch_allocated = np.array(torch_allocated[:min_length])
+        torch_reserved = np.array(torch_reserved[:min_length])
+
+        # 1. Component breakdown stackplot
+        ax_breakdown.stackplot(
+            frames,
+            model_memory,
+            kv_cache_memory,
+            other_memory,
+            colors=component_colors,
+            labels=['Model Parameters', 'KV Cache', 'Other Allocations'],
+            alpha=0.7,
+        )
+        ax_breakdown.plot(frames, totals, color='black', linestyle='--', linewidth=1.5, label='nvidia-smi Total')
+        ax_breakdown.set_title(f'{conversation_key} Memory Breakdown', fontsize=10)
+        ax_breakdown.set_xlabel('Frame Number')
+        ax_breakdown.set_ylabel('Memory (MB)')
+        ax_breakdown.grid(True, alpha=0.3)
+        ax_breakdown.legend(fontsize=8, loc='upper left')
+
+        # 2. Memory efficiency per frame
+        ax_efficiency.plot(frames, memory_per_frame, color='#9467bd', linewidth=2, marker='^', markersize=3)
+        ax_efficiency.set_title('Memory Efficiency (Lower is Better)', fontsize=10)
+        ax_efficiency.set_xlabel('Frame Number')
+        ax_efficiency.set_ylabel('Δ Memory / Frame (MB)')
+        ax_efficiency.grid(True, alpha=0.3)
+
+        # 3. Allocator view (PyTorch vs nvidia-smi)
+        ax_allocator.plot(frames, torch_allocated, color='#17becf', linewidth=2, label='torch.cuda.memory_allocated')
+        ax_allocator.plot(frames, torch_reserved, color='#bcbd22', linewidth=2, linestyle='--', label='torch.cuda.memory_reserved')
+        ax_allocator.plot(frames, totals, color='black', linewidth=1.5, linestyle=':', label='nvidia-smi Total')
+        ax_allocator.set_title('Allocator View', fontsize=10)
+        ax_allocator.set_xlabel('Frame Number')
+        ax_allocator.set_ylabel('Memory (MB)')
+        ax_allocator.grid(True, alpha=0.3)
+        ax_allocator.legend(fontsize=8, loc='upper left')
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
     # Save the plot
     output_path = os.path.join(output_dir, f'memory_usage_analysis_{data_source}.png')
     plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
     print(f"📊 Memory usage analysis saved to: {output_path}")
-    
+
     plt.show()
-    
+
     return output_path
 
 def create_frame_score_analysis(all_frame_scores_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
@@ -1255,39 +1374,6 @@ def get_videos_with_features():
         print(f"Error loading metadata: {e}")
         return set()
 
-def process_query_response(model, tokenizer, device, query_text, video_time, past_key_values, inplace_output_ids, eos_token_id):
-    """Process a query and generate response like benchmark"""
-    
-    # Tokenize query like benchmark
-    query_ids = tokenizer.apply_chat_template(
-        [{'role': 'user', 'content': query_text}], 
-        add_stream_query_prompt=True, 
-        add_generation_prompt=True, 
-        return_tensors='pt'
-    ).to(device)
-    
-    # Get inputs_embeds
-    inputs_embeds = model.get_input_embeddings()(query_ids)
-    
-    # Generate response
-    output_ids, past_key_values = fast_greedy_generate(
-        model=model, 
-        inputs_embeds=inputs_embeds,
-        past_key_values=past_key_values,
-        eos_token_id=eos_token_id,
-        inplace_output_ids=inplace_output_ids
-    )
-    
-    # Decode response
-    response_text = tokenizer.decode(output_ids[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)
-    
-    # Clean response
-    cleaned_response = response_text.strip()
-    if cleaned_response.startswith(','):
-        cleaned_response = cleaned_response[1:].strip()
-    
-    return f"(Video Time = {video_time}s) User: {query_text}", f"(Video Time = {video_time}s) Assistant: {cleaned_response}"
-
 def process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, data_source='goalstep', custom_threshold=None):
     """Process a single conversation with continuous frame-by-frame processing and response generation."""
     
@@ -1369,16 +1455,25 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
         print(f"📊 Memory-based frame limit: {memory_based_limit}")
     
     print(f"🔄 Processing {test_frames} frames continuously...")
-    
+
+    # Pre-compute static and device-specific memory helpers
+    model_memory_mb = calculate_model_memory_mb(model)
+    device_obj = torch.device(device)
+
     # Track initial memory for growth analysis
     initial_memory = get_gpu_memory()
-    
+
     # Collect memory data for visualization
     memory_data = {
         'frames': [],
         'memory_usage': [],
         'memory_growth': [],
-        'memory_per_frame': []
+        'memory_per_frame': [],
+        'model_memory': [],
+        'kv_cache_memory': [],
+        'other_memory': [],
+        'torch_allocated': [],
+        'torch_reserved': [],
     }
     
     # Collect frame score data for visualization
@@ -1398,16 +1493,26 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
             current_memory = get_gpu_memory()
             memory_growth = current_memory - initial_memory
             memory_per_frame = memory_growth / max(1, frame_idx) if frame_idx > 0 else 0
-            
+
+            torch_allocated_mb = 0.0
+            torch_reserved_mb = 0.0
+            if torch.cuda.is_available():
+                torch_allocated_mb = torch.cuda.memory_allocated(device_obj) / (1024**2)
+                torch_reserved_mb = torch.cuda.memory_reserved(device_obj) / (1024**2)
+
+            kv_cache_memory_mb = calculate_kv_cache_memory_mb(liveinfer.past_key_values)
+            other_memory_mb = max(torch_allocated_mb - model_memory_mb - kv_cache_memory_mb, 0.0)
+
             # Store data for visualization
             memory_data['frames'].append(frame_idx)
             memory_data['memory_usage'].append(current_memory)
             memory_data['memory_growth'].append(memory_growth)
             memory_data['memory_per_frame'].append(memory_per_frame)
-            
-            # Dynamic frame limit adjustment based on actual memory growth
-            if frame_idx > 100:  # After 100 frames, we have good data
-                remaining_memory = 24000 - current_memory  # Assume 24GB total
+            memory_data['model_memory'].append(model_memory_mb)
+            memory_data['kv_cache_memory'].append(kv_cache_memory_mb)
+            memory_data['other_memory'].append(other_memory_mb)
+            memory_data['torch_allocated'].append(torch_allocated_mb)
+            memory_data['torch_reserved'].append(torch_reserved_mb)
         
         # Measure total frame processing time (RGB to processed)
         frame_start_time = time.time()
@@ -1509,7 +1614,6 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
     
     # Calculate overhead time (time not captured in individual components)
     total_measured_components = total_visual_embedding_time + total_model_forward_time + total_generation_time
-    overhead_time = total_frame_processing_time - total_measured_components
     
     visual_embedding_time = total_visual_embedding_time
     model_forward_time = total_model_forward_time
@@ -1698,7 +1802,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         video_path = f"datasets/ego4d/v2/full_scale_2fps_384/{video_uid}.mp4"
         
         if hasattr(dataset, 'data_source'):
-            # For goalstep, process the conversation with proper frame limits
             result, memory_data = process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, dataset.data_source, custom_threshold)
             if result:
                 results.append(result)
@@ -1970,33 +2073,6 @@ class SimpleLiveInfer:
         logger = transformers.logging.get_logger('liveinfer')
         logger.warning(f'{video_path} -> {self.video_tensor.shape}, {self.frame_fps} FPS (CPU streaming mode)')
     
-    def load_frame_range(self, start_frame, end_frame):
-        """Load a specific range of frames on-demand with caching"""
-        try:
-            # Load frames in small batches to avoid memory issues
-            batch_size = min(Config.BATCH_SIZE_LIMIT, end_frame - start_frame)  # Load frames in batches
-            
-            if end_frame - start_frame <= batch_size:
-                # Small range - load directly
-                frames = read_video(self.video_path, pts_unit='sec', output_format='TCHW')[0][start_frame:end_frame].to(self.device)
-                return frames
-            else:
-                # Large range - load in batches
-                all_frames = []
-                for batch_start in range(start_frame, end_frame, batch_size):
-                    batch_end = min(batch_start + batch_size, end_frame)
-                    batch_frames = read_video(self.video_path, pts_unit='sec', output_format='TCHW')[0][batch_start:batch_end].to(self.device)
-                    all_frames.append(batch_frames)
-                
-                if all_frames:
-                    return torch.cat(all_frames, dim=0)
-                else:
-                    return None
-                
-        except Exception as e:
-            print(f"Error loading frames {start_frame}-{end_frame}: {e}")
-            return None
-    
     def _call_for_response(self, video_time, query):
         
         # MEASURE GENERATION TIME (this is the VLM text generation)
@@ -2063,7 +2139,6 @@ class SimpleLiveInfer:
                         context_info['total_tokens'] += key_tensor.shape[-2]  # sequence length
         
         return context_info
-    
     
     def _call_for_streaming(self):
         while self.frame_embeds_queue:
