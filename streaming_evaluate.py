@@ -16,8 +16,6 @@ import sys
 import traceback
 import collections
 from dataclasses import asdict
-from transformers import PreTrainedTokenizer
-from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 from torchvision.io import read_video
@@ -441,12 +439,13 @@ def defragment_gpu_memory():
 
 def calculate_all_rebuffering_times(responses, frame_processing_times, reading_speed=4.0, listening_speed=2.35):
     """
-    Calculate all types of rebuffering times in one consolidated function.
+    Calculate all types of rebuffering times and resource utilization in one consolidated function.
     
-    This function calculates three types of rebuffering:
+    This function calculates:
     1. Generation rebuffering: Delay when processing exceeds real-time frame rate
     2. Reading rebuffering: Delay when user reading time causes processing delays
     3. Listening rebuffering: Delay when user listening time causes processing delays
+    4. Resource utilization: (all previous processing time) / (current video time + current processing time)
     
     Args:
         responses: List of response dictionaries with 'text' field
@@ -459,22 +458,28 @@ def calculate_all_rebuffering_times(responses, frame_processing_times, reading_s
             'generation_rebuffering_times': list,
             'reading_rebuffering_times': list,
             'listening_rebuffering_times': list,
+            'resource_utilization_times': list,
             'total_generation_rebuffering': float,
             'total_reading_rebuffering': float,
             'total_listening_rebuffering': float,
             'average_generation_rebuffering': float,
             'average_reading_rebuffering': float,
-            'average_listening_rebuffering': float
+            'average_listening_rebuffering': float,
+            'final_frame_utilization': float
         }
     """
     generation_rebuffering_times = []
     reading_rebuffering_times = []
     listening_rebuffering_times = []
+    resource_utilization_times = []
     
     # Track when previous activities finished
     previous_processing_finish = 0.0
     previous_reading_finish = 0.0
     previous_listening_finish = 0.0
+    
+    # Track cumulative processing time for resource utilization
+    cumulative_processing_time = 0.0
     
     frame_interval = 1.0 / Config.FRAME_FPS  # e.g., 0.5s for 2 FPS
     
@@ -511,9 +516,17 @@ def calculate_all_rebuffering_times(responses, frame_processing_times, reading_s
         listening_rebuffering_delay = max(0.0, previous_listening_finish - expected_listening_start)
         listening_rebuffering_times.append(listening_rebuffering_delay)
         
+        # 4. RESOURCE UTILIZATION: (all previous processing time) / (current video time + current processing time)
+        current_video_time = expected_processing_start  # 0, 0.5, 1.0, 1.5, ...
+        resource_utilization = cumulative_processing_time / (current_video_time + processing_time) if (current_video_time + processing_time) > 0 else 0.0
+        resource_utilization_times.append(resource_utilization)
+        
         # Update finish times for next iteration
         # Processing finishes at expected_start + generation_rebuffering + processing_time
         actual_processing_finish = expected_processing_start + generation_rebuffering_delay + processing_time
+        
+        # Update cumulative processing time for next iteration
+        cumulative_processing_time += processing_time
         
         # Reading finishes when processing + reading is complete (independent of listening)
         previous_reading_finish = actual_processing_finish + reading_time
@@ -533,16 +546,21 @@ def calculate_all_rebuffering_times(responses, frame_processing_times, reading_s
     average_reading_rebuffering = total_reading_rebuffering / len(reading_rebuffering_times) if reading_rebuffering_times else 0.0
     average_listening_rebuffering = total_listening_rebuffering / len(listening_rebuffering_times) if listening_rebuffering_times else 0.0
     
+    # Calculate final frame utilization
+    final_frame_utilization = resource_utilization_times[-1] if resource_utilization_times else 0.0
+    
     return {
         'generation_rebuffering_times': generation_rebuffering_times,
         'reading_rebuffering_times': reading_rebuffering_times,
         'listening_rebuffering_times': listening_rebuffering_times,
+        'resource_utilization_times': resource_utilization_times,
         'total_generation_rebuffering': total_generation_rebuffering,
         'total_reading_rebuffering': total_reading_rebuffering,
         'total_listening_rebuffering': total_listening_rebuffering,
         'average_generation_rebuffering': average_generation_rebuffering,
         'average_reading_rebuffering': average_reading_rebuffering,
-        'average_listening_rebuffering': average_listening_rebuffering
+        'average_listening_rebuffering': average_listening_rebuffering,
+        'final_frame_utilization': final_frame_utilization
     }
 
 def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
@@ -723,7 +741,7 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
     for i, conversation_timing in enumerate(conversation_timings):
         conversation_number = i + 1  # Always use sequential numbering 1, 2, 3, ...
         conversation_id = conversation_timing.get('conversation_id', f'conversation_{i+1}')
-        fig, axes = plt.subplots(1, 6, figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_LARGE[1]//6))
+        fig, axes = plt.subplots(1, 7, figsize=(21, 6))
         fig.suptitle(f'Conversation {conversation_number} ({conversation_id}) - Timing Analysis', fontsize=14, fontweight='bold')
         
         # 1. Timing components breakdown
@@ -735,8 +753,8 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
         colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
         
         bars = ax1.bar(components, times, color=colors, alpha=0.8)
-        ax1.set_ylabel('Time (seconds)')
-        ax1.set_title('Timing Components Breakdown')
+        ax1.set_ylabel('Time (seconds)', fontsize=9)
+        ax1.set_title('Timing Components Breakdown', fontsize=10)
         ax1.grid(True, alpha=0.3)
         
         # Add value labels on bars
@@ -789,9 +807,9 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
             
             ax3.set_xlabel('Video Time (seconds)')
             ax3.set_ylabel('Time per Frame (ms)')
-            ax3.set_title('Timing Components Over Time')
+            ax3.set_title('Timing Components Over Time', fontsize=10)
             ax3.grid(True, alpha=0.3)
-            ax3.legend(fontsize=8)
+            ax3.legend(fontsize=7)
             
             # Add some statistics
             avg_visual = np.mean(visual_times)
@@ -821,7 +839,7 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
                 ax3.set_ylabel('Time per Frame (ms)')
                 ax3.set_title('Timing Components Over Time (Estimated)')
                 ax3.grid(True, alpha=0.3)
-                ax3.legend(fontsize=8)
+                ax3.legend(fontsize=7)
                 
                 stats_text = f'Visual: {visual_per_frame:.1f}ms/frame\nModel: {model_per_frame:.1f}ms/frame\nGen: {generation_per_frame:.1f}ms/frame'
                 ax3.text(0.02, 0.98, stats_text, transform=ax3.transAxes, 
@@ -829,7 +847,7 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
                         bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
             else:
                 ax3.text(0.5, 0.5, 'No timing data available', ha='center', va='center', transform=ax3.transAxes)
-                ax3.set_title('Timing Components Over Time')
+                ax3.set_title('Timing Components Over Time', fontsize=10)
         
         # 4. Rebuffering time over time
         ax4 = axes[3]
@@ -845,9 +863,9 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
             
             ax4.set_xlabel('Video Time (seconds)')
             ax4.set_ylabel('Rebuffering Time (seconds)')
-            ax4.set_title('Rebuffering Time Over Time')
+            ax4.set_title('Rebuffering Time Over Time', fontsize=10)
             ax4.grid(True, alpha=0.3)
-            ax4.legend(fontsize=8)
+            ax4.legend(fontsize=7)
             
             # Add statistics
             total_rebuffering = sum(rebuffering_times)
@@ -860,7 +878,7 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
                     bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.8))
         else:
             ax4.text(0.5, 0.5, 'No rebuffering data available', ha='center', va='center', transform=ax4.transAxes)
-            ax4.set_title('Rebuffering Time Over Time')
+            ax4.set_title('Rebuffering Time Over Time', fontsize=10)
         
         # 5. Reading rebuffering time over time
         ax5 = axes[4]
@@ -875,9 +893,9 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
             
             ax5.set_xlabel('Video Time (seconds)')
             ax5.set_ylabel('Reading Rebuffering (seconds)')
-            ax5.set_title('Reading Rebuffering Over Time')
+            ax5.set_title('Reading Rebuffering Over Time', fontsize=10)
             ax5.grid(True, alpha=0.3)
-            ax5.legend(fontsize=8)
+            ax5.legend(fontsize=7)
             
             total_reading = sum(reading_rebuffering_times)
             avg_reading = np.mean(reading_rebuffering_times)
@@ -889,7 +907,7 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
                     bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
         else:
             ax5.text(0.5, 0.5, 'No reading rebuffering data', ha='center', va='center', transform=ax5.transAxes)
-            ax5.set_title('Reading Rebuffering Over Time')
+            ax5.set_title('Reading Rebuffering Over Time', fontsize=10)
         
         # 6. Listening rebuffering time over time
         ax6 = axes[5]
@@ -904,9 +922,9 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
             
             ax6.set_xlabel('Video Time (seconds)')
             ax6.set_ylabel('Listening Rebuffering (seconds)')
-            ax6.set_title('Listening Rebuffering Over Time')
+            ax6.set_title('Listening Rebuffering Over Time', fontsize=10)
             ax6.grid(True, alpha=0.3)
-            ax6.legend(fontsize=8)
+            ax6.legend(fontsize=7)
             
             total_listening = sum(listening_rebuffering_times)
             avg_listening = np.mean(listening_rebuffering_times)
@@ -918,9 +936,41 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
                     bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
         else:
             ax6.text(0.5, 0.5, 'No listening rebuffering data', ha='center', va='center', transform=ax6.transAxes)
-            ax6.set_title('Listening Rebuffering Over Time')
+            ax6.set_title('Listening Rebuffering Over Time', fontsize=10)
         
-        plt.tight_layout()
+        # 7. Resource utilization over time
+        ax7 = axes[6]
+        resource_utilization_times = conversation_timing.get('resource_utilization_times', [])
+        
+        if resource_utilization_times:
+            frame_indices = range(len(resource_utilization_times))
+            video_times = [i / Config.FRAME_FPS for i in frame_indices]
+            
+            ax7.plot(video_times, resource_utilization_times, 'm-', linewidth=2, alpha=0.8, label='Resource Utilization')
+            ax7.fill_between(video_times, resource_utilization_times, alpha=0.3, color='magenta')
+            
+            ax7.set_xlabel('Video Time (seconds)')
+            ax7.set_ylabel('Resource Utilization')
+            ax7.set_title('Resource Utilization Over Time', fontsize=10)
+            ax7.grid(True, alpha=0.3)
+            ax7.legend(fontsize=7)
+            
+            # Add horizontal line at 1.0 (100% utilization)
+            ax7.axhline(y=1.0, color='red', linestyle='--', alpha=0.7, label='100% Utilization')
+            
+            final_utilization = resource_utilization_times[-1] if resource_utilization_times else 0.0
+            avg_utilization = np.mean(resource_utilization_times)
+            max_utilization = max(resource_utilization_times)
+            
+            stats_text = f'Final: {final_utilization:.3f}\nAvg: {avg_utilization:.3f}\nMax: {max_utilization:.3f}'
+            ax7.text(0.02, 0.98, stats_text, transform=ax7.transAxes, 
+                    verticalalignment='top', fontsize=8,
+                    bbox=dict(boxstyle='round', facecolor='lightpink', alpha=0.8))
+        else:
+            ax7.text(0.5, 0.5, 'No resource utilization data', ha='center', va='center', transform=ax7.transAxes)
+            ax7.set_title('Resource Utilization Over Time', fontsize=10)
+        
+        plt.tight_layout(pad=2.0)
         plt.savefig(os.path.join(output_dir, f'conversation_{conversation_number}_timing_{data_source}.png'), dpi=300, bbox_inches='tight')
         plt.close()
     
@@ -944,8 +994,8 @@ def create_individual_video_timing_plots(video_timings, output_dir=Config.OUTPUT
         colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
         
         bars = ax1.bar(components, times, color=colors, alpha=0.8)
-        ax1.set_ylabel('Time (seconds)')
-        ax1.set_title('Timing Components Breakdown')
+        ax1.set_ylabel('Time (seconds)', fontsize=9)
+        ax1.set_title('Timing Components Breakdown', fontsize=10)
         ax1.grid(True, alpha=0.3)
         
         # Add value labels on bars
@@ -1084,7 +1134,7 @@ def create_individual_video_timing_plots(video_timings, output_dir=Config.OUTPUT
         
         ax2.set_xlabel('Time (seconds)')
         ax2.set_ylabel('Time per Frame (ms)')
-        ax2.set_title('Timing Components + Generated Responses')
+        ax2.set_title('Timing Components + Generated Responses', fontsize=10)
         ax2.grid(True, alpha=0.3)
         
         # 3. Ground truth response times and prompt times (bottom plot)
@@ -1433,6 +1483,7 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
     rebuffering_times = rebuffering_data['generation_rebuffering_times']
     reading_rebuffering_times = rebuffering_data['reading_rebuffering_times']
     listening_rebuffering_times = rebuffering_data['listening_rebuffering_times']
+    resource_utilization_times = rebuffering_data['resource_utilization_times']
     
     total_rebuffering_time = rebuffering_data['total_generation_rebuffering']
     average_rebuffering_time = rebuffering_data['average_generation_rebuffering']
@@ -1443,11 +1494,14 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
     total_listening_rebuffering = rebuffering_data['total_listening_rebuffering']
     average_listening_rebuffering = rebuffering_data['average_listening_rebuffering']
     
+    final_frame_utilization = rebuffering_data['final_frame_utilization']
+    
     # Add rebuffering data to frame timing data
     for i, timing_data in enumerate(frame_timing_data):
         timing_data['rebuffering_time'] = rebuffering_times[i] if i < len(rebuffering_times) else 0.0
         timing_data['reading_rebuffering_time'] = reading_rebuffering_times[i] if i < len(reading_rebuffering_times) else 0.0
         timing_data['listening_rebuffering_time'] = listening_rebuffering_times[i] if i < len(listening_rebuffering_times) else 0.0
+        timing_data['resource_utilization'] = resource_utilization_times[i] if i < len(resource_utilization_times) else 0.0
     
     # Calculate the correct total processing time
     total_frame_processing_time = sum(frame_processing_times)
@@ -1476,6 +1530,7 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
     print(f"   • Average reading rebuffering time per frame: {average_reading_rebuffering:.3f}s")
     print(f"   • Total listening rebuffering time: {total_listening_rebuffering:.3f}s")
     print(f"   • Average listening rebuffering time per frame: {average_listening_rebuffering:.3f}s")
+    print(f"   • Final frame resource utilization: {final_frame_utilization:.3f}")
     print("-" * 60)
     
     # Calculate content-based metrics using model evaluation
@@ -1542,7 +1597,9 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
         'average_reading_rebuffering_time': average_reading_rebuffering,  # Add average reading rebuffering time
         'listening_rebuffering_times': listening_rebuffering_times,  # Add listening rebuffering time data
         'total_listening_rebuffering_time': total_listening_rebuffering,  # Add total listening rebuffering time
-        'average_listening_rebuffering_time': average_listening_rebuffering  # Add average listening rebuffering time
+        'average_listening_rebuffering_time': average_listening_rebuffering,  # Add average listening rebuffering time
+        'resource_utilization_times': resource_utilization_times,  # Add resource utilization time data
+        'final_frame_utilization': final_frame_utilization  # Add final frame resource utilization
     }
     
     # Create timeline with interleaved user prompts, ground truth, and generated responses
@@ -1599,14 +1656,6 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
     
     return result, memory_data
 
-def process_goalstep_conversation(model, tokenizer, conversation_data, video_path, dataset, device, custom_threshold=None):
-    """Wrapper for goalstep conversation processing."""
-    return process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, 'goalstep', custom_threshold)
-
-def process_narration_conversation(model, tokenizer, conversation_data, video_path, dataset, device, custom_threshold=None):
-    """Wrapper for narration conversation processing."""
-    return process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, 'narration', custom_threshold)
-
 def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', num_conversations=3, random_selection=False, specific_indices=None, data_source='goalstep', custom_threshold=None):
     """Evaluate multiple conversations using streaming approach - one frame at a time."""
     
@@ -1645,18 +1694,12 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             raise ValueError(f"Conversation index {conversation_idx} out of range. Dataset has {len(dataset.conversations)} conversations.")
         
         video_uid = conversation_data['video_uid']
-        conversation_id = conversation_data['conversation_id']
-        conversation = conversation_data['conversation']
-        start_time = conversation_data['start_time']
-        end_time = conversation_data['end_time']
-        duration = conversation_data['duration']
         
         video_path = f"datasets/ego4d/v2/full_scale_2fps_384/{video_uid}.mp4"
         
-        # Handle goalstep vs narration differently
-        if hasattr(dataset, 'data_source') and dataset.data_source == 'goalstep':
+        if hasattr(dataset, 'data_source'):
             # For goalstep, process the conversation with proper frame limits
-            result, memory_data = process_goalstep_conversation(model, tokenizer, conversation_data, video_path, dataset, device, custom_threshold)
+            result, memory_data = process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, dataset.data_source, custom_threshold)
             if result:
                 results.append(result)
                 # Use unique key combining video and conversation ID
@@ -1665,19 +1708,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 # Collect frame scores data if available
                 if 'frame_scores_data' in result:
                     all_frame_scores_data[unique_key] = result['frame_scores_data']
-            continue
-        else:
-            # For narration, process the conversation with proper frame limits
-            result, memory_data = process_narration_conversation(model, tokenizer, conversation_data, video_path, dataset, device, custom_threshold)
-            if result:
-                results.append(result)
-                # Use unique key combining video and conversation ID
-                unique_key = f"{conversation_data['video_uid'][:8]}_{conversation_data['conversation_id'][:8]}"
-                all_memory_data[unique_key] = memory_data
-                # Collect frame scores data if available
-                if 'frame_scores_data' in result:
-                    all_frame_scores_data[unique_key] = result['frame_scores_data']
-                continue
     
     # Create comprehensive memory visualization
     if all_memory_data:
@@ -1800,8 +1830,10 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
             # Add user rebuffering metrics to summary
             avg_reading_rebuffering = sum(r.get('average_reading_rebuffering_time', 0.0) for r in results) / len(results)
             avg_listening_rebuffering = sum(r.get('average_listening_rebuffering_time', 0.0) for r in results) / len(results)
+            avg_final_utilization = sum(r.get('final_frame_utilization', 0.0) for r in results) / len(results)
             print(f"   • Average Reading Rebuffering Time: {avg_reading_rebuffering:.3f}s")
             print(f"   • Average Listening Rebuffering Time: {avg_listening_rebuffering:.3f}s")
+            print(f"   • Average Final Frame Utilization: {avg_final_utilization:.3f}")
         
         # Clean up memory between thresholds
         if i < len(thresholds) - 1:  # Don't clean up after the last threshold
@@ -2361,7 +2393,9 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         'reading_rebuffering_means': [],
         'reading_rebuffering_stds': [],
         'listening_rebuffering_means': [],
-        'listening_rebuffering_stds': []
+        'listening_rebuffering_stds': [],
+        'final_utilization_means': [],
+        'final_utilization_stds': []
     }
     
     for threshold in thresholds:
@@ -2422,9 +2456,14 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         detailed_metrics['reading_rebuffering_stds'].append(np.std(reading_rebuffering_times) if reading_rebuffering_times else 0.0)
         detailed_metrics['listening_rebuffering_means'].append(np.mean(listening_rebuffering_times) if listening_rebuffering_times else 0.0)
         detailed_metrics['listening_rebuffering_stds'].append(np.std(listening_rebuffering_times) if listening_rebuffering_times else 0.0)
+        
+        # Collect final frame utilization metrics
+        final_utilization_times = [r.get('final_frame_utilization', 0.0) for r in results]
+        detailed_metrics['final_utilization_means'].append(np.mean(final_utilization_times) if final_utilization_times else 0.0)
+        detailed_metrics['final_utilization_stds'].append(np.std(final_utilization_times) if final_utilization_times else 0.0)
     
     # Create comprehensive visualization with 2x4 grid (added user rebuffering analysis)
-    fig, axes = plt.subplots(2, 4, figsize=(24, 12))
+    fig, axes = plt.subplots(2, 5, figsize=(30, 12))
     fig.suptitle(f'Unified Threshold Analysis - {data_source.upper()} Dataset', fontsize=18, fontweight='bold')
     
     # 1. Decomposed VLM PPL - One line per video
@@ -2734,6 +2773,51 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
     else:
         ax7.text(0.5, 0.5, 'No listening rebuffering data available', ha='center', va='center', transform=ax7.transAxes)
         ax7.set_title('Listening Rebuffering Time vs Threshold (Per Video)')
+    
+    # 8. Final Frame Resource Utilization vs Threshold (Per Video)
+    ax8 = axes[1, 4]
+    if detailed_metrics['final_utilization_means']:
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        # Collect final utilization data for each video across thresholds
+        video_final_utilization = {}  # {video_idx: {threshold: final_utilization}}
+        
+        for threshold in thresholds:
+            if threshold in all_threshold_results:
+                results = all_threshold_results[threshold]
+                for j, result in enumerate(results):
+                    if j not in video_final_utilization:
+                        video_final_utilization[j] = {}
+                    
+                    # Get final frame utilization for this video at this threshold
+                    if 'final_frame_utilization' in result:
+                        video_final_utilization[j][threshold] = result['final_frame_utilization']
+        
+        # Plot each video's final utilization trajectory
+        for j, video_data in video_final_utilization.items():
+            if len(video_data) > 1:  # Only plot if we have data for multiple thresholds
+                video_thresholds = sorted(video_data.keys())
+                video_final_utilization_list = [video_data[t] for t in video_thresholds]
+                color = colors[j % len(colors)]
+                ax8.plot(video_thresholds, video_final_utilization_list, 'o-', color=color, linewidth=2, markersize=4, 
+                        label=f'Video {j+1}', alpha=0.8)
+        
+        # Add average final utilization line with error bars
+        ax8.errorbar(thresholds, detailed_metrics['final_utilization_means'], yerr=detailed_metrics['final_utilization_stds'], 
+                    fmt='s-', color='black', linewidth=3, markersize=8, capsize=5, 
+                    label='Average Final Utilization ± Std', alpha=0.9)
+        
+        # Add horizontal line at 1.0 (100% utilization)
+        ax8.axhline(y=1.0, color='red', linestyle='--', alpha=0.7, label='100% Utilization')
+        
+        ax8.set_xlabel('Streaming Threshold')
+        ax8.set_ylabel('Final Frame Resource Utilization')
+        ax8.set_title('Final Frame Resource Utilization vs Threshold (Per Video)')
+        ax8.grid(True, alpha=0.3)
+        ax8.legend(fontsize=9)
+    else:
+        ax8.text(0.5, 0.5, 'No final utilization data available', ha='center', va='center', transform=ax8.transAxes)
+        ax8.set_title('Final Frame Resource Utilization vs Threshold (Per Video)')
     
     plt.tight_layout()
     
