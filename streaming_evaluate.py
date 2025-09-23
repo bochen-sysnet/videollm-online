@@ -63,16 +63,23 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 50              # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 50            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 50           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 3                # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 2               # Default number of videos for evaluation
     DEFAULT_THRESHOLD_RANGE = (0.5, 0.99) # Default threshold range for sweep
-    DEFAULT_NUM_THRESHOLDS = 10           # Default number of thresholds for sweep
-    DEBUG_THRESHOLDS = [0.8, 0.9, 0.95]  # Debug thresholds for quick testing
+    DEFAULT_NUM_THRESHOLDS = 2           # Default number of thresholds for sweep
+    DEBUG_THRESHOLDS = [0.8, 0.9]         # Coarse-grained thresholds
+    # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92, 0.94, 0.96, 0.98]  # Fine-grained thresholds
+    
+    # User-level rebuffering configuration
+    USER_READING_SPEED_MIN = 3.0          # Words per second (slow reading)
+    USER_READING_SPEED_MAX = 5.0          # Words per second (fast reading)
+    USER_LISTENING_SPEED_MIN = 2.0        # Words per second (slow listening)
+    USER_LISTENING_SPEED_MAX = 2.7        # Words per second (fast listening)
     
     # File paths
     DATASET_BASE_PATH = "datasets/ego4d/v2/full_scale_2fps_384"
@@ -432,6 +439,112 @@ def defragment_gpu_memory():
         print(f"Warning: Memory defragmentation failed: {e}")
         return False
 
+def calculate_all_rebuffering_times(responses, frame_processing_times, reading_speed=4.0, listening_speed=2.35):
+    """
+    Calculate all types of rebuffering times in one consolidated function.
+    
+    This function calculates three types of rebuffering:
+    1. Generation rebuffering: Delay when processing exceeds real-time frame rate
+    2. Reading rebuffering: Delay when user reading time causes processing delays
+    3. Listening rebuffering: Delay when user listening time causes processing delays
+    
+    Args:
+        responses: List of response dictionaries with 'text' field
+        frame_processing_times: List of processing times for each frame
+        reading_speed: Words per second for reading (default: 4.0 wps)
+        listening_speed: Words per second for listening (default: 2.35 wps)
+    
+    Returns:
+        dict: {
+            'generation_rebuffering_times': list,
+            'reading_rebuffering_times': list,
+            'listening_rebuffering_times': list,
+            'total_generation_rebuffering': float,
+            'total_reading_rebuffering': float,
+            'total_listening_rebuffering': float,
+            'average_generation_rebuffering': float,
+            'average_reading_rebuffering': float,
+            'average_listening_rebuffering': float
+        }
+    """
+    generation_rebuffering_times = []
+    reading_rebuffering_times = []
+    listening_rebuffering_times = []
+    
+    # Track when previous activities finished
+    previous_processing_finish = 0.0
+    previous_reading_finish = 0.0
+    previous_listening_finish = 0.0
+    
+    frame_interval = 1.0 / Config.FRAME_FPS  # e.g., 0.5s for 2 FPS
+    
+    # Process each frame
+    for frame_idx, processing_time in enumerate(frame_processing_times):
+        # Expected start time for processing is based on frame intervals (0, 0.5, 1.0, 1.5, ...)
+        expected_processing_start = frame_idx * frame_interval
+        
+        # Calculate reading/listening time for this frame's response (if any)
+        reading_time = 0.0
+        listening_time = 0.0
+        
+        # Check if there's a response for this frame
+        if frame_idx < len(responses) and 'text' in responses[frame_idx] and responses[frame_idx]['text']:
+            response_text = responses[frame_idx]['text']
+            word_count = len(response_text.split())
+            reading_time = word_count / reading_speed
+            listening_time = word_count / listening_speed
+        
+        # 1. GENERATION REBUFFERING: Delay when processing exceeds real-time frame rate
+        if frame_idx == 0:
+            generation_rebuffering_delay = 0.0  # First frame: no rebuffering
+        else:
+            generation_rebuffering_delay = max(0.0, previous_processing_finish - expected_processing_start)
+        generation_rebuffering_times.append(generation_rebuffering_delay)
+        
+        # 2. READING REBUFFERING: Delay when user reading time causes processing delays
+        expected_reading_start = expected_processing_start + processing_time
+        reading_rebuffering_delay = max(0.0, previous_reading_finish - expected_reading_start)
+        reading_rebuffering_times.append(reading_rebuffering_delay)
+        
+        # 3. LISTENING REBUFFERING: Delay when user listening time causes processing delays
+        expected_listening_start = expected_processing_start + processing_time
+        listening_rebuffering_delay = max(0.0, previous_listening_finish - expected_listening_start)
+        listening_rebuffering_times.append(listening_rebuffering_delay)
+        
+        # Update finish times for next iteration
+        # Processing finishes at expected_start + generation_rebuffering + processing_time
+        actual_processing_finish = expected_processing_start + generation_rebuffering_delay + processing_time
+        
+        # Reading finishes when processing + reading is complete (independent of listening)
+        previous_reading_finish = actual_processing_finish + reading_time
+        
+        # Listening finishes when processing + listening is complete (independent of reading)
+        previous_listening_finish = actual_processing_finish + listening_time
+        
+        # Update processing finish time for next iteration
+        previous_processing_finish = actual_processing_finish
+    
+    # Calculate totals and averages
+    total_generation_rebuffering = sum(generation_rebuffering_times)
+    total_reading_rebuffering = sum(reading_rebuffering_times)
+    total_listening_rebuffering = sum(listening_rebuffering_times)
+    
+    average_generation_rebuffering = total_generation_rebuffering / len(generation_rebuffering_times) if generation_rebuffering_times else 0.0
+    average_reading_rebuffering = total_reading_rebuffering / len(reading_rebuffering_times) if reading_rebuffering_times else 0.0
+    average_listening_rebuffering = total_listening_rebuffering / len(listening_rebuffering_times) if listening_rebuffering_times else 0.0
+    
+    return {
+        'generation_rebuffering_times': generation_rebuffering_times,
+        'reading_rebuffering_times': reading_rebuffering_times,
+        'listening_rebuffering_times': listening_rebuffering_times,
+        'total_generation_rebuffering': total_generation_rebuffering,
+        'total_reading_rebuffering': total_reading_rebuffering,
+        'total_listening_rebuffering': total_listening_rebuffering,
+        'average_generation_rebuffering': average_generation_rebuffering,
+        'average_reading_rebuffering': average_reading_rebuffering,
+        'average_listening_rebuffering': average_listening_rebuffering
+    }
+
 def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create simplified memory usage visualization for all videos"""
     
@@ -610,7 +723,7 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
     for i, conversation_timing in enumerate(conversation_timings):
         conversation_number = i + 1  # Always use sequential numbering 1, 2, 3, ...
         conversation_id = conversation_timing.get('conversation_id', f'conversation_{i+1}')
-        fig, axes = plt.subplots(1, 4, figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_LARGE[1]//4))
+        fig, axes = plt.subplots(1, 6, figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_LARGE[1]//6))
         fig.suptitle(f'Conversation {conversation_number} ({conversation_id}) - Timing Analysis', fontsize=14, fontweight='bold')
         
         # 1. Timing components breakdown
@@ -748,6 +861,64 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
         else:
             ax4.text(0.5, 0.5, 'No rebuffering data available', ha='center', va='center', transform=ax4.transAxes)
             ax4.set_title('Rebuffering Time Over Time')
+        
+        # 5. Reading rebuffering time over time
+        ax5 = axes[4]
+        reading_rebuffering_times = conversation_timing.get('reading_rebuffering_times', [])
+        
+        if reading_rebuffering_times:
+            frame_indices = range(len(reading_rebuffering_times))
+            video_times = [i / Config.FRAME_FPS for i in frame_indices]
+            
+            ax5.plot(video_times, reading_rebuffering_times, 'b-', linewidth=2, alpha=0.8, label='Reading Rebuffering')
+            ax5.fill_between(video_times, reading_rebuffering_times, alpha=0.3, color='blue')
+            
+            ax5.set_xlabel('Video Time (seconds)')
+            ax5.set_ylabel('Reading Rebuffering (seconds)')
+            ax5.set_title('Reading Rebuffering Over Time')
+            ax5.grid(True, alpha=0.3)
+            ax5.legend(fontsize=8)
+            
+            total_reading = sum(reading_rebuffering_times)
+            avg_reading = np.mean(reading_rebuffering_times)
+            max_reading = max(reading_rebuffering_times)
+            
+            stats_text = f'Total: {total_reading:.3f}s\nAvg: {avg_reading:.3f}s\nMax: {max_reading:.3f}s'
+            ax5.text(0.02, 0.98, stats_text, transform=ax5.transAxes, 
+                    verticalalignment='top', fontsize=8,
+                    bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+        else:
+            ax5.text(0.5, 0.5, 'No reading rebuffering data', ha='center', va='center', transform=ax5.transAxes)
+            ax5.set_title('Reading Rebuffering Over Time')
+        
+        # 6. Listening rebuffering time over time
+        ax6 = axes[5]
+        listening_rebuffering_times = conversation_timing.get('listening_rebuffering_times', [])
+        
+        if listening_rebuffering_times:
+            frame_indices = range(len(listening_rebuffering_times))
+            video_times = [i / Config.FRAME_FPS for i in frame_indices]
+            
+            ax6.plot(video_times, listening_rebuffering_times, 'g-', linewidth=2, alpha=0.8, label='Listening Rebuffering')
+            ax6.fill_between(video_times, listening_rebuffering_times, alpha=0.3, color='green')
+            
+            ax6.set_xlabel('Video Time (seconds)')
+            ax6.set_ylabel('Listening Rebuffering (seconds)')
+            ax6.set_title('Listening Rebuffering Over Time')
+            ax6.grid(True, alpha=0.3)
+            ax6.legend(fontsize=8)
+            
+            total_listening = sum(listening_rebuffering_times)
+            avg_listening = np.mean(listening_rebuffering_times)
+            max_listening = max(listening_rebuffering_times)
+            
+            stats_text = f'Total: {total_listening:.3f}s\nAvg: {avg_listening:.3f}s\nMax: {max_listening:.3f}s'
+            ax6.text(0.02, 0.98, stats_text, transform=ax6.transAxes, 
+                    verticalalignment='top', fontsize=8,
+                    bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
+        else:
+            ax6.text(0.5, 0.5, 'No listening rebuffering data', ha='center', va='center', transform=ax6.transAxes)
+            ax6.set_title('Listening Rebuffering Over Time')
         
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f'conversation_{conversation_number}_timing_{data_source}.png'), dpi=300, bbox_inches='tight')
@@ -1251,35 +1422,32 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
     # Collect frame scores data after processing
     frame_scores_data = liveinfer.get_frame_scores()
     
-    # Calculate rebuffering time for each frame
-    rebuffering_times = []
-    frame_interval = 1.0 / Config.FRAME_FPS  # 0.5s for 2 FPS
+    # Calculate all rebuffering times using consolidated function
+    rebuffering_data = calculate_all_rebuffering_times(
+        generated_turns, frame_processing_times,
+        reading_speed=Config.USER_READING_SPEED_MAX,  # Use max reading speed (5 wps)
+        listening_speed=Config.USER_LISTENING_SPEED_MAX  # Use max listening speed (2.7 wps)
+    )
     
-    for frame_idx, processing_time in enumerate(frame_processing_times):
-        if frame_idx == 0:
-            # First frame: no rebuffering time
-            rebuffering_time = 0.0
-        else:
-            # Expected start time for this frame (0, 0.5, 1.0, 1.5, ...)
-            expected_start_time = frame_idx * frame_interval
-            
-            # Previous frame's actual finish time
-            previous_processing_time = frame_processing_times[frame_idx - 1]
-            previous_expected_start = (frame_idx - 1) * frame_interval
-            previous_finish_time = previous_expected_start + previous_processing_time
-            
-            # Calculate rebuffering time: max(0, previous_finish - expected_start)
-            rebuffering_time = max(0.0, previous_finish_time - expected_start_time)
-        
-        rebuffering_times.append(rebuffering_time)
+    # Extract rebuffering data
+    rebuffering_times = rebuffering_data['generation_rebuffering_times']
+    reading_rebuffering_times = rebuffering_data['reading_rebuffering_times']
+    listening_rebuffering_times = rebuffering_data['listening_rebuffering_times']
     
-    # Calculate total and average rebuffering time
-    total_rebuffering_time = sum(rebuffering_times)
-    average_rebuffering_time = total_rebuffering_time / len(rebuffering_times) if rebuffering_times else 0.0
+    total_rebuffering_time = rebuffering_data['total_generation_rebuffering']
+    average_rebuffering_time = rebuffering_data['average_generation_rebuffering']
+    
+    total_reading_rebuffering = rebuffering_data['total_reading_rebuffering']
+    average_reading_rebuffering = rebuffering_data['average_reading_rebuffering']
+    
+    total_listening_rebuffering = rebuffering_data['total_listening_rebuffering']
+    average_listening_rebuffering = rebuffering_data['average_listening_rebuffering']
     
     # Add rebuffering data to frame timing data
     for i, timing_data in enumerate(frame_timing_data):
         timing_data['rebuffering_time'] = rebuffering_times[i] if i < len(rebuffering_times) else 0.0
+        timing_data['reading_rebuffering_time'] = reading_rebuffering_times[i] if i < len(reading_rebuffering_times) else 0.0
+        timing_data['listening_rebuffering_time'] = listening_rebuffering_times[i] if i < len(listening_rebuffering_times) else 0.0
     
     # Calculate the correct total processing time
     total_frame_processing_time = sum(frame_processing_times)
@@ -1304,6 +1472,10 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
     print(f"   • Timing breakdown: Visual={visual_embedding_time/total_processing_time*100:.1f}%, Model={model_forward_time/total_processing_time*100:.1f}%, Generation={generation_time/total_processing_time*100:.1f}%")
     print(f"   • Total rebuffering time: {total_rebuffering_time:.3f}s")
     print(f"   • Average rebuffering time per frame: {average_rebuffering_time:.3f}s")
+    print(f"   • Total reading rebuffering time: {total_reading_rebuffering:.3f}s")
+    print(f"   • Average reading rebuffering time per frame: {average_reading_rebuffering:.3f}s")
+    print(f"   • Total listening rebuffering time: {total_listening_rebuffering:.3f}s")
+    print(f"   • Average listening rebuffering time per frame: {average_listening_rebuffering:.3f}s")
     print("-" * 60)
     
     # Calculate content-based metrics using model evaluation
@@ -1364,7 +1536,13 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
         'frame_timing_data': frame_timing_data,  # Add per-frame component timing data
         'rebuffering_times': rebuffering_times,  # Add rebuffering time data
         'total_rebuffering_time': total_rebuffering_time,  # Add total rebuffering time
-        'average_rebuffering_time': average_rebuffering_time  # Add average rebuffering time
+        'average_rebuffering_time': average_rebuffering_time,  # Add average rebuffering time
+        'reading_rebuffering_times': reading_rebuffering_times,  # Add reading rebuffering time data
+        'total_reading_rebuffering_time': total_reading_rebuffering,  # Add total reading rebuffering time
+        'average_reading_rebuffering_time': average_reading_rebuffering,  # Add average reading rebuffering time
+        'listening_rebuffering_times': listening_rebuffering_times,  # Add listening rebuffering time data
+        'total_listening_rebuffering_time': total_listening_rebuffering,  # Add total listening rebuffering time
+        'average_listening_rebuffering_time': average_listening_rebuffering  # Add average listening rebuffering time
     }
     
     # Create timeline with interleaved user prompts, ground truth, and generated responses
@@ -1618,6 +1796,12 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
             print(f"   • Average Fluency: {avg_fluency:.3f}")
             print(f"   • Average Responses: {avg_responses:.1f}")
             print(f"   • Average Rebuffering Time: {avg_rebuffering:.3f}s")
+            
+            # Add user rebuffering metrics to summary
+            avg_reading_rebuffering = sum(r.get('average_reading_rebuffering_time', 0.0) for r in results) / len(results)
+            avg_listening_rebuffering = sum(r.get('average_listening_rebuffering_time', 0.0) for r in results) / len(results)
+            print(f"   • Average Reading Rebuffering Time: {avg_reading_rebuffering:.3f}s")
+            print(f"   • Average Listening Rebuffering Time: {avg_listening_rebuffering:.3f}s")
         
         # Clean up memory between thresholds
         if i < len(thresholds) - 1:  # Don't clean up after the last threshold
@@ -1982,6 +2166,8 @@ def main():
     print(f"   • Default Num Videos: {Config.DEFAULT_NUM_VIDEOS}")
     print(f"   • Default Threshold Range: {Config.DEFAULT_THRESHOLD_RANGE}")
     print(f"   • Debug Thresholds: {Config.DEBUG_THRESHOLDS}")
+    print(f"   • User Reading Speed: {Config.USER_READING_SPEED_MIN}-{Config.USER_READING_SPEED_MAX} wps")
+    print(f"   • User Listening Speed: {Config.USER_LISTENING_SPEED_MIN}-{Config.USER_LISTENING_SPEED_MAX} wps")
     
     # Create filtered dataset with configurable data source
     data_source = getattr(args, 'data_source', 'narration')  # Default to narration
@@ -2171,7 +2357,11 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         'frame_score_stds': [],
         'frame_score_below_threshold_ratios': [],
         'rebuffering_means': [],
-        'rebuffering_stds': []
+        'rebuffering_stds': [],
+        'reading_rebuffering_means': [],
+        'reading_rebuffering_stds': [],
+        'listening_rebuffering_means': [],
+        'listening_rebuffering_stds': []
     }
     
     for threshold in thresholds:
@@ -2223,9 +2413,18 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         detailed_metrics['frame_score_below_threshold_ratios'].append(np.mean(below_threshold_ratios) if below_threshold_ratios else 0.0)
         detailed_metrics['rebuffering_means'].append(np.mean(rebuffering_times) if rebuffering_times else 0.0)
         detailed_metrics['rebuffering_stds'].append(np.std(rebuffering_times) if rebuffering_times else 0.0)
+        
+        # Collect user rebuffering metrics
+        reading_rebuffering_times = [r.get('average_reading_rebuffering_time', 0.0) for r in results]
+        listening_rebuffering_times = [r.get('average_listening_rebuffering_time', 0.0) for r in results]
+        
+        detailed_metrics['reading_rebuffering_means'].append(np.mean(reading_rebuffering_times) if reading_rebuffering_times else 0.0)
+        detailed_metrics['reading_rebuffering_stds'].append(np.std(reading_rebuffering_times) if reading_rebuffering_times else 0.0)
+        detailed_metrics['listening_rebuffering_means'].append(np.mean(listening_rebuffering_times) if listening_rebuffering_times else 0.0)
+        detailed_metrics['listening_rebuffering_stds'].append(np.std(listening_rebuffering_times) if listening_rebuffering_times else 0.0)
     
-    # Create comprehensive visualization with 2x3 grid (added rebuffering time analysis)
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    # Create comprehensive visualization with 2x4 grid (added user rebuffering analysis)
+    fig, axes = plt.subplots(2, 4, figsize=(24, 12))
     fig.suptitle(f'Unified Threshold Analysis - {data_source.upper()} Dataset', fontsize=18, fontweight='bold')
     
     # 1. Decomposed VLM PPL - One line per video
@@ -2451,6 +2650,90 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
     else:
         ax5.text(0.5, 0.5, 'No rebuffering data available', ha='center', va='center', transform=ax5.transAxes)
         ax5.set_title('Rebuffering Time vs Threshold (Per Video)')
+    
+    # 6. Reading Rebuffering Time vs Threshold (Per Video)
+    ax6 = axes[1, 2]
+    if detailed_metrics['reading_rebuffering_means']:
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        # Collect reading rebuffering data for each video across thresholds
+        video_reading_rebuffering = {}  # {video_idx: {threshold: avg_reading_rebuffering}}
+        
+        for threshold in thresholds:
+            if threshold in all_threshold_results:
+                results = all_threshold_results[threshold]
+                for j, result in enumerate(results):
+                    if j not in video_reading_rebuffering:
+                        video_reading_rebuffering[j] = {}
+                    
+                    # Get average reading rebuffering time for this video at this threshold
+                    if 'average_reading_rebuffering_time' in result:
+                        video_reading_rebuffering[j][threshold] = result['average_reading_rebuffering_time']
+        
+        # Plot each video's reading rebuffering trajectory
+        for j, video_data in video_reading_rebuffering.items():
+            if len(video_data) > 1:  # Only plot if we have data for multiple thresholds
+                video_thresholds = sorted(video_data.keys())
+                video_reading_rebuffering_list = [video_data[t] for t in video_thresholds]
+                color = colors[j % len(colors)]
+                ax6.plot(video_thresholds, video_reading_rebuffering_list, 'o-', color=color, linewidth=2, markersize=4, 
+                        label=f'Video {j+1}', alpha=0.8)
+        
+        # Add average reading rebuffering time line with error bars
+        ax6.errorbar(thresholds, detailed_metrics['reading_rebuffering_means'], yerr=detailed_metrics['reading_rebuffering_stds'], 
+                    fmt='s-', color='black', linewidth=3, markersize=8, capsize=5, 
+                    label='Average Reading Rebuffering ± Std', alpha=0.9)
+        
+        ax6.set_xlabel('Streaming Threshold')
+        ax6.set_ylabel('Reading Rebuffering Time (seconds)')
+        ax6.set_title('Reading Rebuffering Time vs Threshold (Per Video)')
+        ax6.grid(True, alpha=0.3)
+        ax6.legend(fontsize=9)
+    else:
+        ax6.text(0.5, 0.5, 'No reading rebuffering data available', ha='center', va='center', transform=ax6.transAxes)
+        ax6.set_title('Reading Rebuffering Time vs Threshold (Per Video)')
+    
+    # 7. Listening Rebuffering Time vs Threshold (Per Video)
+    ax7 = axes[1, 3]
+    if detailed_metrics['listening_rebuffering_means']:
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        # Collect listening rebuffering data for each video across thresholds
+        video_listening_rebuffering = {}  # {video_idx: {threshold: avg_listening_rebuffering}}
+        
+        for threshold in thresholds:
+            if threshold in all_threshold_results:
+                results = all_threshold_results[threshold]
+                for j, result in enumerate(results):
+                    if j not in video_listening_rebuffering:
+                        video_listening_rebuffering[j] = {}
+                    
+                    # Get average listening rebuffering time for this video at this threshold
+                    if 'average_listening_rebuffering_time' in result:
+                        video_listening_rebuffering[j][threshold] = result['average_listening_rebuffering_time']
+        
+        # Plot each video's listening rebuffering trajectory
+        for j, video_data in video_listening_rebuffering.items():
+            if len(video_data) > 1:  # Only plot if we have data for multiple thresholds
+                video_thresholds = sorted(video_data.keys())
+                video_listening_rebuffering_list = [video_data[t] for t in video_thresholds]
+                color = colors[j % len(colors)]
+                ax7.plot(video_thresholds, video_listening_rebuffering_list, 'o-', color=color, linewidth=2, markersize=4, 
+                        label=f'Video {j+1}', alpha=0.8)
+        
+        # Add average listening rebuffering time line with error bars
+        ax7.errorbar(thresholds, detailed_metrics['listening_rebuffering_means'], yerr=detailed_metrics['listening_rebuffering_stds'], 
+                    fmt='s-', color='black', linewidth=3, markersize=8, capsize=5, 
+                    label='Average Listening Rebuffering ± Std', alpha=0.9)
+        
+        ax7.set_xlabel('Streaming Threshold')
+        ax7.set_ylabel('Listening Rebuffering Time (seconds)')
+        ax7.set_title('Listening Rebuffering Time vs Threshold (Per Video)')
+        ax7.grid(True, alpha=0.3)
+        ax7.legend(fontsize=9)
+    else:
+        ax7.text(0.5, 0.5, 'No listening rebuffering data available', ha='center', va='center', transform=ax7.transAxes)
+        ax7.set_title('Listening Rebuffering Time vs Threshold (Per Video)')
     
     plt.tight_layout()
     
