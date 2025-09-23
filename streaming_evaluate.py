@@ -61,7 +61,7 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 50            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 5000            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
@@ -449,6 +449,40 @@ def calculate_kv_cache_memory_mb(past_key_values):
 
     return total_bytes / (1024**2)
 
+
+def _move_cache_to_device(obj, device):
+    """Recursively move cache containers to a target device."""
+    if obj is None:
+        return None
+    if torch.is_tensor(obj):
+        return obj.to(device, non_blocking=True)
+    if isinstance(obj, list):
+        return [_move_cache_to_device(item, device) for item in obj]
+    if isinstance(obj, tuple):
+        return tuple(_move_cache_to_device(list(obj), device))
+    if isinstance(obj, dict):
+        return {key: _move_cache_to_device(value, device) for key, value in obj.items()}
+    return obj
+
+
+
+def move_kv_cache_to_device(past_key_values, device):
+    """Return KV cache moved to the target device while preserving structure."""
+    if past_key_values is None:
+        return None
+    target_device = torch.device(device) if not isinstance(device, torch.device) else device
+    return _move_cache_to_device(past_key_values, target_device)
+
+
+
+def canonical_device(device):
+    """Normalize device inputs to torch.device."""
+    if isinstance(device, torch.device):
+        return device
+    return torch.device(device)
+
+
+
 def calculate_max_frames_for_memory():
     """Calculate maximum frames that can be processed based on available GPU memory"""
     memory_info = get_gpu_memory_info()
@@ -643,7 +677,7 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
 
     num_conversations = max(1, len(all_memory_data))
     figure_height = Config.PLOT_FIGSIZE_SMALL[1] * max(1, num_conversations)
-    fig, axes = plt.subplots(num_conversations, 3, figsize=(Config.PLOT_FIGSIZE_LARGE[0], figure_height))
+    fig, axes = plt.subplots(num_conversations, 5, figsize=(Config.PLOT_FIGSIZE_LARGE[0] + 4, figure_height))
     fig.suptitle('GPU Memory Usage Analysis - CPU-First Conversation Processing', fontsize=16, fontweight='bold')
 
     # Normalise axes shape for single conversation runs
@@ -653,11 +687,13 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
     component_colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
 
     for row_idx, (conversation_key, data) in enumerate(all_memory_data.items() or {"conversation": {}}.items()):
-        ax_breakdown, ax_efficiency, ax_allocator = axes[row_idx]
+        ax_breakdown, ax_kv_cache, ax_kv_transfer, ax_efficiency, ax_allocator = axes[row_idx]
 
         frames = data.get('frames', [])
         if not frames:
             ax_breakdown.text(0.5, 0.5, 'No memory data collected', ha='center', va='center', transform=ax_breakdown.transAxes)
+            ax_kv_cache.axis('off')
+            ax_kv_transfer.axis('off')
             ax_efficiency.axis('off')
             ax_allocator.axis('off')
             continue
@@ -675,6 +711,8 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
 
         if min_length == 0:
             ax_breakdown.text(0.5, 0.5, 'Incomplete memory data', ha='center', va='center', transform=ax_breakdown.transAxes)
+            ax_kv_cache.axis('off')
+            ax_kv_transfer.axis('off')
             ax_efficiency.axis('off')
             ax_allocator.axis('off')
             continue
@@ -705,14 +743,70 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
         ax_breakdown.grid(True, alpha=0.3)
         ax_breakdown.legend(fontsize=8, loc='upper left')
 
-        # 2. Memory efficiency per frame
+        # 2. KV cache trajectory with dedicated view
+        ax_kv_cache.plot(frames, kv_cache_memory, color='#ff7f0e', linewidth=2.0)
+        ax_kv_cache.fill_between(frames, kv_cache_memory, alpha=0.2, color='#ffbb78')
+        ax_kv_cache.set_title('KV Cache Footprint', fontsize=10)
+        ax_kv_cache.set_xlabel('Frame Number')
+        ax_kv_cache.set_ylabel('Memory (MB)')
+        ax_kv_cache.grid(True, alpha=0.3)
+        if kv_cache_memory.size > 0:
+            ax_kv_cache.text(
+                0.98,
+                0.02,
+                f'Max: {np.max(kv_cache_memory):.0f}MB\nEnd: {kv_cache_memory[-1]:.0f}MB',
+                transform=ax_kv_cache.transAxes,
+                ha='right',
+                va='bottom',
+                fontsize=8,
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.6),
+            )
+
+        # 3. KV cache size vs transfer timings
+        transfer_sizes = data.get('kv_transfer_size', [])
+        transfer_offload = data.get('kv_offload_time', [])
+        transfer_reload = data.get('kv_reload_time', [])
+        transfer_length = min(len(transfer_sizes), len(transfer_offload), len(transfer_reload))
+        if transfer_length:
+            sizes = np.array(transfer_sizes[:transfer_length])
+            offload_ms = np.array(transfer_offload[:transfer_length]) * 1000.0
+            reload_ms = np.array(transfer_reload[:transfer_length]) * 1000.0
+
+            ax_kv_transfer.scatter(sizes, offload_ms, color='#1f77b4', alpha=0.7, s=20, label='Offload → CPU')
+            ax_kv_transfer.scatter(sizes, reload_ms, color='#2ca02c', alpha=0.7, marker='x', s=28, label='Reload → GPU')
+
+            ax_kv_transfer.set_title('KV Cache Transfer Timing', fontsize=10)
+            ax_kv_transfer.set_xlabel('KV Cache Size (MB)')
+            ax_kv_transfer.set_ylabel('Transfer Time (ms)')
+            ax_kv_transfer.grid(True, alpha=0.3)
+            ax_kv_transfer.legend(fontsize=8, loc='upper left')
+
+            avg_offload = offload_ms.mean()
+            avg_reload = reload_ms.mean()
+            ax_kv_transfer.text(
+                0.98,
+                0.02,
+                f'Avg Offload: {avg_offload:.1f}ms\nAvg Reload: {avg_reload:.1f}ms',
+                transform=ax_kv_transfer.transAxes,
+                ha='right',
+                va='bottom',
+                fontsize=8,
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.6),
+            )
+        else:
+            ax_kv_transfer.text(0.5, 0.5, 'No KV transfer data', ha='center', va='center', transform=ax_kv_transfer.transAxes)
+            ax_kv_transfer.set_xlabel('KV Cache Size (MB)')
+            ax_kv_transfer.set_ylabel('Transfer Time (ms)')
+            ax_kv_transfer.grid(True, alpha=0.3)
+
+        # 4. Memory efficiency per frame
         ax_efficiency.plot(frames, memory_per_frame, color='#9467bd', linewidth=2, marker='^', markersize=3)
         ax_efficiency.set_title('Memory Efficiency (Lower is Better)', fontsize=10)
         ax_efficiency.set_xlabel('Frame Number')
         ax_efficiency.set_ylabel('Δ Memory / Frame (MB)')
         ax_efficiency.grid(True, alpha=0.3)
 
-        # 3. Allocator view (PyTorch vs nvidia-smi)
+        # 5. Allocator view (PyTorch vs nvidia-smi)
         ax_allocator.plot(frames, torch_allocated, color='#17becf', linewidth=2, label='torch.cuda.memory_allocated')
         ax_allocator.plot(frames, torch_reserved, color='#bcbd22', linewidth=2, linestyle='--', label='torch.cuda.memory_reserved')
         ax_allocator.plot(frames, totals, color='black', linewidth=1.5, linestyle=':', label='nvidia-smi Total')
@@ -732,6 +826,7 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
     plt.show()
 
     return output_path
+
 
 def create_frame_score_analysis(all_frame_scores_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create frame score analysis visualization showing scores, threshold, and response triggers"""
@@ -1474,6 +1569,9 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
         'other_memory': [],
         'torch_allocated': [],
         'torch_reserved': [],
+        'kv_transfer_size': [],
+        'kv_offload_time': [],
+        'kv_reload_time': [],
     }
     
     # Collect frame score data for visualization
@@ -1527,6 +1625,13 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
             # Get detailed timing data
             timing_data = liveinfer.get_timing_data()
             
+            kv_cache_mb = timing_data.get('kv_cache_mb', 0.0)
+            kv_offload_time = timing_data.get('kv_offload_time', 0.0)
+            kv_reload_time = timing_data.get('kv_reload_time', 0.0)
+            memory_data['kv_transfer_size'].append(kv_cache_mb)
+            memory_data['kv_offload_time'].append(kv_offload_time)
+            memory_data['kv_reload_time'].append(kv_reload_time)
+
             # Extract detailed metrics (like benchmark.py)
             visual_embedding_time = timing_data.get('visual_embedding_time', 0.0)
             streaming_time = timing_data.get('streaming_time', 0.0)  # This is model forward time
@@ -1954,6 +2059,7 @@ class SimpleLiveInfer:
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
+        self.device_obj = canonical_device(device)
         
         # visual
         self.hidden_size = model.config.hidden_size
@@ -2005,6 +2111,9 @@ class SimpleLiveInfer:
         self.frame_embeds_queue = collections.deque()
         self.last_ids = torch.tensor([[]], device=self.device, dtype=torch.long)
         self.past_key_values = None
+        
+        # Reset tracking buffers
+        self.kv_transfer_metrics = []
         
         # Reset frame score tracking
         self.frame_scores = []
@@ -2207,8 +2316,33 @@ class SimpleLiveInfer:
         # Store timing data
         self.timing_data['streaming_time'] = streaming_time      # Visual tokens → Logits
         self.timing_data['generation_time'] = generation_time    # Logits → Text (when occurs)
+
+        # Measure KV cache transfer overhead (GPU ⇄ CPU)
+        kv_cache_mb = calculate_kv_cache_memory_mb(self.past_key_values)
+        offload_time = 0.0
+        reload_time = 0.0
+        if kv_cache_mb > 0 and torch.cuda.is_available() and self.device_obj.type == 'cuda':
+            cpu_device = torch.device('cpu')
+            transfer_start = time.time()
+            self.past_key_values = move_kv_cache_to_device(self.past_key_values, cpu_device)
+            offload_time = time.time() - transfer_start
+
+            reload_start = time.time()
+            self.past_key_values = move_kv_cache_to_device(self.past_key_values, self.device_obj)
+            reload_time = time.time() - reload_start
+
+        transfer_record = {
+            'kv_cache_mb': kv_cache_mb,
+            'offload_time': offload_time,
+            'reload_time': reload_time,
+        }
+        self.kv_transfer_metrics.append(transfer_record)
+
+        self.timing_data['kv_cache_mb'] = kv_cache_mb
+        self.timing_data['kv_offload_time'] = offload_time
+        self.timing_data['kv_reload_time'] = reload_time
         self.timing_data['total_call_time'] = time.time() - start_time
-        
+
         return query, response
     
     def get_timing_data(self):
@@ -2224,6 +2358,17 @@ class SimpleLiveInfer:
             'response_triggers': self.response_triggers.copy(),
             'response_times': self.response_times.copy()
         }
+
+
+    def get_kv_transfer_metrics(self):
+        """Return recorded KV cache transfer metrics."""
+        return [metric.copy() for metric in self.kv_transfer_metrics]
+
+    def get_last_kv_transfer_metric(self):
+        """Return the last KV transfer measurement, if available."""
+        if not self.kv_transfer_metrics:
+            return None
+        return self.kv_transfer_metrics[-1].copy()
 
 
 def main():
