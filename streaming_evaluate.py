@@ -2214,7 +2214,14 @@ class SimpleLiveInfer:
         print(f"Total tokens in past_key_values: {context_info['total_tokens']}")
         
         inputs_embeds = self.model.get_input_embeddings()(self.last_ids)
-        output_ids, self.past_key_values = fast_greedy_generate(model=self.model, inputs_embeds=inputs_embeds, past_key_values=self.past_key_values, eos_token_id=self.eos_token_id, inplace_output_ids=self.inplace_output_ids)
+        output_ids, self.past_key_values, _, _ = fast_greedy_generate(
+            model=self.model,
+            inputs_embeds=inputs_embeds,
+            past_key_values=self.past_key_values,
+            eos_token_id=self.eos_token_id,
+            inplace_output_ids=self.inplace_output_ids,
+            max_new_tokens=None,
+        )
         self.last_ids = output_ids[:, -1:]
         
         generation_time = time.time() - generation_start
