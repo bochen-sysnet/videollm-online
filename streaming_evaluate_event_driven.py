@@ -62,13 +62,13 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 5000            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 10            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 2               # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 3               # Default number of videos for evaluation
     DEFAULT_THRESHOLD_RANGE = (0.5, 0.99) # Default threshold range for sweep
     DEFAULT_NUM_THRESHOLDS = 2           # Default number of thresholds for sweep
     DEBUG_THRESHOLDS = [0.8, 0.9]         # Coarse-grained thresholds
@@ -681,6 +681,7 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
 
     conversation_ids = [segment['conversation_id'] for segment in processor_segments]
     unique_conversations = list(dict.fromkeys(conversation_ids))
+    conversation_levels = {cid: idx for idx, cid in enumerate(unique_conversations)}
 
     summary_lookup = {}
     if conversation_summaries:
@@ -722,7 +723,6 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
         }
 
     sorted_segments = sorted(processor_segments, key=lambda segment: (segment['start'], segment['end']))
-    pending_response = {cid: None for cid in unique_conversations}
 
     for segment in sorted_segments:
         cid = segment['conversation_id']
@@ -731,29 +731,25 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
             continue
 
         duration = max(0.0, segment['end'] - segment['start'])
-        if segment.get('type') == 'frame':
-            if data['frame_events']:
-                frame_event = data['frame_events'].popleft()
-                relative_time = max(0.0, frame_event.get('time', data['original_start']) - data['original_start'])
-                frame_idx = frame_event.get('detail', {}).get('frame_idx', len(data['frames']))
-            else:
-                frame_event = None
-                frame_idx = len(data['frames'])
-                relative_time = len(data['frames']) / max(Config.FRAME_FPS, 1.0)
+        if segment.get('type') != 'frame' or duration <= 0.0:
+            continue
 
-            frame_info = {
-                'frame_idx': frame_idx,
-                'relative_time': relative_time,
-                'frame_duration': duration,
-                'generation_duration': 0.0,
-            }
-            data['frames'].append(frame_info)
-            pending_response[cid] = frame_info
-        elif segment.get('type') == 'response':
-            frame_info = pending_response.get(cid)
-            if frame_info:
-                frame_info['generation_duration'] += duration
-                pending_response[cid] = None
+        if data['frame_events']:
+            frame_event = data['frame_events'].popleft()
+            relative_time = max(0.0, frame_event.get('time', data['original_start']) - data['original_start'])
+            frame_idx = frame_event.get('detail', {}).get('frame_idx', segment.get('frame_idx', len(data['frames'])))
+        else:
+            frame_event = None
+            frame_idx = segment.get('frame_idx', len(data['frames']))
+            relative_time = frame_idx / max(Config.FRAME_FPS, 1.0)
+
+        frame_info = {
+            'frame_idx': frame_idx,
+            'relative_time': relative_time,
+            'frame_duration': segment.get('frame_duration', duration),
+            'generation_duration': segment.get('generation_duration', 0.0),
+        }
+        data['frames'].append(frame_info)
 
     for data in conversation_data.values():
         data.pop('frame_events', None)
@@ -784,12 +780,16 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
     actual_starts = []
     actual_ends = []
     actual_prompts = []
+    actual_last_arrivals = []
     for cid in unique_conversations:
         data = conversation_data.get(cid)
         if not data:
             continue
         actual_starts.append({'time': data['original_start'], 'conversation_id': cid})
-        actual_ends.append({'time': data['original_start'] + data['duration'], 'conversation_id': cid})
+        actual_ends.append({'time': data['original_start'] + data['completion_time'], 'conversation_id': cid})
+        if data['frames']:
+            last_rel_time = max(frame.get('relative_time', 0.0) for frame in data['frames'])
+            actual_last_arrivals.append({'time': data['original_start'] + last_rel_time, 'conversation_id': cid})
         for rel in data['prompts_relative']:
             actual_prompts.append({'time': data['original_start'] + rel, 'conversation_id': cid})
 
@@ -803,6 +803,17 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
             if end_time > last_by_conversation.get(cid, 0.0):
                 last_by_conversation[cid] = end_time
         return [{'conversation_id': cid, 'time': end_time} for cid, end_time in last_by_conversation.items()]
+
+    def extract_call_segments(segments):
+        calls = []
+        for segment in segments or []:
+            calls.append({
+                'conversation_id': segment.get('conversation_id'),
+                'start': segment.get('start', 0.0),
+                'end': segment.get('end', 0.0),
+                'type': segment.get('type', 'frame')
+            })
+        return calls
 
     def build_offsets(base_offsets):
         offsets = {}
@@ -845,7 +856,7 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
                 continue
             start_time = offsets.get(cid, data['original_start'])
             starts.append({'time': start_time, 'conversation_id': cid})
-            ends.append({'time': start_time + data['duration'], 'conversation_id': cid})
+            ends.append({'time': start_time + data['completion_time'], 'conversation_id': cid})
             for rel in data['prompts_relative']:
                 prompts.append({'time': start_time + rel, 'conversation_id': cid})
             for frame in data['frames']:
@@ -863,95 +874,40 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
                 clock = event_time
 
             frame_duration = max(0.0, frame.get('frame_duration', 0.0))
-            if frame_duration > 0.0:
-                segments.append({
-                    'conversation_id': cid,
-                    'start': clock,
-                    'end': clock + frame_duration,
-                    'type': 'frame'
-                })
-                clock += frame_duration
-
             generation_duration = max(0.0, frame.get('generation_duration', 0.0))
-            if generation_duration > 0.0:
+            total_duration = frame_duration + generation_duration
+            if total_duration > 0.0:
                 segments.append({
                     'conversation_id': cid,
                     'start': clock,
-                    'end': clock + generation_duration,
-                    'type': 'response'
+                    'end': clock + total_duration,
+                    'type': 'frame',
+                    'frame_duration': frame_duration,
+                    'generation_duration': generation_duration
                 })
-                clock += generation_duration
+                clock += total_duration
 
         return segments, idle, prompts, starts, ends
 
-    scenario_results = []
-    scenario_results.append({
-        'title': 'Scenario 1: Actual Event-Driven Processing',
+    scenario_results = [{
+        'title': 'Processor Utilization: Concurrent Conversations',
         'ylabel': 'Actual',
         'segments': sorted_segments,
-        'idle': idle_segments,
         'prompts': actual_prompts,
         'starts': actual_starts,
         'ends': actual_ends,
         'completion': compute_completion_markers(sorted_segments),
-    })
+        'last_arrivals': actual_last_arrivals,
+    }]
 
-    available_conversations = [cid for cid in unique_conversations if cid in conversation_data]
-    if len(available_conversations) >= 2:
-        primary = available_conversations[0]
-        secondary = available_conversations[1]
-        completion_primary = conversation_data[primary]['completion_time']
-        completion_secondary = conversation_data[secondary]['completion_time']
-
-        scenario_definitions = [
-            (
-                'Scenario 2: Conv2 Starts Mid Conv1',
-                'Scenario 2',
-                {primary: 0.0, secondary: max(0.0, completion_primary / 2.0)}
-            ),
-            (
-                'Scenario 3: Conv2 Finishes Before Conv1 Begins',
-                'Scenario 3',
-                {secondary: 0.0, primary: max(0.0, completion_secondary)}
-            ),
-            (
-                'Scenario 4: Conv1 & Conv2 Start Together',
-                'Scenario 4',
-                {primary: 0.0, secondary: 0.0}
-            ),
-        ]
-
-        for title, ylabel, base_offsets in scenario_definitions:
-            offsets = build_offsets(base_offsets)
-            segments, idle_alt, prompts_alt, starts_alt, ends_alt = simulate_scenario(offsets)
-            scenario_results.append({
-                'title': title,
-                'ylabel': ylabel,
-                'segments': segments,
-                'idle': idle_alt,
-                'prompts': prompts_alt,
-                'starts': starts_alt,
-                'ends': ends_alt,
-                'completion': compute_completion_markers(segments),
-            })
-
-    fig, axes = plt.subplots(len(scenario_results), 1, figsize=(Config.PLOT_FIGSIZE_LARGE[0], 9.0), sharex=True)
-    if len(scenario_results) == 1:
-        axes = [axes]
-
-    # idle_style = dict(facecolors='#ffffff', edgecolors='#d0d0d0', linewidth=0.9, zorder=1)
-    idle_style = dict(facecolors='none', edgecolors='none', linewidth=0, zorder=1)
+    fig, ax = plt.subplots(1, 1, figsize=(Config.PLOT_FIGSIZE_LARGE[0], 4.5), sharex=True)
+    axes = [ax]
 
     def draw_timeline(ax, timeline_data):
         prompt_flag = False
         start_flag = False
         completion_flag = False
-
-        for idle in timeline_data['idle'] or []:
-            start = idle.get('start', 0.0)
-            end = idle.get('end', start)
-            if end > start:
-                ax.broken_barh([(start, end - start)], (0.2, 0.6), **idle_style)
+        last_arrival_flag = False
 
         for segment in timeline_data['segments'] or []:
             start = segment['start']
@@ -966,7 +922,6 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
                 edgecolors='none',
                 zorder=2
             )
-
         for marker in timeline_data['starts'] or []:
             cid = marker['conversation_id']
             start_time = marker['time']
@@ -981,9 +936,11 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
         for prompt in timeline_data['prompts'] or []:
             cid = prompt['conversation_id']
             prompt_time = prompt['time']
+            level = conversation_levels.get(cid, 0)
+            prompt_y = max(0.05, 0.1 + level * 0.08)
             ax.scatter(
                 prompt_time,
-                0.1,
+                prompt_y,
                 marker='v',
                 s=70,
                 color=colors.get(cid, '#444444'),
@@ -997,9 +954,11 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
             cid = marker['conversation_id']
             completion_time = marker['time']
             color = colors.get(cid, '#444444')
+            level = conversation_levels.get(cid, 0)
+            completion_y = min(1.1, 1.02 - level * 0.08)
             ax.scatter(
                 completion_time,
-                0.95,
+                completion_y,
                 marker='o',
                 s=65,
                 facecolors='none',
@@ -1009,29 +968,48 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
             )
             completion_flag = True
 
+        for marker in timeline_data.get('last_arrivals', []) or []:
+            cid = marker['conversation_id']
+            arrival_time = marker['time']
+            color = colors.get(cid, '#333333')
+            level = conversation_levels.get(cid, 0)
+            arrival_y = max(0.4, 0.75 - level * 0.08)
+            ax.scatter(
+                arrival_time,
+                arrival_y,
+                marker='*',
+                s=80,
+                color=color,
+                edgecolors='k',
+                linewidths=0.5,
+                zorder=5
+            )
+            last_arrival_flag = True
+
         ax.set_title(timeline_data['title'], fontsize=12)
         ax.set_ylabel(timeline_data['ylabel'])
         ax.set_yticks([])
         ax.set_ylim(0.0, 1.18)
         ax.grid(True, axis='x', alpha=0.25)
-        return prompt_flag, start_flag, completion_flag
+        return prompt_flag, start_flag, completion_flag, last_arrival_flag
 
     overall_max = 0.0
     prompt_present = False
     start_present = False
     completion_present = False
+    arrival_present = False
 
     for ax, timeline in zip(axes, scenario_results):
-        prompt_flag, start_flag, completion_flag = draw_timeline(ax, timeline)
+        prompt_flag, start_flag, completion_flag, arrival_flag = draw_timeline(ax, timeline)
         prompt_present |= prompt_flag
         start_present |= start_flag
         completion_present |= completion_flag
+        arrival_present |= arrival_flag
 
         segment_max = max((segment['end'] for segment in timeline['segments'] or []), default=0.0)
-        idle_max = max((idle['end'] for idle in timeline['idle'] or []), default=0.0)
         end_markers_max = max((marker['time'] for marker in timeline['ends'] or []), default=0.0)
         prompt_max = max((marker['time'] for marker in timeline['prompts'] or []), default=0.0)
-        overall_max = max(overall_max, segment_max, idle_max, end_markers_max, prompt_max)
+        overall_max = max(overall_max, segment_max, end_markers_max, prompt_max)
 
     axes[-1].set_xlabel('Processor Time (s)')
     if overall_max <= 0.0:
@@ -1040,9 +1018,6 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
 
     legend_handles = []
     legend_labels = []
-    if any(timeline['idle'] for timeline in scenario_results):
-        legend_handles.append(plt.Line2D([], [], color='#ffffff', linewidth=6, marker='_', markeredgecolor='#d0d0d0'))
-        legend_labels.append('Idle')
     for cid in unique_conversations:
         legend_handles.append(plt.Line2D([], [], color=colors.get(cid, '#333333'), linewidth=6))
         legend_labels.append(cid)
@@ -1055,17 +1030,11 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
     if completion_present:
         legend_handles.append(plt.Line2D([], [], color='#444444', marker='o', linestyle='None', markersize=7, markerfacecolor='none', markeredgewidth=1.1))
         legend_labels.append('Last Frame Done')
+    if arrival_present:
+        legend_handles.append(plt.Line2D([], [], color='#444444', marker='*', linestyle='None', markersize=8, markeredgecolor='k'))
+        legend_labels.append('Last Frame Arrived')
     if legend_handles:
         axes[0].legend(legend_handles, legend_labels, loc='upper right', fontsize=8, title='Legend')
-
-    idle_total = sum(max(0.0, idle.get('end', 0.0) - idle.get('start', 0.0)) for idle in idle_segments)
-    if idle_total > 0:
-        longest_idle = max(idle_segments, key=lambda idle: max(0.0, idle.get('end', 0.0) - idle.get('start', 0.0)))
-        longest_duration = max(0.0, longest_idle.get('end', 0.0) - longest_idle.get('start', 0.0))
-        print(
-            f"ℹ️ Processor idle for {idle_total:.2f}s total. Longest gap {longest_duration:.2f}s "
-            f"from {longest_idle.get('start', 0.0):.2f}s to {longest_idle.get('end', 0.0):.2f}s."
-        )
 
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     output_path = os.path.join(output_dir, f'processor_timeline_{data_source}.png')
@@ -1884,6 +1853,8 @@ class EventDrivenConversationContext:
         self.original_conversation = conversation_data['original_conversation']
         self.timestamp_offset = conversation_data.get('timestamp_offset', 0.0)
         self.duration = conversation_data['duration']
+        self.actual_end_time = self.conversation_start_time + self.duration
+        self.processing_span = 0.0
 
         self.event_log = [{'time': self.conversation_start_time, 'type': 'conversation_start', 'conversation_id': self.conversation_id}]
 
@@ -2012,6 +1983,7 @@ class EventDrivenConversationContext:
         frame_start_time = time.time()
         frame_processing_time = 0.0
         generation_time = 0.0
+        frame_compute_time = 0.0
         global_time = self.conversation_start_time + relative_time
         try:
             liveinfer.input_video_stream(relative_time)
@@ -2036,6 +2008,17 @@ class EventDrivenConversationContext:
             visual_embedding_time = timing_data.get('visual_embedding_time', 0.0)
             streaming_time = timing_data.get('streaming_time', 0.0)
             generation_time = timing_data.get('generation_time', 0.0)
+            kv_reload_time = timing_data.get('kv_reload_time', 0.0)
+            kv_offload_time = timing_data.get('kv_offload_time', 0.0)
+            frame_compute_time = max(
+                0.0,
+                (visual_embedding_time or 0.0)
+                + (streaming_time or 0.0)
+                + (kv_reload_time or 0.0)
+                + (kv_offload_time or 0.0)
+            )
+            if frame_compute_time <= 0.0 and frame_processing_time > 0.0:
+                frame_compute_time = max(0.0, frame_processing_time - generation_time)
 
             self.total_visual_embedding_time += visual_embedding_time
             self.total_model_forward_time += streaming_time
@@ -2048,6 +2031,7 @@ class EventDrivenConversationContext:
                 'video_time': relative_time,
                 'visual_embedding_time': visual_embedding_time,
                 'model_forward_time': streaming_time,
+                'compute_time': frame_compute_time,
                 'generation_time': generation_time,
                 'total_processing_time': frame_processing_time
             })
@@ -2080,6 +2064,7 @@ class EventDrivenConversationContext:
 
         self.frames_processed += 1
         return {
+            'frame_compute_time': frame_compute_time,
             'frame_processing_time': frame_processing_time,
             'generation_time': generation_time
         }
@@ -2167,8 +2152,19 @@ class EventDrivenConversationContext:
                 first_user_time = turn['time']
                 break
 
+        if self.frame_timing_data:
+            last_frame = self.frame_timing_data[-1]
+            last_frame_time = last_frame.get('video_time', 0.0)
+            last_compute = last_frame.get('compute_time', last_frame.get('total_processing_time', 0.0))
+            last_generation = last_frame.get('generation_time', 0.0)
+            self.actual_end_time = self.conversation_start_time + last_frame_time + max(0.0, last_compute + last_generation)
+        else:
+            self.actual_end_time = self.conversation_start_time + self.duration
+
+        self.processing_span = max(0.0, self.actual_end_time - self.conversation_start_time)
+
         self.event_log.append({
-            'time': self.conversation_start_time + self.duration,
+            'time': self.actual_end_time,
             'type': 'conversation_end',
             'conversation_id': self.conversation_id
         })
@@ -2191,6 +2187,7 @@ class EventDrivenConversationContext:
             'model_forward_time': model_forward_time,
             'generation_time': generation_time,
             'total_processing_time': total_processing_time,
+            'processing_span': self.processing_span,
             'frame_processing_times': self.frame_processing_times,
             'eos_timing': {'eos_detection_time': 0.0, 'with_eos': 0.0, 'without_eos': 0.0},
             'conversation_turns': len(self.generated_turns),
@@ -2359,38 +2356,34 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
 
         if event_type == 'frame':
             segment_info = context.handle_frame(shared_liveinfer, relative_time, payload_data)
-            frame_duration = segment_info.get('frame_processing_time', 0.0)
+            frame_duration = segment_info.get('frame_compute_time', segment_info.get('frame_processing_time', 0.0))
             generation_duration = segment_info.get('generation_time', 0.0)
             segment_label = context.conversation_id[:12]
+            frame_idx = payload_data
 
             start_time = max(processor_clock, event_time)
             if start_time > processor_clock:
                 idle_segments.append({'start': processor_clock, 'end': start_time})
-            if frame_duration > 0.0:
+            total_duration = max(0.0, frame_duration) + max(0.0, generation_duration)
+            if total_duration > 0.0:
                 processor_segments.append({
                     'conversation_id': segment_label,
                     'start': start_time,
-                    'end': start_time + frame_duration,
-                    'type': 'frame'
+                    'end': start_time + total_duration,
+                    'type': 'frame',
+                    'frame_idx': frame_idx,
+                    'frame_duration': max(0.0, frame_duration),
+                    'generation_duration': max(0.0, generation_duration)
                 })
-            processor_clock = start_time + frame_duration
-
-            if generation_duration > 0.0:
-                processor_segments.append({
-                    'conversation_id': segment_label,
-                    'start': processor_clock,
-                    'end': processor_clock + generation_duration,
-                    'type': 'response'
-                })
-                processor_clock += generation_duration
+            processor_clock = start_time + total_duration
 
             context.save_liveinfer_state(shared_liveinfer)
             continue
 
         if event_type == 'finalize':
             if event_time > processor_clock:
-                idle_segments.append({'start': processor_clock, 'end': event_time})
-                processor_clock = event_time
+                # Finalize events are scheduled at nominal completion times; avoid inserting artificial idle gaps
+                event_time = processor_clock
 
             context.finalize(shared_liveinfer)
             context.liveinfer_state = None
@@ -2406,7 +2399,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 'conversation_id': context.conversation_id,
                 'label': context.conversation_id[:12],
                 'start': context.conversation_start_time,
-                'end': context.conversation_start_time + context.duration,
+                'end': context.actual_end_time,
                 'events': context.event_log
             })
 
@@ -3045,6 +3038,10 @@ def main():
             return
         
         # Regular single-threshold evaluation
+        default_start_times = custom_start_times
+        if default_start_times is None:
+            default_start_times = [0.0] * num_videos
+
         results = streaming_evaluate_conversations(
             model,
             tokenizer,
@@ -3053,7 +3050,7 @@ def main():
             num_conversations=num_videos,
             random_selection=True,
             data_source=data_source,
-            conversation_start_times=custom_start_times
+            conversation_start_times=default_start_times
         )
         print("\n" + "=" * 60)
         print("📊 EVALUATION RESULTS")
