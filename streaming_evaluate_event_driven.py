@@ -62,7 +62,7 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 10            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 50            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
@@ -95,7 +95,7 @@ class Config:
     EXPECTED_RESPONSE_LENGTH = 20.0
     LENGTH_FACTOR_MIN = 0.5
     LENGTH_FACTOR_MAX = 2.0
-    GENERATION_CHUNK_SIZE = 32
+    GENERATION_CHUNK_SIZE = 16
 
 class FilteredEgo4DRefinedNarrationStream:
     """Ego4D Refined Narration Stream that only includes videos with features - now processes per-conversation"""
@@ -672,6 +672,241 @@ def calculate_all_rebuffering_times(responses, frame_processing_times, reading_s
     }
 
 
+def simulate_text_buffer_trajectories(processor_segments, conversation_summaries, reading_speed, listening_speed):
+    """Simulate text buffers plus cumulative TTFT and rebuffer metrics per conversation."""
+
+    if not processor_segments or not conversation_summaries:
+        return {}
+
+    def _extract_response_events(events, fallback_time):
+        extracted = []
+        for event in events or []:
+            if event.get('type') != 'response':
+                continue
+            event_time = float(event.get('time', fallback_time))
+            detail = event.get('detail') or {}
+            if isinstance(detail, str):
+                text = detail
+            else:
+                text = detail.get('text', '') if isinstance(detail, dict) else ''
+            if not text:
+                continue
+            if 'Assistant:' in text:
+                text = text.split('Assistant:', 1)[-1]
+            tokens = [token for token in text.strip().split() if token]
+            word_count = float(len(tokens))
+            if word_count <= 0.0:
+                continue
+            extracted.append((event_time, word_count))
+        extracted.sort(key=lambda item: item[0])
+        return extracted
+
+    def _simulate(chunk_events, prompt_times, start_time, end_time, speed):
+        times = [float(start_time)]
+        values = [0.0]
+        ttft_times = [float(start_time)]
+        ttft_values = [0.0]
+        rebuffer_times = [float(start_time)]
+        rebuffer_values = [0.0]
+
+        paired_prompt_times = []
+        for idx in range(len(chunk_events)):
+            if idx < len(prompt_times):
+                paired_prompt_times.append(float(prompt_times[idx]))
+            else:
+                paired_prompt_times.append(None)
+
+        events = []
+        for idx, prompt_time in enumerate(paired_prompt_times):
+            if prompt_time is not None:
+                events.append((float(prompt_time), 0, 'prompt', idx, 0.0))
+        for idx, (chunk_time, words) in enumerate(chunk_events):
+            events.append((float(chunk_time), 1, 'chunk', idx, float(words)))
+        events.sort(key=lambda item: (item[0], item[1], item[2]))
+
+        current_time = float(start_time)
+        current_buffer = 0.0
+        ttft_cumulative = 0.0
+        rebuffer_total = 0.0
+        last_consumption_finish = float(start_time)
+        first_chunk_received = False
+        prompt_queue = collections.deque()
+
+        def record(timestamp, buffer_value):
+            ts = float(timestamp)
+            value = max(0.0, float(buffer_value))
+            if times and abs(times[-1] - ts) < 1e-9 and abs(values[-1] - value) < 1e-6:
+                values[-1] = value
+                return
+            times.append(ts)
+            values.append(value)
+
+        def record_ttft(timestamp):
+            ts = float(timestamp)
+            if ttft_times and abs(ttft_times[-1] - ts) < 1e-9:
+                ttft_values[-1] = ttft_cumulative
+                return
+            ttft_times.append(ts)
+            ttft_values.append(ttft_cumulative)
+
+        def record_rebuffer(timestamp):
+            ts = float(timestamp)
+            if rebuffer_times and abs(rebuffer_times[-1] - ts) < 1e-9:
+                rebuffer_values[-1] = rebuffer_total
+                return
+            rebuffer_times.append(ts)
+            rebuffer_values.append(rebuffer_total)
+
+        def advance_to(target_time):
+            nonlocal current_time, current_buffer, rebuffer_total, last_consumption_finish
+            target = float(target_time)
+            if target <= current_time + 1e-9:
+                current_time = max(current_time, target)
+                record(target, current_buffer)
+                record_rebuffer(target)
+                return
+
+            while current_time + 1e-9 < target:
+                remaining = target - current_time
+                if speed > 0.0 and current_buffer > 1e-9:
+                    time_to_empty = current_buffer / speed
+                    if time_to_empty <= remaining + 1e-9:
+                        empty_time = current_time + time_to_empty
+                        current_buffer = 0.0
+                        current_time = empty_time
+                        record(empty_time, current_buffer)
+                        record_rebuffer(empty_time)
+                        last_consumption_finish = current_time
+                        continue
+                    reduction = speed * remaining
+                    current_buffer = max(0.0, current_buffer - reduction)
+                    current_time = target
+                    record(target, current_buffer)
+                    record_rebuffer(target)
+                    break
+                else:
+                    if prompt_queue and first_chunk_received:
+                        rebuffer_total += remaining
+                    current_time = target
+                    record(target, current_buffer)
+                    record_rebuffer(target)
+                    break
+
+        record(start_time, current_buffer)
+        record_ttft(start_time)
+        record_rebuffer(start_time)
+
+        for event_time, _, event_type, idx, payload in events:
+            advance_to(event_time)
+            if event_type == 'prompt':
+                prompt_time = paired_prompt_times[idx]
+                baseline = last_consumption_finish
+                if prompt_time is not None:
+                    baseline = max(baseline, float(prompt_time))
+                prompt_queue.append({'baseline': baseline})
+            else:
+                words = payload
+                if prompt_queue:
+                    prompt_record = prompt_queue.popleft()
+                    baseline = prompt_record['baseline']
+                    ttft_increment = max(0.0, float(event_time) - baseline)
+                    ttft_cumulative += ttft_increment
+                    record_ttft(event_time)
+                else:
+                    record_ttft(event_time)
+
+                current_buffer += words
+                record(event_time, current_buffer)
+
+                if not first_chunk_received:
+                    first_chunk_received = True
+
+        if end_time is not None and end_time > current_time + 1e-9:
+            advance_to(end_time)
+
+        return {
+            'times': times,
+            'values': values,
+            'ttft_times': ttft_times,
+            'ttft_values': ttft_values,
+            'rebuffer_times': rebuffer_times,
+            'rebuffer_values': rebuffer_values,
+            'final_time': current_time,
+            'total_rebuffer': rebuffer_total,
+        }
+
+    buffer_data = {}
+
+    summary_lookup = {}
+    for summary in conversation_summaries or []:
+        label = summary.get('label', summary.get('conversation_id', '')[:12])
+        summary_lookup[label] = summary
+
+    segments_by_cid = collections.defaultdict(list)
+    for segment in processor_segments or []:
+        cid = segment.get('conversation_id')
+        if not cid:
+            continue
+        segments_by_cid[cid].append(segment)
+
+    for cid, segments in segments_by_cid.items():
+        summary = summary_lookup.get(cid)
+        if not summary or not segments:
+            continue
+
+        segments.sort(key=lambda seg: seg.get('end', seg.get('start', 0.0)))
+        start_time = float(summary.get('start', segments[0].get('start', 0.0)))
+        end_time = float(max(seg.get('end', seg.get('start', start_time)) for seg in segments))
+
+        response_events = _extract_response_events(summary.get('events', []), start_time)
+        if len(response_events) > len(segments):
+            extra_words = sum(event[1] for event in response_events[len(segments):])
+            response_events = list(response_events[:len(segments)])
+            if response_events:
+                last_time, last_words = response_events[-1]
+                response_events[-1] = (last_time, last_words + extra_words)
+            elif extra_words > 0.0:
+                response_events = [(start_time, extra_words)]
+
+        # No longer using fallback_words - buffer only increases when text is actually produced
+
+        chunk_events = []
+        response_idx = 0
+        for segment in segments:
+            segment_end = float(segment.get('end', segment.get('start', start_time)))
+            if response_idx < len(response_events):
+                _, words = response_events[response_idx]
+                response_idx += 1
+            else:
+                # Only add words if there are actual response events
+                # If no response events exist, use 0 words (no buffer increase)
+                words = 0.0
+            # Don't use fallback_words - only increase buffer when text is actually produced
+            chunk_events.append((segment_end, float(words)))
+
+        # No need for fallback logic - chunk_events already have correct word counts
+
+        prompt_times = sorted(
+            float(event.get('time', start_time))
+            for event in summary.get('events', [])
+            if event.get('type') == 'prompt'
+        )
+        # Trim to number of chunks to maintain one-to-one pairing
+        if len(prompt_times) > len(chunk_events):
+            prompt_times = prompt_times[:len(chunk_events)]
+
+        reading_traj = _simulate(chunk_events, prompt_times, start_time, end_time, reading_speed)
+        listening_traj = _simulate(chunk_events, prompt_times, start_time, end_time, listening_speed)
+
+        buffer_data[cid] = {
+            'reading': reading_traj,
+            'listening': listening_traj,
+            'conversation_id': summary.get('conversation_id', cid)
+        }
+
+    return buffer_data
+
+
 def create_processor_timeline(processor_segments, idle_segments=None, conversation_summaries=None, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Visualize processor usage timeline across four arrival scenarios with shared axes."""
 
@@ -777,6 +1012,13 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
         if completion_time <= 0.0:
             completion_time = max(data['duration'], total_processing)
         data['completion_time'] = completion_time
+
+    buffer_data = simulate_text_buffer_trajectories(
+        sorted_segments,
+        conversation_summaries,
+        Config.USER_READING_SPEED_MAX,
+        Config.USER_LISTENING_SPEED_MAX
+    )
 
     actual_starts = []
     actual_ends = []
@@ -1042,6 +1284,106 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
     plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
     print(f"📊 Processor timeline saved to: {output_path}")
     plt.show()
+
+    buffer_output_path = None
+    if buffer_data:
+        fig_buffer, axes_grid = plt.subplots(
+            3,
+            2,
+            figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_MEDIUM[1] * 1.4),
+            sharex='col'
+        )
+        axes_grid = np.asarray(axes_grid)
+        fig_buffer.suptitle('Text Buffer, TTFT, and Rebuffer Evolution', fontsize=14, fontweight='bold')
+
+        time_max_by_mode = {'reading': 0.0, 'listening': 0.0}
+        data_present = {'reading': False, 'listening': False}
+
+        for cid in unique_conversations:
+            conversation_buffer = buffer_data.get(cid)
+            if not conversation_buffer:
+                continue
+
+            color = colors.get(cid, '#333333')
+
+            reading_traj = conversation_buffer.get('reading', {}) or {}
+            reading_times = reading_traj.get('times', [])
+            reading_values = reading_traj.get('values', [])
+            reading_ttft_times = reading_traj.get('ttft_times', [])
+            reading_ttft_values = reading_traj.get('ttft_values', [])
+            reading_rebuffer_times = reading_traj.get('rebuffer_times', [])
+            reading_rebuffer_values = reading_traj.get('rebuffer_values', [])
+
+            if reading_times:
+                axes_grid[0, 0].plot(reading_times, reading_values, color=color, linewidth=2, label=cid)
+                time_max_by_mode['reading'] = max(time_max_by_mode['reading'], max(reading_times))
+                data_present['reading'] = True
+            if reading_ttft_times:
+                axes_grid[1, 0].plot(reading_ttft_times, reading_ttft_values, color=color, linewidth=2)
+                time_max_by_mode['reading'] = max(time_max_by_mode['reading'], max(reading_ttft_times))
+            if reading_rebuffer_times:
+                axes_grid[2, 0].plot(reading_rebuffer_times, reading_rebuffer_values, color=color, linewidth=2)
+                time_max_by_mode['reading'] = max(time_max_by_mode['reading'], max(reading_rebuffer_times))
+
+            listening_traj = conversation_buffer.get('listening', {}) or {}
+            listening_times = listening_traj.get('times', [])
+            listening_values = listening_traj.get('values', [])
+            listening_ttft_times = listening_traj.get('ttft_times', [])
+            listening_ttft_values = listening_traj.get('ttft_values', [])
+            listening_rebuffer_times = listening_traj.get('rebuffer_times', [])
+            listening_rebuffer_values = listening_traj.get('rebuffer_values', [])
+
+            if listening_times:
+                axes_grid[0, 1].plot(listening_times, listening_values, color=color, linewidth=2, label=cid)
+                time_max_by_mode['listening'] = max(time_max_by_mode['listening'], max(listening_times))
+                data_present['listening'] = True
+            if listening_ttft_times:
+                axes_grid[1, 1].plot(listening_ttft_times, listening_ttft_values, color=color, linewidth=2)
+                time_max_by_mode['listening'] = max(time_max_by_mode['listening'], max(listening_ttft_times))
+            if listening_rebuffer_times:
+                axes_grid[2, 1].plot(listening_rebuffer_times, listening_rebuffer_values, color=color, linewidth=2)
+                time_max_by_mode['listening'] = max(time_max_by_mode['listening'], max(listening_rebuffer_times))
+
+        mode_configs = [
+            ('reading', Config.USER_READING_SPEED_MAX, 'Reading'),
+            ('listening', Config.USER_LISTENING_SPEED_MAX, 'Listening')
+        ]
+        row_labels = ['Buffer Size (words)', 'Cumulative TTFT (s)', 'Cumulative Rebuffer (s)']
+
+        for col, (mode_key, mode_speed, mode_label) in enumerate(mode_configs):
+            max_time = time_max_by_mode[mode_key]
+            if max_time <= 0.0:
+                max_time = overall_max if overall_max > 0.0 else 1.0
+            for row in range(3):
+                axes_grid[row, col].set_xlim(0.0, max_time * 1.05)
+                axes_grid[row, col].set_ylim(bottom=0.0)
+                axes_grid[row, col].grid(True, alpha=0.3)
+                axes_grid[row, col].set_ylabel(row_labels[row])
+                if not axes_grid[row, col].lines:
+                    axes_grid[row, col].text(
+                        0.5,
+                        0.5,
+                        'No data',
+                        ha='center',
+                        va='center',
+                        transform=axes_grid[row, col].transAxes,
+                        fontsize=9,
+                        color='#666666'
+                    )
+
+            axes_grid[0, col].set_title(f'{mode_label} ({mode_speed:.2f} words/s)', fontsize=11)
+            axes_grid[2, col].set_xlabel('Processor Time (s)')
+
+        if data_present['reading']:
+            axes_grid[0, 0].legend(loc='upper right', fontsize=8, title='Conversation')
+        if data_present['listening']:
+            axes_grid[0, 1].legend(loc='upper right', fontsize=8, title='Conversation')
+
+        fig_buffer.tight_layout(rect=[0, 0, 1, 0.94])
+        buffer_output_path = os.path.join(output_dir, f'text_buffer_evolution_{data_source}.png')
+        fig_buffer.savefig(buffer_output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
+        print(f"📊 Text buffer evolution saved to: {buffer_output_path}")
+        plt.show()
 
     return output_path
 
