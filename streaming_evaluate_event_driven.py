@@ -68,7 +68,7 @@ class Config:
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 3               # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 2             # Default number of videos for evaluation
     DEFAULT_THRESHOLD_RANGE = (0.5, 0.99) # Default threshold range for sweep
     DEFAULT_NUM_THRESHOLDS = 2           # Default number of thresholds for sweep
     DEBUG_THRESHOLDS = [0.8, 0.9]         # Coarse-grained thresholds
@@ -76,7 +76,7 @@ class Config:
     
     # User-level rebuffering configuration
     USER_READING_SPEED_MIN = 3.0          # Words per second (slow reading)
-    USER_READING_SPEED_MAX = 5.0          # Words per second (fast reading)
+    USER_READING_SPEED_MAX = 50.0          # Words per second (fast reading)
     USER_LISTENING_SPEED_MIN = 2.0        # Words per second (slow listening)
     USER_LISTENING_SPEED_MAX = 2.7        # Words per second (fast listening)
     
@@ -95,7 +95,7 @@ class Config:
     EXPECTED_RESPONSE_LENGTH = 20.0
     LENGTH_FACTOR_MIN = 0.5
     LENGTH_FACTOR_MAX = 2.0
-    GENERATION_CHUNK_SIZE = 16
+    GENERATION_CHUNK_SIZE = 32
 
 class FilteredEgo4DRefinedNarrationStream:
     """Ego4D Refined Narration Stream that only includes videos with features - now processes per-conversation"""
@@ -607,17 +607,15 @@ def calculate_all_rebuffering_times(responses, frame_processing_times, reading_s
             reading_time = word_count / reading_speed
             listening_time = word_count / listening_speed
         
-        # 1. GENERATION REBUFFERING: Delay when processing exceeds real-time frame rate
-        if frame_idx == 0:
-            generation_rebuffering_delay = 0.0  # First frame: no rebuffering
-        else:
-            generation_rebuffering_delay = max(0.0, previous_processing_finish - expected_processing_start)
-        generation_rebuffering_times.append(generation_rebuffering_delay)
-        
         # 2. READING REBUFFERING: Delay when user reading time causes processing delays
         expected_reading_start = expected_processing_start + processing_time
         reading_rebuffering_delay = max(0.0, previous_reading_finish - expected_reading_start)
         reading_rebuffering_times.append(reading_rebuffering_delay)
+        
+        # 1. GENERATION REBUFFERING: Use buffer-based rebuffering (same as reading rebuffering)
+        # This measures rebuffering when buffer is empty but there are pending prompts
+        generation_rebuffering_delay = reading_rebuffering_delay  # Use same logic as reading rebuffering
+        generation_rebuffering_times.append(generation_rebuffering_delay)
         
         # 3. LISTENING REBUFFERING: Delay when user listening time causes processing delays
         expected_listening_start = expected_processing_start + processing_time
@@ -673,7 +671,7 @@ def calculate_all_rebuffering_times(responses, frame_processing_times, reading_s
 
 
 def simulate_text_buffer_trajectories(processor_segments, conversation_summaries, reading_speed, listening_speed):
-    """Simulate text buffers plus cumulative TTFT and rebuffer metrics per conversation."""
+    """Simulate text buffers plus cumulative rebuffer metrics per conversation."""
 
     if not processor_segments or not conversation_summaries:
         return {}
@@ -701,36 +699,62 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         extracted.sort(key=lambda item: item[0])
         return extracted
 
-    def _simulate(chunk_events, prompt_times, start_time, end_time, speed):
+    def _simulate(chunk_events, prompt_times, start_time, end_time, speed, conversation_id=None, all_segments=None):
         times = [float(start_time)]
         values = [0.0]
-        ttft_times = [float(start_time)]
-        ttft_values = [0.0]
         rebuffer_times = [float(start_time)]
         rebuffer_values = [0.0]
 
-        paired_prompt_times = []
-        for idx in range(len(chunk_events)):
-            if idx < len(prompt_times):
-                paired_prompt_times.append(float(prompt_times[idx]))
-            else:
-                paired_prompt_times.append(None)
-
+        # Create events for prompts and chunks
         events = []
-        for idx, prompt_time in enumerate(paired_prompt_times):
-            if prompt_time is not None:
-                events.append((float(prompt_time), 0, 'prompt', idx, 0.0))
+        for idx, prompt_time in enumerate(prompt_times):
+            events.append((float(prompt_time), 0, 'prompt', idx, 0.0))
         for idx, (chunk_time, words) in enumerate(chunk_events):
             events.append((float(chunk_time), 1, 'chunk', idx, float(words)))
         events.sort(key=lambda item: (item[0], item[1], item[2]))
 
         current_time = float(start_time)
         current_buffer = 0.0
-        ttft_cumulative = 0.0
         rebuffer_total = 0.0
-        last_consumption_finish = float(start_time)
         first_chunk_received = False
-        prompt_queue = collections.deque()
+        
+        # Track pending prompts: each prompt can have multiple chunks
+        # We track which prompts are still pending (not all chunks completed)
+        pending_prompts = set()  # Set of prompt indices that are still pending
+        prompt_to_chunks = {}    # Map prompt index to list of chunk indices
+        chunk_to_prompt = {}     # Map chunk index to prompt index
+        
+        # Initialize prompt-to-chunk mapping
+        # We need to map chunks to prompts based on timing
+        # A chunk belongs to the most recent prompt that occurred before it
+        # Only include chunks that generate text (words > 0)
+        for chunk_idx, (chunk_time, words) in enumerate(chunk_events):
+            if words > 0:  # Only map chunks that generate text
+                # Find the most recent prompt before this chunk
+                prompt_idx = None
+                for p_idx, prompt_time in enumerate(prompt_times):
+                    if prompt_time <= chunk_time:
+                        prompt_idx = p_idx
+                    else:
+                        break
+                
+                if prompt_idx is not None:
+                    if prompt_idx not in prompt_to_chunks:
+                        prompt_to_chunks[prompt_idx] = []
+                    prompt_to_chunks[prompt_idx].append(chunk_idx)
+                    chunk_to_prompt[chunk_idx] = prompt_idx
+        
+        # Track conversation completion status
+        conversation_finished = False
+        if conversation_id and all_segments:
+            # Find the latest segment end time for this conversation
+            conversation_segments = [seg for seg in all_segments if seg.get('conversation_id') == conversation_id]
+            if conversation_segments:
+                conversation_end_time = max(seg.get('end', seg.get('start', 0.0)) for seg in conversation_segments)
+            else:
+                conversation_end_time = end_time
+        else:
+            conversation_end_time = end_time
 
         def record(timestamp, buffer_value):
             ts = float(timestamp)
@@ -741,13 +765,6 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
             times.append(ts)
             values.append(value)
 
-        def record_ttft(timestamp):
-            ts = float(timestamp)
-            if ttft_times and abs(ttft_times[-1] - ts) < 1e-9:
-                ttft_values[-1] = ttft_cumulative
-                return
-            ttft_times.append(ts)
-            ttft_values.append(ttft_cumulative)
 
         def record_rebuffer(timestamp):
             ts = float(timestamp)
@@ -758,13 +775,17 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
             rebuffer_values.append(rebuffer_total)
 
         def advance_to(target_time):
-            nonlocal current_time, current_buffer, rebuffer_total, last_consumption_finish
+            nonlocal current_time, current_buffer, rebuffer_total, conversation_finished
             target = float(target_time)
             if target <= current_time + 1e-9:
                 current_time = max(current_time, target)
                 record(target, current_buffer)
                 record_rebuffer(target)
                 return
+
+            # Check if conversation is finished (all segments completed)
+            if target >= conversation_end_time:
+                conversation_finished = True
 
             while current_time + 1e-9 < target:
                 remaining = target - current_time
@@ -776,7 +797,6 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                         current_time = empty_time
                         record(empty_time, current_buffer)
                         record_rebuffer(empty_time)
-                        last_consumption_finish = current_time
                         continue
                     reduction = speed * remaining
                     current_buffer = max(0.0, current_buffer - reduction)
@@ -785,7 +805,11 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                     record_rebuffer(target)
                     break
                 else:
-                    if prompt_queue and first_chunk_received:
+                    # New rebuffering metric: accumulate only if buffer is empty AND there are pending prompts
+                    # This means we only count rebuffering time when:
+                    # 1. Buffer is empty (no text to consume)
+                    # 2. There are pending prompts (not all chunks completed for some prompts)
+                    if pending_prompts and current_buffer <= 1e-9:
                         rebuffer_total += remaining
                     current_time = target
                     record(target, current_buffer)
@@ -793,33 +817,36 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                     break
 
         record(start_time, current_buffer)
-        record_ttft(start_time)
         record_rebuffer(start_time)
 
         for event_time, _, event_type, idx, payload in events:
             advance_to(event_time)
+            
             if event_type == 'prompt':
-                prompt_time = paired_prompt_times[idx]
-                baseline = last_consumption_finish
-                if prompt_time is not None:
-                    baseline = max(baseline, float(prompt_time))
-                prompt_queue.append({'baseline': baseline})
+                # Add prompt to pending set
+                pending_prompts.add(idx)
             else:
+                # This is a chunk completion - only count chunks that generate text
                 words = payload
-                if prompt_queue:
-                    prompt_record = prompt_queue.popleft()
-                    baseline = prompt_record['baseline']
-                    ttft_increment = max(0.0, float(event_time) - baseline)
-                    ttft_cumulative += ttft_increment
-                    record_ttft(event_time)
-                else:
-                    record_ttft(event_time)
+                if words > 0:  # Only process chunks that actually generate text
+                    current_buffer += words
 
-                current_buffer += words
-                record(event_time, current_buffer)
-
-                if not first_chunk_received:
-                    first_chunk_received = True
+                    if not first_chunk_received:
+                        first_chunk_received = True
+                    
+                    # Check if this chunk completes all chunks for its prompt
+                    if idx in chunk_to_prompt:
+                        prompt_idx = chunk_to_prompt[idx]
+                        # Check if all chunks for this prompt are completed
+                        # We need to check if this is the last chunk for the prompt
+                        prompt_chunks = prompt_to_chunks.get(prompt_idx, [])
+                        if prompt_chunks and idx == max(prompt_chunks):
+                            # This is the last chunk for this prompt, remove from pending
+                            pending_prompts.discard(prompt_idx)
+            
+            # Record buffer and rebuffer values after processing the event
+            record(event_time, current_buffer)
+            record_rebuffer(event_time)
 
         if end_time is not None and end_time > current_time + 1e-9:
             advance_to(end_time)
@@ -827,8 +854,6 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         return {
             'times': times,
             'values': values,
-            'ttft_times': ttft_times,
-            'ttft_values': ttft_values,
             'rebuffer_times': rebuffer_times,
             'rebuffer_values': rebuffer_values,
             'final_time': current_time,
@@ -842,13 +867,42 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         label = summary.get('label', summary.get('conversation_id', '')[:12])
         summary_lookup[label] = summary
 
+    # Process all segments together, not per conversation
+    all_segments = sorted(processor_segments or [], key=lambda seg: seg.get('end', seg.get('start', 0.0)))
+    
+    # Group segments by conversation for response event mapping
     segments_by_cid = collections.defaultdict(list)
-    for segment in processor_segments or []:
+    for segment in all_segments:
         cid = segment.get('conversation_id')
         if not cid:
             continue
         segments_by_cid[cid].append(segment)
 
+    # Create chunk events only for segments that generate text
+    chunk_events = []
+    
+    for i, segment in enumerate(all_segments):
+        cid = segment.get('conversation_id')
+        segment_end = float(segment.get('end', segment.get('start', 0.0)))
+        generation_duration = segment.get('generation_duration', 0.0)
+        
+        if generation_duration > 0.0:
+            # This chunk produced text, find corresponding response event
+            summary = summary_lookup.get(cid)
+            if summary:
+                response_events = _extract_response_events(summary.get('events', []), 0.0)
+                # Find the response event that corresponds to this generation
+                # We'll use a simple approach: take the first available response event
+                if response_events:
+                    _, words = response_events[0]  # Take first response for now
+                    chunk_events.append((segment_end, float(words)))
+                else:
+                    chunk_events.append((segment_end, 0.0))
+            else:
+                chunk_events.append((segment_end, 0.0))
+        # Skip segments that don't generate text - they are not chunks
+
+    # Now create buffer trajectories for each conversation
     for cid, segments in segments_by_cid.items():
         summary = summary_lookup.get(cid)
         if not summary or not segments:
@@ -858,33 +912,15 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         start_time = float(summary.get('start', segments[0].get('start', 0.0)))
         end_time = float(max(seg.get('end', seg.get('start', start_time)) for seg in segments))
 
-        response_events = _extract_response_events(summary.get('events', []), start_time)
-        if len(response_events) > len(segments):
-            extra_words = sum(event[1] for event in response_events[len(segments):])
-            response_events = list(response_events[:len(segments)])
-            if response_events:
-                last_time, last_words = response_events[-1]
-                response_events[-1] = (last_time, last_words + extra_words)
-            elif extra_words > 0.0:
-                response_events = [(start_time, extra_words)]
-
-        # No longer using fallback_words - buffer only increases when text is actually produced
-
-        chunk_events = []
-        response_idx = 0
+        # Filter chunk events for this conversation
+        conversation_chunk_events = []
         for segment in segments:
-            segment_end = float(segment.get('end', segment.get('start', start_time)))
-            if response_idx < len(response_events):
-                _, words = response_events[response_idx]
-                response_idx += 1
-            else:
-                # Only add words if there are actual response events
-                # If no response events exist, use 0 words (no buffer increase)
-                words = 0.0
-            # Don't use fallback_words - only increase buffer when text is actually produced
-            chunk_events.append((segment_end, float(words)))
-
-        # No need for fallback logic - chunk_events already have correct word counts
+            segment_end = float(segment.get('end', segment.get('start', 0.0)))
+            # Find the corresponding chunk event
+            for chunk_time, words in chunk_events:
+                if abs(chunk_time - segment_end) < 0.01:  # Match by time
+                    conversation_chunk_events.append((chunk_time, words))
+                    break
 
         prompt_times = sorted(
             float(event.get('time', start_time))
@@ -892,11 +928,11 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
             if event.get('type') == 'prompt'
         )
         # Trim to number of chunks to maintain one-to-one pairing
-        if len(prompt_times) > len(chunk_events):
-            prompt_times = prompt_times[:len(chunk_events)]
+        if len(prompt_times) > len(conversation_chunk_events):
+            prompt_times = prompt_times[:len(conversation_chunk_events)]
 
-        reading_traj = _simulate(chunk_events, prompt_times, start_time, end_time, reading_speed)
-        listening_traj = _simulate(chunk_events, prompt_times, start_time, end_time, listening_speed)
+        reading_traj = _simulate(conversation_chunk_events, prompt_times, start_time, end_time, reading_speed, cid, all_segments)
+        listening_traj = _simulate(conversation_chunk_events, prompt_times, start_time, end_time, listening_speed, cid, all_segments)
 
         buffer_data[cid] = {
             'reading': reading_traj,
@@ -1288,17 +1324,60 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
     buffer_output_path = None
     if buffer_data:
         fig_buffer, axes_grid = plt.subplots(
-            3,
             2,
-            figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_MEDIUM[1] * 1.4),
+            2,
+            figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_MEDIUM[1] * 1.0),
             sharex='col'
         )
         axes_grid = np.asarray(axes_grid)
-        fig_buffer.suptitle('Text Buffer, TTFT, and Rebuffer Evolution', fontsize=14, fontweight='bold')
+        fig_buffer.suptitle('Text Buffer and Rebuffer Evolution', fontsize=14, fontweight='bold')
 
         time_max_by_mode = {'reading': 0.0, 'listening': 0.0}
         data_present = {'reading': False, 'listening': False}
 
+        # Collect critical events for dashed lines
+        critical_events = {'prompts': [], 'chunks': []}
+        
+        # Extract critical events from processor segments and conversation summaries
+        if processor_segments:
+            for segment in processor_segments:
+                cid = segment.get('conversation_id')
+                if cid in unique_conversations:
+                    segment_end = float(segment.get('end', segment.get('start', 0.0)))
+                    generation_duration = segment.get('generation_duration', 0.0)
+                    
+                    # Only add chunks that generate text
+                    if generation_duration > 0.0:
+                        critical_events['chunks'].append(segment_end)
+        
+        # Extract prompt times from conversation summaries
+        if conversation_summaries:
+            for summary in conversation_summaries:
+                cid = summary.get('conversation_id')
+                
+                # Match by prefix since conversation IDs have different formats
+                matched_cid = None
+                for unique_cid in unique_conversations:
+                    if cid.startswith(unique_cid):
+                        matched_cid = unique_cid
+                        break
+                
+                if matched_cid:
+                    # Look for prompts in events
+                    events = summary.get('events', [])
+                    for event in events:
+                        if event.get('type') == 'prompt':
+                            critical_events['prompts'].append(event.get('time', 0.0))
+                    
+                    # Also look for prompts in the conversation data structure
+                    # Sometimes prompts are stored differently
+                    if 'prompts' in summary:
+                        for prompt in summary['prompts']:
+                            if isinstance(prompt, dict) and 'time' in prompt:
+                                critical_events['prompts'].append(prompt['time'])
+                            elif isinstance(prompt, (int, float)):
+                                critical_events['prompts'].append(float(prompt))
+        
         for cid in unique_conversations:
             conversation_buffer = buffer_data.get(cid)
             if not conversation_buffer:
@@ -1309,8 +1388,6 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
             reading_traj = conversation_buffer.get('reading', {}) or {}
             reading_times = reading_traj.get('times', [])
             reading_values = reading_traj.get('values', [])
-            reading_ttft_times = reading_traj.get('ttft_times', [])
-            reading_ttft_values = reading_traj.get('ttft_values', [])
             reading_rebuffer_times = reading_traj.get('rebuffer_times', [])
             reading_rebuffer_values = reading_traj.get('rebuffer_values', [])
 
@@ -1318,18 +1395,13 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
                 axes_grid[0, 0].plot(reading_times, reading_values, color=color, linewidth=2, label=cid)
                 time_max_by_mode['reading'] = max(time_max_by_mode['reading'], max(reading_times))
                 data_present['reading'] = True
-            if reading_ttft_times:
-                axes_grid[1, 0].plot(reading_ttft_times, reading_ttft_values, color=color, linewidth=2)
-                time_max_by_mode['reading'] = max(time_max_by_mode['reading'], max(reading_ttft_times))
             if reading_rebuffer_times:
-                axes_grid[2, 0].plot(reading_rebuffer_times, reading_rebuffer_values, color=color, linewidth=2)
+                axes_grid[1, 0].plot(reading_rebuffer_times, reading_rebuffer_values, color=color, linewidth=2)
                 time_max_by_mode['reading'] = max(time_max_by_mode['reading'], max(reading_rebuffer_times))
 
             listening_traj = conversation_buffer.get('listening', {}) or {}
             listening_times = listening_traj.get('times', [])
             listening_values = listening_traj.get('values', [])
-            listening_ttft_times = listening_traj.get('ttft_times', [])
-            listening_ttft_values = listening_traj.get('ttft_values', [])
             listening_rebuffer_times = listening_traj.get('rebuffer_times', [])
             listening_rebuffer_values = listening_traj.get('rebuffer_values', [])
 
@@ -1337,24 +1409,21 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
                 axes_grid[0, 1].plot(listening_times, listening_values, color=color, linewidth=2, label=cid)
                 time_max_by_mode['listening'] = max(time_max_by_mode['listening'], max(listening_times))
                 data_present['listening'] = True
-            if listening_ttft_times:
-                axes_grid[1, 1].plot(listening_ttft_times, listening_ttft_values, color=color, linewidth=2)
-                time_max_by_mode['listening'] = max(time_max_by_mode['listening'], max(listening_ttft_times))
             if listening_rebuffer_times:
-                axes_grid[2, 1].plot(listening_rebuffer_times, listening_rebuffer_values, color=color, linewidth=2)
+                axes_grid[1, 1].plot(listening_rebuffer_times, listening_rebuffer_values, color=color, linewidth=2)
                 time_max_by_mode['listening'] = max(time_max_by_mode['listening'], max(listening_rebuffer_times))
 
         mode_configs = [
             ('reading', Config.USER_READING_SPEED_MAX, 'Reading'),
             ('listening', Config.USER_LISTENING_SPEED_MAX, 'Listening')
         ]
-        row_labels = ['Buffer Size (words)', 'Cumulative TTFT (s)', 'Cumulative Rebuffer (s)']
+        row_labels = ['Buffer Size (words)', 'Cumulative Rebuffer (s)']
 
         for col, (mode_key, mode_speed, mode_label) in enumerate(mode_configs):
             max_time = time_max_by_mode[mode_key]
             if max_time <= 0.0:
                 max_time = overall_max if overall_max > 0.0 else 1.0
-            for row in range(3):
+            for row in range(2):
                 axes_grid[row, col].set_xlim(0.0, max_time * 1.05)
                 axes_grid[row, col].set_ylim(bottom=0.0)
                 axes_grid[row, col].grid(True, alpha=0.3)
@@ -1372,7 +1441,7 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
                     )
 
             axes_grid[0, col].set_title(f'{mode_label} ({mode_speed:.2f} words/s)', fontsize=11)
-            axes_grid[2, col].set_xlabel('Processor Time (s)')
+            axes_grid[1, col].set_xlabel('Processor Time (s)')
 
         if data_present['reading']:
             axes_grid[0, 0].legend(loc='upper right', fontsize=8, title='Conversation')
@@ -1383,7 +1452,6 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
         buffer_output_path = os.path.join(output_dir, f'text_buffer_evolution_{data_source}.png')
         fig_buffer.savefig(buffer_output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
         print(f"📊 Text buffer evolution saved to: {buffer_output_path}")
-        plt.show()
 
     return output_path
 
@@ -2770,15 +2838,17 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 idle_segments.append({'start': processor_clock, 'end': start_time})
             total_duration = max(0.0, frame_duration) + max(0.0, generation_duration)
             if total_duration > 0.0:
+                segment_end = start_time + total_duration
                 processor_segments.append({
                     'conversation_id': segment_label,
                     'start': start_time,
-                    'end': start_time + total_duration,
+                    'end': segment_end,
                     'type': 'frame',
                     'frame_idx': frame_idx,
                     'frame_duration': max(0.0, frame_duration),
                     'generation_duration': max(0.0, generation_duration)
                 })
+                # print(f"🔍 DEBUG: Created processor segment for {segment_label}: end={segment_end:.2f}s, frame_duration={frame_duration:.3f}s, generation_duration={generation_duration:.3f}s")
             processor_clock = start_time + total_duration
 
             if shared_liveinfer.generation_state is not None:
@@ -2796,15 +2866,17 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             segment_label = context.conversation_id[:12]
 
             if generation_duration > 0.0:
+                segment_end = start_time + generation_duration
                 processor_segments.append({
                     'conversation_id': segment_label,
                     'start': start_time,
-                    'end': start_time + generation_duration,
+                    'end': segment_end,
                     'type': 'generation',
                     'frame_idx': None,
                     'frame_duration': 0.0,
                     'generation_duration': generation_duration
                 })
+                # print(f"🔍 DEBUG: Created generation segment for {segment_label}: end={segment_end:.2f}s, generation_duration={generation_duration:.3f}s")
             processor_clock = start_time + max(0.0, generation_duration)
 
             if shared_liveinfer.generation_state is not None:
@@ -3745,8 +3817,8 @@ def main():
         # print(f"\n📊 Creating generated word count analysis...")
         # create_generated_word_count_analysis(results, data_source=data_source)
         
-        print(f"\n✅ Evaluation completed successfully!")
-        print(f"📊 Processed {len(results)} conversations with streaming approach")
+        # print(f"\n✅ Evaluation completed successfully!")
+        # print(f"📊 Processed {len(results)} conversations with streaming approach")
         
     except Exception as e:
         print(f"❌ Error during evaluation: {e}")
