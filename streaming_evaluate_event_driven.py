@@ -76,7 +76,7 @@ class Config:
     
     # User-level rebuffering configuration
     USER_READING_SPEED_MIN = 3.0          # Words per second (slow reading)
-    USER_READING_SPEED_MAX = 50.0          # Words per second (fast reading)
+    USER_READING_SPEED_MAX = 5.0          # Words per second (fast reading)
     USER_LISTENING_SPEED_MIN = 2.0        # Words per second (slow listening)
     USER_LISTENING_SPEED_MAX = 2.7        # Words per second (fast listening)
     
@@ -744,6 +744,15 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                     prompt_to_chunks[prompt_idx].append(chunk_idx)
                     chunk_to_prompt[chunk_idx] = prompt_idx
         
+        # Special handling for narration datasets: if there's only one prompt with many chunks,
+        # we should treat each chunk as completing the prompt immediately to avoid infinite pending state
+        is_narration_like = len(prompt_times) == 1 and len(chunk_events) > 10
+        if is_narration_like:
+            # For narration-like datasets, each chunk immediately completes the prompt
+            # This prevents the single prompt from staying pending forever
+            prompt_to_chunks = {0: list(range(len(chunk_events)))}
+            chunk_to_prompt = {i: 0 for i in range(len(chunk_events))}
+        
         # Track conversation completion status
         conversation_finished = False
         if conversation_id and all_segments:
@@ -820,6 +829,7 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         record_rebuffer(start_time)
 
         for event_time, _, event_type, idx, payload in events:
+            # Advance time to this event (consumes buffer at user speed)
             advance_to(event_time)
             
             if event_type == 'prompt':
@@ -837,14 +847,21 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                     # Check if this chunk completes all chunks for its prompt
                     if idx in chunk_to_prompt:
                         prompt_idx = chunk_to_prompt[idx]
-                        # Check if all chunks for this prompt are completed
-                        # We need to check if this is the last chunk for the prompt
-                        prompt_chunks = prompt_to_chunks.get(prompt_idx, [])
-                        if prompt_chunks and idx == max(prompt_chunks):
-                            # This is the last chunk for this prompt, remove from pending
+                        
+                        # For narration-like datasets, each chunk immediately completes the prompt
+                        # to prevent infinite pending state
+                        if is_narration_like:
+                            # In narration datasets, each chunk immediately completes the prompt
+                            # This prevents the single prompt from staying pending forever
                             pending_prompts.discard(prompt_idx)
+                        else:
+                            # For goalstep datasets, only remove prompt when all chunks are completed
+                            prompt_chunks = prompt_to_chunks.get(prompt_idx, [])
+                            if prompt_chunks and idx == max(prompt_chunks):
+                                # This is the last chunk for this prompt, remove from pending
+                                pending_prompts.discard(prompt_idx)
             
-            # Record buffer and rebuffer values after processing the event
+            # Record buffer and rebuffer values AFTER processing the event (with new words added)
             record(event_time, current_buffer)
             record_rebuffer(event_time)
 
@@ -878,29 +895,63 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
             continue
         segments_by_cid[cid].append(segment)
 
-    # Create chunk events only for segments that generate text
+    # Create chunk events from response events directly (more reliable for narration)
     chunk_events = []
     
-    for i, segment in enumerate(all_segments):
-        cid = segment.get('conversation_id')
-        segment_end = float(segment.get('end', segment.get('start', 0.0)))
-        generation_duration = segment.get('generation_duration', 0.0)
-        
-        if generation_duration > 0.0:
-            # This chunk produced text, find corresponding response event
-            summary = summary_lookup.get(cid)
-            if summary:
-                response_events = _extract_response_events(summary.get('events', []), 0.0)
-                # Find the response event that corresponds to this generation
-                # We'll use a simple approach: take the first available response event
-                if response_events:
-                    _, words = response_events[0]  # Take first response for now
-                    chunk_events.append((segment_end, float(words)))
+    # For narration datasets, use response events directly instead of segments
+    # This is more reliable because segments may not have proper generation_duration
+    for cid, segments in segments_by_cid.items():
+        summary = summary_lookup.get(cid)
+        if summary:
+            response_events = _extract_response_events(summary.get('events', []), 0.0)
+            
+            for resp_time, words in response_events:
+                if words > 0:  # Only include responses that generate text
+                    chunk_events.append((resp_time, float(words)))
+    
+    # Fallback: if no response events found, try segments
+    if not chunk_events:
+        print("📊 No response events found, falling back to segments")
+        for i, segment in enumerate(all_segments):
+            cid = segment.get('conversation_id')
+            segment_end = float(segment.get('end', segment.get('start', 0.0)))
+            generation_duration = segment.get('generation_duration', 0.0)
+            
+            
+            if generation_duration > 0.0:
+                # This chunk produced text, find corresponding response event
+                summary = summary_lookup.get(cid)
+                if summary:
+                    response_events = _extract_response_events(summary.get('events', []), 0.0)
+                    # Find the response event that corresponds to this generation
+                    # Match by time proximity - find the closest response event to this segment end time
+                    if response_events:
+                        # Find the response event closest to this segment's end time
+                        best_match = None
+                        min_time_diff = float('inf')
+                        for resp_time, words in response_events:
+                            time_diff = abs(resp_time - segment_end)
+                            if time_diff < min_time_diff:
+                                min_time_diff = time_diff
+                                best_match = words
+                        
+                        if best_match is not None and min_time_diff < 1.0:  # Within 1 second
+                            chunk_events.append((segment_end, float(best_match)))
+                        else:
+                            # Fallback: use average word count if no good match
+                            avg_words = sum(words for _, words in response_events) / len(response_events)
+                            chunk_events.append((segment_end, float(avg_words)))
+                    else:
+                        chunk_events.append((segment_end, 0.0))
                 else:
                     chunk_events.append((segment_end, 0.0))
-            else:
-                chunk_events.append((segment_end, 0.0))
-        # Skip segments that don't generate text - they are not chunks
+            # Skip segments that don't generate text - they are not chunks
+
+    print(f"📊 Created {len(chunk_events)} chunk events for buffer simulation")
+    if chunk_events:
+        total_words = sum(words for _, words in chunk_events)
+        avg_words_per_chunk = total_words / len(chunk_events)
+        print(f"📊 Total words: {total_words}, Avg words per chunk: {avg_words_per_chunk:.1f}")
 
     # Now create buffer trajectories for each conversation
     for cid, segments in segments_by_cid.items():
@@ -912,15 +963,8 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         start_time = float(summary.get('start', segments[0].get('start', 0.0)))
         end_time = float(max(seg.get('end', seg.get('start', start_time)) for seg in segments))
 
-        # Filter chunk events for this conversation
-        conversation_chunk_events = []
-        for segment in segments:
-            segment_end = float(segment.get('end', segment.get('start', 0.0)))
-            # Find the corresponding chunk event
-            for chunk_time, words in chunk_events:
-                if abs(chunk_time - segment_end) < 0.01:  # Match by time
-                    conversation_chunk_events.append((chunk_time, words))
-                    break
+        # Use all chunk events for this conversation (they're already filtered by conversation)
+        conversation_chunk_events = chunk_events
 
         prompt_times = sorted(
             float(event.get('time', start_time))
