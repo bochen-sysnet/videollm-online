@@ -1453,7 +1453,7 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
         fig_buffer.savefig(buffer_output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
         print(f"📊 Text buffer evolution saved to: {buffer_output_path}")
 
-    return output_path
+    return output_path, buffer_data
 
 def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create detailed memory usage visualization for all videos"""
@@ -2631,6 +2631,33 @@ class EventDrivenConversationContext:
             'conversation_id': self.conversation_id
         })
 
+        # Create buffer simulation data for this conversation
+        conversation_summary = {
+            'conversation_id': self.conversation_id,
+            'label': self.conversation_id[:12],
+            'start': self.conversation_start_time,
+            'events': self.event_log
+        }
+        
+        # Create processor segments for this conversation
+        processor_segments = []
+        for event in self.event_log:
+            if event.get('type') == 'generation_complete':
+                processor_segments.append({
+                    'conversation_id': self.conversation_id,
+                    'start': event.get('start_time', 0.0),
+                    'end': event.get('time', 0.0),
+                    'generation_duration': event.get('generation_duration', 0.0)
+                })
+        
+        # Simulate buffer trajectories
+        buffer_data = simulate_text_buffer_trajectories(
+            processor_segments,
+            [conversation_summary],
+            Config.USER_READING_SPEED_MAX,
+            Config.USER_LISTENING_SPEED_MAX
+        )
+
         self.result = {
             'conversation_id': self.conversation_id,
             'video_id': self.video_uid,
@@ -2667,7 +2694,8 @@ class EventDrivenConversationContext:
             'total_listening_rebuffering_time': total_listening_rebuffering,
             'average_listening_rebuffering_time': average_listening_rebuffering,
             'resource_utilization_times': resource_utilization_times,
-            'final_frame_utilization': final_frame_utilization
+            'final_frame_utilization': final_frame_utilization,
+            'buffer_data': buffer_data
         }
 
         self.result['event_log'] = self.event_log
@@ -2923,11 +2951,12 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         print("\n📊 Creating frame score analysis...")
         create_frame_score_analysis(all_frame_scores_data, data_source=data_source)
 
+    buffer_data = None
     if processor_segments:
         print("\n📊 Creating processor timeline...")
-        create_processor_timeline(processor_segments, idle_segments, conversation_summaries, data_source=data_source)
+        _, buffer_data = create_processor_timeline(processor_segments, idle_segments, conversation_summaries, data_source=data_source)
 
-    return results
+    return results, buffer_data
 
 def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda', num_conversations=None, random_selection=False, specific_indices=None, data_source='goalstep', threshold_range=None, num_thresholds=None):
     """Evaluate conversations across different streaming thresholds to analyze threshold sensitivity."""
@@ -3702,7 +3731,7 @@ def main():
         if default_start_times is None:
             default_start_times = [0.0] * num_videos
 
-        results = streaming_evaluate_conversations(
+        results, buffer_data = streaming_evaluate_conversations(
             model,
             tokenizer,
             dataset,
@@ -3808,6 +3837,10 @@ def main():
         
         if ppl_video_data:
             create_ppl_over_time_visualization(ppl_video_data, data_source=data_source)
+        
+        # Create aggregated metrics visualization
+        print(f"\n📊 Creating aggregated metrics visualization...")
+        create_aggregated_metrics_visualization(results, buffer_data=buffer_data, data_source=data_source)
         
         # Create time per token analysis (skipped for speed)
         # print(f"\n📊 Creating time per token analysis...")
@@ -5050,6 +5083,210 @@ def calculate_basic_content_metrics(generated_turns, conversation):
         'lm_ppl': lm_ppl,
         'fluency': fluency
     }
+
+def create_aggregated_metrics_visualization(results, buffer_data=None, output_dir="timing_plots", data_source="goalstep"):
+    """Create aggregated metrics visualization with 4 vertical bar plots in scientific style."""
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Extract data from all conversations
+    vlm_ppls = []
+    gt_ppls = []
+    reading_rebuffering_times = []
+    listening_rebuffering_times = []
+    fluencies = []
+    response_latencies = []
+    
+    # Process each conversation result
+    for result in results:
+        # 1. VLM Perplexity data
+        if 'ppl_data' in result and 'gt_ppls_vlm_prefix_visual' in result['ppl_data']:
+            vlm_ppls.extend(result['ppl_data']['gt_ppls_vlm_prefix_visual'])
+        
+        # 2. GT Perplexity data (for reference line)
+        if 'ppl_data' in result and 'gt_ppls_gt_prefix_visual' in result['ppl_data']:
+            gt_ppls.extend(result['ppl_data']['gt_ppls_gt_prefix_visual'])
+        
+        # 3. Fluency data
+        if 'fluency' in result:
+            fluencies.append(result['fluency'])
+        
+        # 4. Response latency data (calculated in aggregate metrics)
+        if 'generated_turns' in result and len(result['generated_turns']) > 0:
+            # Calculate per-response latency for this conversation
+            visual_time = result.get('visual_embedding_time', 0)
+            model_time = result.get('model_forward_time', 0)
+            generation_time = result.get('generation_time', 0)
+            num_frames = result.get('num_frames', 1)
+            num_responses = len(result['generated_turns'])
+            
+            if num_frames > 0 and num_responses > 0:
+                visual_per_frame = visual_time / num_frames
+                model_per_frame = model_time / num_frames
+                generation_per_response = generation_time / num_responses
+                response_latency = visual_per_frame + model_per_frame + generation_per_response
+                response_latencies.append(response_latency)
+        
+        # 5. Rebuffering time data - will be extracted from buffer_data after processing all results
+    
+    # Extract rebuffering data from buffer_data (same as text_buffer_evolution)
+    if buffer_data:
+        for cid, conversation_buffer in buffer_data.items():
+            reading_traj = conversation_buffer.get('reading', {})
+            listening_traj = conversation_buffer.get('listening', {})
+            
+            if 'rebuffer_values' in reading_traj and reading_traj['rebuffer_values']:
+                final_reading_rebuffer = reading_traj['rebuffer_values'][-1]
+                reading_rebuffering_times.append(final_reading_rebuffer)
+            
+            if 'rebuffer_values' in listening_traj and listening_traj['rebuffer_values']:
+                final_listening_rebuffer = listening_traj['rebuffer_values'][-1]
+                listening_rebuffering_times.append(final_listening_rebuffer)
+    
+    # Calculate aggregate statistics
+    vlm_ppl_mean = np.mean(vlm_ppls) if vlm_ppls else 0.0
+    vlm_ppl_std = np.std(vlm_ppls) if vlm_ppls else 0.0
+    gt_ppl_mean = np.mean(gt_ppls) if gt_ppls else 0.0
+    
+    reading_rebuffer_mean = np.mean(reading_rebuffering_times) if reading_rebuffering_times else 0.0
+    reading_rebuffer_std = np.std(reading_rebuffering_times) if reading_rebuffering_times else 0.0
+    listening_rebuffer_mean = np.mean(listening_rebuffering_times) if listening_rebuffering_times else 0.0
+    listening_rebuffer_std = np.std(listening_rebuffering_times) if listening_rebuffering_times else 0.0
+    
+    fluency_mean = np.mean(fluencies) if fluencies else 0.0
+    fluency_std = np.std(fluencies) if fluencies else 0.0
+    
+    latency_mean = np.mean(response_latencies) if response_latencies else 0.0
+    latency_std = np.std(response_latencies) if response_latencies else 0.0
+    
+    # Set scientific style
+    plt.style.use('default')
+    plt.rcParams.update({
+        'font.size': 10,
+        'axes.labelsize': 11,
+        'axes.titlesize': 12,
+        'xtick.labelsize': 9,
+        'ytick.labelsize': 9,
+        'legend.fontsize': 9,
+        'figure.titlesize': 14,
+        'axes.linewidth': 0.8,
+        'grid.alpha': 0.3,
+        'grid.linewidth': 0.5
+    })
+    
+    # Create figure with 4 vertical subplots in compact layout
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    fig.suptitle(f'Aggregated Performance Metrics - {data_source.title()}', fontsize=14, fontweight='bold', y=0.95)
+    
+    # Define colors and positions
+    colors = ['#2E86AB', '#A23B72', '#F18F01', '#C73E1D']
+    x_pos = [0, 1, 2, 3]
+    labels = ['VLM PPL', 'Rebuffering', 'Fluency', 'Latency']
+    
+    # 1. VLM Perplexity with GT reference (top-left)
+    ax1 = axes[0, 0]
+    bars1 = ax1.bar([0], [vlm_ppl_mean], yerr=[vlm_ppl_std], 
+                    color=colors[0], alpha=0.8, capsize=4, width=0.4, 
+                    edgecolor='black', linewidth=0.5)
+    ax1.axhline(gt_ppl_mean, color='red', linestyle='--', linewidth=1.5, 
+                label=f'GT: {gt_ppl_mean:.2f}')
+    ax1.set_ylabel('Perplexity')
+    ax1.set_title('(a) VLM Perplexity', fontweight='bold')
+    ax1.set_xticks([0])
+    ax1.set_xticklabels(['VLM'])
+    ax1.legend(loc='upper right', frameon=True, fancybox=False, shadow=False)
+    ax1.grid(True, alpha=0.3, axis='y')
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    
+    # Add value labels
+    ax1.text(0, vlm_ppl_mean + vlm_ppl_std + 0.2, f'{vlm_ppl_mean:.2f}±{vlm_ppl_std:.2f}', 
+             ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
+    # 2. Rebuffering Time - Reading vs Listening (top-right)
+    ax2 = axes[0, 1]
+    x_pos_rebuffer = [0, 1]
+    rebuffer_means = [reading_rebuffer_mean, listening_rebuffer_mean]
+    rebuffer_stds = [reading_rebuffer_std, listening_rebuffer_std]
+    rebuffer_labels = ['Reading', 'Listening']
+    rebuffer_colors = ['#2E86AB', '#A23B72']
+    
+    bars2 = ax2.bar(x_pos_rebuffer, rebuffer_means, yerr=rebuffer_stds,
+                    color=rebuffer_colors, alpha=0.8, capsize=4, width=0.4,
+                    edgecolor='black', linewidth=0.5)
+    ax2.set_ylabel('Time (s)')
+    ax2.set_title('(b) Cumulative Rebuffering', fontweight='bold')
+    ax2.set_xticks(x_pos_rebuffer)
+    ax2.set_xticklabels(rebuffer_labels)
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    
+    # Add value labels
+    for i, (mean, std) in enumerate(zip(rebuffer_means, rebuffer_stds)):
+        ax2.text(i, mean + std + 0.1, f'{mean:.2f}±{std:.2f}', 
+                 ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
+    # 3. Fluency (bottom-left)
+    ax3 = axes[1, 0]
+    bars3 = ax3.bar([0], [fluency_mean], yerr=[fluency_std],
+                    color=colors[2], alpha=0.8, capsize=4, width=0.4,
+                    edgecolor='black', linewidth=0.5)
+    ax3.set_ylabel('Score')
+    ax3.set_title('(c) Fluency', fontweight='bold')
+    ax3.set_ylim(0, 1.0)
+    ax3.set_xticks([0])
+    ax3.set_xticklabels(['Fluency'])
+    ax3.grid(True, alpha=0.3, axis='y')
+    ax3.spines['top'].set_visible(False)
+    ax3.spines['right'].set_visible(False)
+    
+    # Add value labels
+    ax3.text(0, fluency_mean + fluency_std + 0.02, f'{fluency_mean:.3f}±{fluency_std:.3f}', 
+             ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
+    # 4. Response Latency (bottom-right)
+    ax4 = axes[1, 1]
+    bars4 = ax4.bar([0], [latency_mean], yerr=[latency_std],
+                    color=colors[3], alpha=0.8, capsize=4, width=0.4,
+                    edgecolor='black', linewidth=0.5)
+    ax4.set_ylabel('Time (s)')
+    ax4.set_title('(d) Response Latency', fontweight='bold')
+    ax4.set_xticks([0])
+    ax4.set_xticklabels(['Latency'])
+    ax4.grid(True, alpha=0.3, axis='y')
+    ax4.spines['top'].set_visible(False)
+    ax4.spines['right'].set_visible(False)
+    
+    # Add value labels
+    ax4.text(0, latency_mean + latency_std + 0.02, f'{latency_mean:.3f}±{latency_std:.3f}', 
+             ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
+    # Add compact summary statistics
+    summary_text = f"""N={len(results)} conversations
+VLM PPL: {vlm_ppl_mean:.2f}±{vlm_ppl_std:.2f} (GT: {gt_ppl_mean:.2f})
+Reading Rebuffering: {reading_rebuffer_mean:.2f}±{reading_rebuffer_std:.2f}s
+Listening Rebuffering: {listening_rebuffer_mean:.2f}±{listening_rebuffer_std:.2f}s
+Fluency: {fluency_mean:.3f}±{fluency_std:.3f}
+Latency: {latency_mean:.3f}±{latency_std:.3f}s"""
+    
+    fig.text(0.02, 0.02, summary_text, fontsize=8, fontfamily='monospace',
+             bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9, edgecolor='gray'))
+    
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.9, bottom=0.15)
+    
+    # Save the plot
+    output_path = os.path.join(output_dir, f'aggregated_metrics_{data_source}.png')
+    plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight', facecolor='white')
+    plt.close()
+    
+    print(f"📊 Aggregated metrics visualization saved to: {output_path}")
+    print(f"   • VLM PPL: {vlm_ppl_mean:.3f} ± {vlm_ppl_std:.3f} (GT: {gt_ppl_mean:.3f})")
+    print(f"   • Reading Rebuffering: {reading_rebuffer_mean:.3f} ± {reading_rebuffer_std:.3f}s (from {len(reading_rebuffering_times)} conversations)")
+    print(f"   • Listening Rebuffering: {listening_rebuffer_mean:.3f} ± {listening_rebuffer_std:.3f}s (from {len(listening_rebuffering_times)} conversations)")
+    print(f"   • Fluency: {fluency_mean:.3f} ± {fluency_std:.3f}")
+    print(f"   • Latency: {latency_mean:.3f} ± {latency_std:.3f}s")
 
 if __name__ == "__main__":
     main()
