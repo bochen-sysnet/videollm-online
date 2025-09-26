@@ -62,7 +62,7 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 50            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 5            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
@@ -896,7 +896,8 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         segments_by_cid[cid].append(segment)
 
     # Create chunk events from response events directly (more reliable for narration)
-    chunk_events = []
+    # Group chunk events by conversation ID for proper isolation
+    chunk_events_by_conversation = {}
     
     # For narration datasets, use response events directly instead of segments
     # This is more reliable because segments may not have proper generation_duration
@@ -904,19 +905,21 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         summary = summary_lookup.get(cid)
         if summary:
             response_events = _extract_response_events(summary.get('events', []), 0.0)
+            conversation_chunks = []
             
             for resp_time, words in response_events:
                 if words > 0:  # Only include responses that generate text
-                    chunk_events.append((resp_time, float(words)))
+                    conversation_chunks.append((resp_time, float(words)))
+            
+            chunk_events_by_conversation[cid] = conversation_chunks
     
     # Fallback: if no response events found, try segments
-    if not chunk_events:
+    if not any(chunk_events_by_conversation.values()):
         print("📊 No response events found, falling back to segments")
         for i, segment in enumerate(all_segments):
             cid = segment.get('conversation_id')
             segment_end = float(segment.get('end', segment.get('start', 0.0)))
             generation_duration = segment.get('generation_duration', 0.0)
-            
             
             if generation_duration > 0.0:
                 # This chunk produced text, find corresponding response event
@@ -936,21 +939,30 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                                 best_match = words
                         
                         if best_match is not None and min_time_diff < 1.0:  # Within 1 second
-                            chunk_events.append((segment_end, float(best_match)))
+                            if cid not in chunk_events_by_conversation:
+                                chunk_events_by_conversation[cid] = []
+                            chunk_events_by_conversation[cid].append((segment_end, float(best_match)))
                         else:
                             # Fallback: use average word count if no good match
                             avg_words = sum(words for _, words in response_events) / len(response_events)
-                            chunk_events.append((segment_end, float(avg_words)))
+                            if cid not in chunk_events_by_conversation:
+                                chunk_events_by_conversation[cid] = []
+                            chunk_events_by_conversation[cid].append((segment_end, float(avg_words)))
                     else:
-                        chunk_events.append((segment_end, 0.0))
+                        if cid not in chunk_events_by_conversation:
+                            chunk_events_by_conversation[cid] = []
+                        chunk_events_by_conversation[cid].append((segment_end, 0.0))
                 else:
-                    chunk_events.append((segment_end, 0.0))
+                    if cid not in chunk_events_by_conversation:
+                        chunk_events_by_conversation[cid] = []
+                    chunk_events_by_conversation[cid].append((segment_end, 0.0))
             # Skip segments that don't generate text - they are not chunks
 
-    print(f"📊 Created {len(chunk_events)} chunk events for buffer simulation")
-    if chunk_events:
-        total_words = sum(words for _, words in chunk_events)
-        avg_words_per_chunk = total_words / len(chunk_events)
+    total_chunk_events = sum(len(events) for events in chunk_events_by_conversation.values())
+    print(f"📊 Created {total_chunk_events} chunk events across {len(chunk_events_by_conversation)} conversations for buffer simulation")
+    if total_chunk_events > 0:
+        total_words = sum(sum(words for _, words in events) for events in chunk_events_by_conversation.values())
+        avg_words_per_chunk = total_words / total_chunk_events
         print(f"📊 Total words: {total_words}, Avg words per chunk: {avg_words_per_chunk:.1f}")
 
     # Now create buffer trajectories for each conversation
@@ -963,8 +975,8 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         start_time = float(summary.get('start', segments[0].get('start', 0.0)))
         end_time = float(max(seg.get('end', seg.get('start', start_time)) for seg in segments))
 
-        # Use all chunk events for this conversation (they're already filtered by conversation)
-        conversation_chunk_events = chunk_events
+        # Use only chunk events for this specific conversation
+        conversation_chunk_events = chunk_events_by_conversation.get(cid, [])
 
         prompt_times = sorted(
             float(event.get('time', start_time))
