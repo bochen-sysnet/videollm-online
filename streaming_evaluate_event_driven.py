@@ -7,6 +7,7 @@ This creates a custom evaluation loop that mimics the demo inference approach.
 import torch
 import json
 import os
+import re
 import time
 import subprocess
 import warnings
@@ -62,13 +63,13 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 5            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 2             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     DEFAULT_THRESHOLD_RANGE = (0.5, 0.99) # Default threshold range for sweep
     DEFAULT_NUM_THRESHOLDS = 2           # Default number of thresholds for sweep
     DEBUG_THRESHOLDS = [0.8, 0.9]         # Coarse-grained thresholds
@@ -691,7 +692,8 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                 continue
             if 'Assistant:' in text:
                 text = text.split('Assistant:', 1)[-1]
-            tokens = [token for token in text.strip().split() if token]
+            # tokens = [token for token in text.strip().split() if token]
+            tokens = re.findall(r"\b\w+\b", text)
             word_count = float(len(tokens))
             if word_count <= 0.0:
                 continue
@@ -916,6 +918,7 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
     # Fallback: if no response events found, try segments
     if not any(chunk_events_by_conversation.values()):
         print("📊 No response events found, falling back to segments")
+        exit(1)
         for i, segment in enumerate(all_segments):
             cid = segment.get('conversation_id')
             segment_end = float(segment.get('end', segment.get('start', 0.0)))
@@ -960,6 +963,7 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
 
     total_chunk_events = sum(len(events) for events in chunk_events_by_conversation.values())
     print(f"📊 Created {total_chunk_events} chunk events across {len(chunk_events_by_conversation)} conversations for buffer simulation")
+    # print(chunk_events_by_conversation)
     if total_chunk_events > 0:
         total_words = sum(sum(words for _, words in events) for events in chunk_events_by_conversation.values())
         avg_words_per_chunk = total_words / total_chunk_events
@@ -1375,7 +1379,6 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
     output_path = os.path.join(output_dir, f'processor_timeline_{data_source}.png')
     plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
     print(f"📊 Processor timeline saved to: {output_path}")
-    plt.show()
 
     buffer_output_path = None
     if buffer_data:
@@ -2429,13 +2432,15 @@ class EventDrivenConversationContext:
         self.prompts_processed += 1
 
     def schedule_generation_event(self, event_queue, event_time, sequence_counter):
+        # print("schedule_generation_event", self.generation_event_pending, event_time, sequence_counter)
         if self.generation_event_pending:
             return sequence_counter
         heapq.heappush(event_queue, (event_time, 1, sequence_counter, ('generation', self.conversation_id, None)))
         self.generation_event_pending = True
         return sequence_counter + 1
 
-    def handle_frame(self, liveinfer, relative_time, frame_idx):
+    def handle_frame(self, liveinfer, relative_time, frame_idx, start_time):
+        # print("handle_frame", frame_idx, "conversation_id", self.conversation_id)
         if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
             current_memory = get_gpu_memory()
             if self.initial_memory is None:
@@ -2467,83 +2472,90 @@ class EventDrivenConversationContext:
         generation_time = 0.0
         frame_compute_time = 0.0
         global_time = self.conversation_start_time + relative_time
-        try:
-            liveinfer.input_video_stream(relative_time)
+        
+        liveinfer.input_video_stream(relative_time)
+        self.event_log.append({
+            'time': global_time,
+            'type': 'frame',
+            'detail': {'frame_idx': frame_idx},
+            'conversation_id': self.conversation_id
+        })
+        liveinfer.texts_generated_previous = ""
+        query, response = liveinfer()
+
+        frame_processing_time = time.time() - frame_start_time
+        timing_data = liveinfer.get_timing_data()
+
+        kv_cache_mb = timing_data.get('kv_cache_mb', 0.0)
+        kv_offload_time = timing_data.get('kv_offload_time', 0.0)
+        kv_reload_time = timing_data.get('kv_reload_time', 0.0)
+        self.memory_data['kv_transfer_size'].append(kv_cache_mb)
+        self.memory_data['kv_offload_time'].append(kv_offload_time)
+        self.memory_data['kv_reload_time'].append(kv_reload_time)
+
+        visual_embedding_time = timing_data.get('visual_embedding_time', 0.0)
+        streaming_time = timing_data.get('streaming_time', 0.0)
+        chunk_generation_time = timing_data.get('generation_chunk_time', timing_data.get('generation_time', 0.0))
+        kv_reload_time = timing_data.get('kv_reload_time', 0.0)
+        kv_offload_time = timing_data.get('kv_offload_time', 0.0)
+        decode_time = timing_data.get('decode_time', 0.0)
+        frame_compute_time = max(
+            0.0,
+            (visual_embedding_time or 0.0)
+            + (streaming_time or 0.0)
+            + (kv_reload_time or 0.0)
+            + (kv_offload_time or 0.0)
+        )
+        # print("streaming_time", streaming_time, "chunk_generation_time", chunk_generation_time, \
+        # "visual_embedding_time", visual_embedding_time, "frame_processing_time", frame_processing_time, "frame_compute_time", frame_compute_time,\
+        # "kv_reload_time", kv_reload_time, "kv_offload_time", kv_offload_time, "decode_time", decode_time)
+        assert frame_compute_time > 0.0, f"frame_compute_time: {frame_compute_time}, frame_processing_time: {frame_processing_time}, chunk_generation_time: {chunk_generation_time}, visual_embedding_time: {visual_embedding_time}, streaming_time: {streaming_time}, kv_reload_time: {kv_reload_time}, kv_offload_time: {kv_offload_time}"
+        if frame_compute_time <= 0.0 and frame_processing_time > 0.0:
+            frame_compute_time = max(0.0, frame_processing_time - chunk_generation_time)
+
+        self.total_visual_embedding_time += visual_embedding_time
+        self.total_model_forward_time += streaming_time
+
+        self.frame_processing_times.append(frame_processing_time)
+
+        self.frame_timing_data.append({
+            'frame_idx': frame_idx,
+            'video_time': relative_time,
+            'visual_embedding_time': visual_embedding_time,
+            'model_forward_time': streaming_time,
+            'compute_time': frame_compute_time,
+            'generation_time': 0.0,
+            'total_processing_time': frame_processing_time
+        })
+
+        texts_generated_previous = liveinfer.texts_generated_previous
+        
+        if response:
+            self.generated_turns.append({
+                'time': relative_time,
+                'text': response,
+                'user_prompt': query or "Frame processing",
+                'generation_time': frame_processing_time
+            })
+
+        if frame_processing_time > 0:
+            self.total_generation_time += frame_processing_time
             self.event_log.append({
-                'time': global_time,
-                'type': 'frame',
-                'detail': {'frame_idx': frame_idx},
+                'time': start_time + frame_processing_time,
+                'type': 'response',
+                'detail': {'text': texts_generated_previous, 'frame_idx': frame_idx},
                 'conversation_id': self.conversation_id
             })
-            query, response = liveinfer()
+            self.frame_timing_data[-1]['generation_time'] = chunk_generation_time
 
-            frame_processing_time = time.time() - frame_start_time
-            timing_data = liveinfer.get_timing_data()
-
-            kv_cache_mb = timing_data.get('kv_cache_mb', 0.0)
-            kv_offload_time = timing_data.get('kv_offload_time', 0.0)
-            kv_reload_time = timing_data.get('kv_reload_time', 0.0)
-            self.memory_data['kv_transfer_size'].append(kv_cache_mb)
-            self.memory_data['kv_offload_time'].append(kv_offload_time)
-            self.memory_data['kv_reload_time'].append(kv_reload_time)
-
-            visual_embedding_time = timing_data.get('visual_embedding_time', 0.0)
-            streaming_time = timing_data.get('streaming_time', 0.0)
-            chunk_generation_time = timing_data.get('generation_chunk_time', timing_data.get('generation_time', 0.0))
-            kv_reload_time = timing_data.get('kv_reload_time', 0.0)
-            kv_offload_time = timing_data.get('kv_offload_time', 0.0)
-            frame_compute_time = max(
-                0.0,
-                (visual_embedding_time or 0.0)
-                + (streaming_time or 0.0)
-                + (kv_reload_time or 0.0)
-                + (kv_offload_time or 0.0)
-            )
-            if frame_compute_time <= 0.0 and frame_processing_time > 0.0:
-                frame_compute_time = max(0.0, frame_processing_time - chunk_generation_time)
-
-            self.total_visual_embedding_time += visual_embedding_time
-            self.total_model_forward_time += streaming_time
-
-            self.frame_processing_times.append(frame_processing_time)
-
-            self.frame_timing_data.append({
-                'frame_idx': frame_idx,
-                'video_time': relative_time,
-                'visual_embedding_time': visual_embedding_time,
-                'model_forward_time': streaming_time,
-                'compute_time': frame_compute_time,
-                'generation_time': 0.0,
-                'total_processing_time': frame_processing_time
-            })
-
+            if query:
+                print(f"[t={self.conversation_start_time + relative_time:.2f}s] Query: {query}")
+            if texts_generated_previous:
+                print(f"[t={self.conversation_start_time + relative_time:.2f}s] Chunk: {texts_generated_previous}")
             if response:
-                self.generated_turns.append({
-                    'time': relative_time,
-                    'text': response,
-                    'user_prompt': query or "Frame processing",
-                    'generation_time': chunk_generation_time
-                })
-                self.total_generation_time += chunk_generation_time
-                self.event_log.append({
-                    'time': global_time + chunk_generation_time,
-                    'type': 'response',
-                    'detail': {'text': response, 'frame_idx': frame_idx},
-                    'conversation_id': self.conversation_id
-                })
-                self.frame_timing_data[-1]['generation_time'] = chunk_generation_time
-
-            if query or response:
-                print(f"[t={self.conversation_start_time + relative_time:.2f}s | local {relative_time:.2f}s] Query: {query}")
-                print(f"[t={self.conversation_start_time + relative_time:.2f}s | local {relative_time:.2f}s] Response: {response}")
-                if generation_time > 0:
-                    print(f"  └─ Generation time: {generation_time:.3f}s")
-
-        except Exception as e:
-            print(f"❌ Error processing frame {frame_idx} at global {self.conversation_start_time + relative_time:.2f}s (local {relative_time:.2f}s): {e}")
-            traceback.print_exc()
-            frame_processing_time = time.time() - frame_start_time
-            self.frame_processing_times.append(frame_processing_time)
+                print(f"[t={self.conversation_start_time + relative_time:.2f}s] Response: {response}")
+            print(f"  └─ Generation time: {frame_processing_time:.3f}s")
+            print(f"  └─ start_time: {start_time:.3f}")
 
         self.frames_processed += 1
         return {
@@ -2552,10 +2564,12 @@ class EventDrivenConversationContext:
             'generation_time': generation_time
         }
 
-    def handle_generation(self, liveinfer):
+    def handle_generation(self, liveinfer, relative_time, start_time):
         chunk_start = time.time()
+        liveinfer.texts_generated_previous = ""
         query, response = liveinfer()
-        chunk_duration = liveinfer.timing_data.get('generation_chunk_time', time.time() - chunk_start)
+        # query, response = None, None
+        chunk_duration = time.time() - chunk_start
 
         # Reset pending flag so the scheduler can decide whether to queue another chunk
         self.generation_event_pending = False
@@ -2564,6 +2578,14 @@ class EventDrivenConversationContext:
         self.total_generation_time += chunk_duration
 
         video_time = liveinfer.timing_data.get('generation_video_time', 0.0)
+        kv_reload_time = liveinfer.timing_data.get('kv_reload_time', 0.0)
+        kv_offload_time = liveinfer.timing_data.get('kv_offload_time', 0.0)
+        decode_time = liveinfer.timing_data.get('decode_time', 0.0)
+        chunk_generation_time = liveinfer.timing_data.get('generation_chunk_time', 0.0)
+        # print("handle_generation", self.conversation_start_time, video_time, kv_offload_time, decode_time, chunk_generation_time, kv_reload_time, chunk_duration)
+        
+        texts_generated_previous = liveinfer.texts_generated_previous
+
         if response:
             generation_total = liveinfer.timing_data.get('generation_time', chunk_duration)
             self.generated_turns.append({
@@ -2572,13 +2594,22 @@ class EventDrivenConversationContext:
                 'user_prompt': query or "Frame processing",
                 'generation_time': generation_total
             })
+        if chunk_duration > 0:
             self.event_log.append({
-                'time': self.conversation_start_time + video_time + generation_total,
+                'time': chunk_duration + start_time,
                 'type': 'response',
-                'detail': {'text': response, 'frame_idx': None},
+                'detail': {'text': texts_generated_previous, 'frame_idx': None},
                 'conversation_id': self.conversation_id
             })
-
+            
+            if query:
+                print(f"[t={video_time:.2f}s] Query: {query}")
+            if texts_generated_previous:
+                print(f"[t={video_time:.2f}s] Chunk: {texts_generated_previous}")
+            if response:
+                print(f"[t={video_time:.2f}s] Response: {response}")
+            print(f"  └─ Generation time: {chunk_duration:.3f}s")
+            print(f"  └─ start_time: {start_time:.3f}")
         return {
             'frame_compute_time': 0.0,
             'frame_processing_time': 0.0,
@@ -2694,6 +2725,10 @@ class EventDrivenConversationContext:
             'start': self.conversation_start_time,
             'events': self.event_log
         }
+        # print("Event log:")
+        # for event in self.event_log:
+        #     if event.get('type') == 'response':
+        #         print(event)
         
         # Create processor segments for this conversation
         processor_segments = []
@@ -2896,13 +2931,15 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             active_conversation_id = conversation_id
 
         relative_time = max(0.0, event_time - context.conversation_start_time)
+        print("--------EVENT", event_type, relative_time, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id[:12], "--------")
 
         if event_type == 'prompt':
             if event_time > processor_clock:
                 idle_segments.append({'start': processor_clock, 'end': event_time})
                 processor_clock = event_time
             context.handle_prompt(shared_liveinfer, relative_time, payload_data)
-            sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
+            # sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
+            # context.generation_event_pending = False
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
             continue
@@ -2911,16 +2948,18 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             if shared_liveinfer.generation_state is not None or getattr(shared_liveinfer, 'generation_event_pending', False):
                 context.pending_frame_events.append((event_time, priority, payload_data))
                 continue
-            segment_info = context.handle_frame(shared_liveinfer, relative_time, payload_data)
+            start_time = max(processor_clock, event_time)
+            segment_info = context.handle_frame(shared_liveinfer, relative_time, payload_data, start_time)
+            
+            assert segment_info.get('frame_compute_time', 0.0) > 0.0, f"frame_compute_time: {segment_info.get('frame_compute_time', 0.0)}, frame_processing_time: {segment_info.get('frame_processing_time', 0.0)}"
             frame_duration = segment_info.get('frame_compute_time', segment_info.get('frame_processing_time', 0.0))
             generation_duration = segment_info.get('generation_time', 0.0)
             segment_label = context.conversation_id[:12]
             frame_idx = payload_data
-
-            start_time = max(processor_clock, event_time)
             if start_time > processor_clock:
                 idle_segments.append({'start': processor_clock, 'end': start_time})
-            total_duration = max(0.0, frame_duration) + max(0.0, generation_duration)
+            # total_duration = max(0.0, frame_duration) + max(0.0, generation_duration)
+            total_duration = segment_info.get('frame_processing_time', 0.0)
             if total_duration > 0.0:
                 segment_end = start_time + total_duration
                 processor_segments.append({
@@ -2929,23 +2968,25 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     'end': segment_end,
                     'type': 'frame',
                     'frame_idx': frame_idx,
-                    'frame_duration': max(0.0, frame_duration),
-                    'generation_duration': max(0.0, generation_duration)
+                    'frame_duration': max(0.0, total_duration),
+                    'generation_duration': max(0.0, total_duration)
                 })
-                # print(f"🔍 DEBUG: Created processor segment for {segment_label}: end={segment_end:.2f}s, frame_duration={frame_duration:.3f}s, generation_duration={generation_duration:.3f}s")
+                print(f"🔍 DEBUG: Created processor segment for {segment_label}: start={start_time:.2f}s, end={segment_end:.2f}s")
             processor_clock = start_time + total_duration
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
+
+            # print("----END----EVENT", event_type, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id, "--------")
             continue
 
         if event_type == 'generation':
             start_time = max(processor_clock, event_time)
             if start_time > processor_clock:
                 idle_segments.append({'start': processor_clock, 'end': start_time})
-            segment_info = context.handle_generation(shared_liveinfer)
+            segment_info = context.handle_generation(shared_liveinfer, relative_time, start_time)
             generation_duration = segment_info.get('generation_time', 0.0)
             segment_label = context.conversation_id[:12]
 
@@ -2957,10 +2998,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     'end': segment_end,
                     'type': 'generation',
                     'frame_idx': None,
-                    'frame_duration': 0.0,
+                    'frame_duration': generation_duration,
                     'generation_duration': generation_duration
                 })
-                # print(f"🔍 DEBUG: Created generation segment for {segment_label}: end={segment_end:.2f}s, generation_duration={generation_duration:.3f}s")
+                print(f"🔍 DEBUG: Created generation segment for {segment_label}: start={start_time:.2f}s, end={segment_end:.2f}s")
             processor_clock = start_time + max(0.0, generation_duration)
 
             if shared_liveinfer.generation_state is not None:
@@ -2970,8 +3011,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     pending_time, pending_priority, pending_payload = context.pending_frame_events.popleft()
                     heapq.heappush(event_queue, (max(processor_clock, pending_time), pending_priority, sequence_counter, ('frame', conversation_id, pending_payload)))
                     sequence_counter += 1
+                    print("??? pending_frame_events", processor_clock, pending_time)
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
+            # print("----END----EVENT", event_type, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id, "--------")
             continue
 
         if event_type == 'finalize':
@@ -3338,6 +3381,8 @@ class SimpleLiveInfer:
         # Store timing data
         self.timing_data['visual_embedding_time'] = visual_embedding_time
         self.timing_data['input_video_stream_time'] = time.time() - start_time
+
+        # print("input_video_stream", len(self.frame_embeds_queue), video_time, frame_idx, self.last_frame_idx)
     
     def load_video(self, video_path):
         # Store video path for on-demand loading instead of loading entire video
@@ -3375,12 +3420,15 @@ class SimpleLiveInfer:
         if response_tokens is None:
             return (state['formatted_query'] if state['chunk_invocations'] == 1 else None), None
 
+        decode_start = time.time()
         decoded_response = self.tokenizer.decode(
             response_tokens[0],
             skip_special_tokens=True,
             clean_up_tokenization_spaces=True,
         )
         response_text = f"(Video Time = {state['video_time']}s) Assistant:{decoded_response}"
+        decode_time = time.time() - decode_start
+        self.timing_data['decode_time'] = decode_time
 
         final_query = state['formatted_query']
         self.generation_state = None
@@ -3454,12 +3502,12 @@ class SimpleLiveInfer:
             self.last_ids = self._added_stream_generation_ids
 
         # Debug context snapshot (optional insights)
-        context_info = self._get_context_info()
-        print(f"📊 CONTEXT FOR GENERATION (Time: {video_time}s):")
-        print(f"   • Streamed frames processed: {context_info['num_frames']}", end=", ")
-        print(f"User prompts in history: {context_info['num_prompts']}", end=", ")
-        print(f"Previous responses: {context_info['num_responses']}", end=", ")
-        print(f"Total tokens in past_key_values: {context_info['total_tokens']}")
+        # context_info = self._get_context_info()
+        # print(f"📊 CONTEXT FOR GENERATION (Time: {video_time}s):")
+        # print(f"   • Streamed frames processed: {context_info['num_frames']}", end=", ")
+        # print(f"User prompts in history: {context_info['num_prompts']}", end=", ")
+        # print(f"Previous responses: {context_info['num_responses']}", end=", ")
+        # print(f"Total tokens in past_key_values: {context_info['total_tokens']}")
 
         inputs_embeds = self.model.get_input_embeddings()(self.last_ids)
         next_inputs_cpu = inputs_embeds.detach().cpu()
@@ -3504,6 +3552,12 @@ class SimpleLiveInfer:
             state['tokens'].append(output_ids.detach().cpu())
             state['tokens_generated'] += output_ids.size(1)
             self.last_ids = output_ids[:, -1:].to(self.device)
+            # decode partial response
+            self.texts_generated_previous = self.tokenizer.decode(
+                output_ids[0],
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True,
+            )
 
         if next_inputs_embeds is not None:
             state['next_inputs_embeds_cpu'] = next_inputs_embeds.detach().cpu()
@@ -3594,6 +3648,7 @@ class SimpleLiveInfer:
             or self.generation_state is not None
             or video_time is not None
         )
+        
         if needs_generation:
             target_time = video_time if video_time is not None else (
                 self.generation_state['video_time'] if self.generation_state else video_time
@@ -4888,52 +4943,45 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversatio
     print(f"📊 Calculating dual PPL (visual context) for {len(ground_truth_responses)} ground truth responses...")
     
     for i, gt_response in enumerate(ground_truth_responses):
-        try:
-            gt_content = gt_response['content']
-            gt_time = gt_response['time']
+        
+        gt_content = gt_response['content']
+        gt_time = gt_response['time']
+        
+        # Find the user prompt that this ground truth response was answering
+        user_prompt = "Please help with the video analysis."  # Default fallback
+        if normalized_conversation:
+            # Find the most recent user prompt before this response time
+            for conv_turn in reversed(normalized_conversation):
+                if conv_turn['role'] == 'user' and conv_turn['time'] <= gt_time:
+                    user_prompt = conv_turn['content']
+                    break
+        
+        # 1. PPL with GT prefix (golden context) - WITH VISUAL
+        gt_conversation = create_conversation_with_gt_prefix(
+            normalized_conversation, gt_time, user_prompt, gt_content
+        )
+        ppl_gt_prefix_visual = calculate_ppl_for_response(model, tokenizer, gt_conversation, video_tensor, device, data_source, use_visual=True, custom_threshold=None)
+        
+        # 2. PPL with VLM prefix (actual generated responses as context) - WITH VISUAL
+        vlm_conversation = create_conversation_with_vlm_prefix(
+            generated_turns, gt_time, user_prompt, gt_content
+        )
+        ppl_vlm_prefix_visual = calculate_ppl_for_response(model, tokenizer, vlm_conversation, video_tensor, device, data_source, use_visual=True, custom_threshold=None)
+        
+        if ppl_gt_prefix_visual is not None:
+            gt_ppls_gt_prefix_visual.append(ppl_gt_prefix_visual)
+        if ppl_vlm_prefix_visual is not None:
+            gt_ppls_vlm_prefix_visual.append(ppl_vlm_prefix_visual)
             
-            # Find the user prompt that this ground truth response was answering
-            user_prompt = "Please help with the video analysis."  # Default fallback
-            if normalized_conversation:
-                # Find the most recent user prompt before this response time
-                for conv_turn in reversed(normalized_conversation):
-                    if conv_turn['role'] == 'user' and conv_turn['time'] <= gt_time:
-                        user_prompt = conv_turn['content']
-                        break
-            
-            # 1. PPL with GT prefix (golden context) - WITH VISUAL
-            gt_conversation = create_conversation_with_gt_prefix(
-                normalized_conversation, gt_time, user_prompt, gt_content
-            )
-            ppl_gt_prefix_visual = calculate_ppl_for_response(model, tokenizer, gt_conversation, video_tensor, device, data_source, use_visual=True, custom_threshold=None)
-            
-            # 2. PPL with VLM prefix (actual generated responses as context) - WITH VISUAL
-            vlm_conversation = create_conversation_with_vlm_prefix(
-                generated_turns, gt_time, user_prompt, gt_content
-            )
-            ppl_vlm_prefix_visual = calculate_ppl_for_response(model, tokenizer, vlm_conversation, video_tensor, device, data_source, use_visual=True, custom_threshold=None)
-            
-            if ppl_gt_prefix_visual is not None:
-                gt_ppls_gt_prefix_visual.append(ppl_gt_prefix_visual)
-            if ppl_vlm_prefix_visual is not None:
-                gt_ppls_vlm_prefix_visual.append(ppl_vlm_prefix_visual)
-                
-            if i % 10 == 0:  # Progress indicator
-                # print(f"   Processed {i+1}/{len(ground_truth_responses)} GT responses...")
-                # Clean up GPU memory periodically
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            
-            # Clean up memory after each response to prevent OOM
+        if i % 10 == 0:  # Progress indicator
+            # print(f"   Processed {i+1}/{len(ground_truth_responses)} GT responses...")
+            # Clean up GPU memory periodically
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-                
-        except Exception as e:
-            print(f"Error processing GT response {i}: {e}")
-            # Clean up GPU memory on error
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            continue
+        
+        # Clean up memory after each response to prevent OOM
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     # Calculate average PPLs for all four contexts
     if gt_ppls_gt_prefix_visual:
