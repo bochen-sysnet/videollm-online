@@ -63,13 +63,13 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 1200            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
     DEFAULT_THRESHOLD_RANGE = (0.5, 0.99) # Default threshold range for sweep
     DEFAULT_NUM_THRESHOLDS = 2           # Default number of thresholds for sweep
     DEBUG_THRESHOLDS = [0.8, 0.9]         # Coarse-grained thresholds
@@ -96,7 +96,7 @@ class Config:
     EXPECTED_RESPONSE_LENGTH = 20.0
     LENGTH_FACTOR_MIN = 0.5
     LENGTH_FACTOR_MAX = 2.0
-    GENERATION_CHUNK_SIZE = 32
+    GENERATION_CHUNK_SIZE = 3200
 
 class FilteredEgo4DRefinedNarrationStream:
     """Ego4D Refined Narration Stream that only includes videos with features - now processes per-conversation"""
@@ -671,7 +671,7 @@ def calculate_all_rebuffering_times(responses, frame_processing_times, reading_s
     }
 
 
-def simulate_text_buffer_trajectories(processor_segments, conversation_summaries, reading_speed, listening_speed):
+def simulate_text_buffer_trajectories(processor_segments, conversation_summaries, reading_speed, listening_speed, data_source):
     """Simulate text buffers plus cumulative rebuffer metrics per conversation."""
 
     if not processor_segments or not conversation_summaries:
@@ -697,11 +697,11 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
             word_count = float(len(tokens))
             if word_count <= 0.0:
                 continue
-            extracted.append((event_time, word_count))
+            extracted.append((event_time, word_count, event.get('prompt_idx', 0)))
         extracted.sort(key=lambda item: item[0])
         return extracted
 
-    def _simulate(chunk_events, prompt_times, start_time, end_time, speed, conversation_id=None, all_segments=None):
+    def _simulate(chunk_events, prompt_times, start_time, end_time, speed, conversation_id=None, all_segments=None, chunk_to_prompt=None, prompt_to_chunks=None):
         times = [float(start_time)]
         values = [0.0]
         rebuffer_times = [float(start_time)]
@@ -723,37 +723,36 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         # Track pending prompts: each prompt can have multiple chunks
         # We track which prompts are still pending (not all chunks completed)
         pending_prompts = set()  # Set of prompt indices that are still pending
-        prompt_to_chunks = {}    # Map prompt index to list of chunk indices
-        chunk_to_prompt = {}     # Map chunk index to prompt index
+        # prompt_to_chunks = {}    # Map prompt index to list of chunk indices
+        # chunk_to_prompt = {}     # Map chunk index to prompt index
         
         # Initialize prompt-to-chunk mapping
         # We need to map chunks to prompts based on timing
         # A chunk belongs to the most recent prompt that occurred before it
         # Only include chunks that generate text (words > 0)
-        for chunk_idx, (chunk_time, words) in enumerate(chunk_events):
-            if words > 0:  # Only map chunks that generate text
-                # Find the most recent prompt before this chunk
-                prompt_idx = None
-                for p_idx, prompt_time in enumerate(prompt_times):
-                    if prompt_time <= chunk_time:
-                        prompt_idx = p_idx
-                    else:
-                        break
+        # for chunk_idx, (chunk_time, words) in enumerate(chunk_events):
+        #     if words > 0:  # Only map chunks that generate text
+        #         # Find the most recent prompt before this chunk
+        #         prompt_idx = None
+        #         for p_idx, prompt_time in enumerate(prompt_times):
+        #             if prompt_time <= chunk_time:
+        #                 prompt_idx = p_idx
+        #             else:
+        #                 break
                 
-                if prompt_idx is not None:
-                    if prompt_idx not in prompt_to_chunks:
-                        prompt_to_chunks[prompt_idx] = []
-                    prompt_to_chunks[prompt_idx].append(chunk_idx)
-                    chunk_to_prompt[chunk_idx] = prompt_idx
+        #         if prompt_idx is not None:
+        #             if prompt_idx not in prompt_to_chunks:
+        #                 prompt_to_chunks[prompt_idx] = []
+        #             prompt_to_chunks[prompt_idx].append(chunk_idx)
+        #             chunk_to_prompt[chunk_idx] = prompt_idx
         
         # Special handling for narration datasets: if there's only one prompt with many chunks,
         # we should treat each chunk as completing the prompt immediately to avoid infinite pending state
-        is_narration_like = len(prompt_times) == 1 and len(chunk_events) > 10
-        if is_narration_like:
-            # For narration-like datasets, each chunk immediately completes the prompt
-            # This prevents the single prompt from staying pending forever
-            prompt_to_chunks = {0: list(range(len(chunk_events)))}
-            chunk_to_prompt = {i: 0 for i in range(len(chunk_events))}
+        # if data_source == 'narration':
+        #     # For narration-like datasets, each chunk immediately completes the prompt
+        #     # This prevents the single prompt from staying pending forever
+        #     prompt_to_chunks = {0: list(range(len(chunk_events)))}
+        #     chunk_to_prompt = {i: 0 for i in range(len(chunk_events))}
         
         # Track conversation completion status
         conversation_finished = False
@@ -852,7 +851,7 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                         
                         # For narration-like datasets, each chunk immediately completes the prompt
                         # to prevent infinite pending state
-                        if is_narration_like:
+                        if data_source == 'narration':
                             # In narration datasets, each chunk immediately completes the prompt
                             # This prevents the single prompt from staying pending forever
                             pending_prompts.discard(prompt_idx)
@@ -862,11 +861,9 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                             if prompt_chunks and idx == max(prompt_chunks):
                                 # This is the last chunk for this prompt, remove from pending
                                 pending_prompts.discard(prompt_idx)
-            
             # Record buffer and rebuffer values AFTER processing the event (with new words added)
             record(event_time, current_buffer)
             record_rebuffer(event_time)
-
         if end_time is not None and end_time > current_time + 1e-9:
             advance_to(end_time)
 
@@ -900,6 +897,8 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
     # Create chunk events from response events directly (more reliable for narration)
     # Group chunk events by conversation ID for proper isolation
     chunk_events_by_conversation = {}
+    chunk_to_prompt_by_conversation = {}
+    prompt_to_chunks_by_conversation = {}
     
     # For narration datasets, use response events directly instead of segments
     # This is more reliable because segments may not have proper generation_duration
@@ -909,61 +908,29 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
             response_events = _extract_response_events(summary.get('events', []), 0.0)
             conversation_chunks = []
             
-            for resp_time, words in response_events:
-                if words > 0:  # Only include responses that generate text
-                    conversation_chunks.append((resp_time, float(words)))
-            
+            for chunk_idx, (resp_time, words, prompt_idx) in enumerate(response_events):
+                assert words > 0, f"words is {words} for chunk {chunk_idx} of conversation {cid}"
+                conversation_chunks.append((resp_time, float(words)))
+                if cid not in chunk_to_prompt_by_conversation:
+                    chunk_to_prompt_by_conversation[cid] = {}
+                chunk_to_prompt_by_conversation[cid][chunk_idx] = prompt_idx
+                if cid not in prompt_to_chunks_by_conversation:
+                    prompt_to_chunks_by_conversation[cid] = {}
+                if prompt_idx not in prompt_to_chunks_by_conversation[cid]:
+                    prompt_to_chunks_by_conversation[cid][prompt_idx] = []
+                prompt_to_chunks_by_conversation[cid][prompt_idx].append(chunk_idx)
+
             chunk_events_by_conversation[cid] = conversation_chunks
     
     # Fallback: if no response events found, try segments
     if not any(chunk_events_by_conversation.values()):
         print("📊 No response events found, falling back to segments")
         exit(1)
-        for i, segment in enumerate(all_segments):
-            cid = segment.get('conversation_id')
-            segment_end = float(segment.get('end', segment.get('start', 0.0)))
-            generation_duration = segment.get('generation_duration', 0.0)
-            
-            if generation_duration > 0.0:
-                # This chunk produced text, find corresponding response event
-                summary = summary_lookup.get(cid)
-                if summary:
-                    response_events = _extract_response_events(summary.get('events', []), 0.0)
-                    # Find the response event that corresponds to this generation
-                    # Match by time proximity - find the closest response event to this segment end time
-                    if response_events:
-                        # Find the response event closest to this segment's end time
-                        best_match = None
-                        min_time_diff = float('inf')
-                        for resp_time, words in response_events:
-                            time_diff = abs(resp_time - segment_end)
-                            if time_diff < min_time_diff:
-                                min_time_diff = time_diff
-                                best_match = words
-                        
-                        if best_match is not None and min_time_diff < 1.0:  # Within 1 second
-                            if cid not in chunk_events_by_conversation:
-                                chunk_events_by_conversation[cid] = []
-                            chunk_events_by_conversation[cid].append((segment_end, float(best_match)))
-                        else:
-                            # Fallback: use average word count if no good match
-                            avg_words = sum(words for _, words in response_events) / len(response_events)
-                            if cid not in chunk_events_by_conversation:
-                                chunk_events_by_conversation[cid] = []
-                            chunk_events_by_conversation[cid].append((segment_end, float(avg_words)))
-                    else:
-                        if cid not in chunk_events_by_conversation:
-                            chunk_events_by_conversation[cid] = []
-                        chunk_events_by_conversation[cid].append((segment_end, 0.0))
-                else:
-                    if cid not in chunk_events_by_conversation:
-                        chunk_events_by_conversation[cid] = []
-                    chunk_events_by_conversation[cid].append((segment_end, 0.0))
-            # Skip segments that don't generate text - they are not chunks
 
     total_chunk_events = sum(len(events) for events in chunk_events_by_conversation.values())
     print(f"📊 Created {total_chunk_events} chunk events across {len(chunk_events_by_conversation)} conversations for buffer simulation")
-    # print(chunk_events_by_conversation)
+    for cid, events in chunk_events_by_conversation.items():
+        print(f"📊 {cid}: {events}")
     if total_chunk_events > 0:
         total_words = sum(sum(words for _, words in events) for events in chunk_events_by_conversation.values())
         avg_words_per_chunk = total_words / total_chunk_events
@@ -991,8 +958,8 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         if len(prompt_times) > len(conversation_chunk_events):
             prompt_times = prompt_times[:len(conversation_chunk_events)]
 
-        reading_traj = _simulate(conversation_chunk_events, prompt_times, start_time, end_time, reading_speed, cid, all_segments)
-        listening_traj = _simulate(conversation_chunk_events, prompt_times, start_time, end_time, listening_speed, cid, all_segments)
+        reading_traj = _simulate(conversation_chunk_events, prompt_times, start_time, end_time, reading_speed, cid, all_segments, chunk_to_prompt_by_conversation[cid], prompt_to_chunks_by_conversation[cid])
+        listening_traj = _simulate(conversation_chunk_events, prompt_times, start_time, end_time, listening_speed, cid, all_segments, chunk_to_prompt_by_conversation[cid], prompt_to_chunks_by_conversation[cid])
 
         buffer_data[cid] = {
             'reading': reading_traj,
@@ -1113,7 +1080,8 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
         sorted_segments,
         conversation_summaries,
         Config.USER_READING_SPEED_MAX,
-        Config.USER_LISTENING_SPEED_MAX
+        Config.USER_LISTENING_SPEED_MAX,
+        data_source
     )
 
     actual_starts = []
@@ -1142,91 +1110,6 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
             if end_time > last_by_conversation.get(cid, 0.0):
                 last_by_conversation[cid] = end_time
         return [{'conversation_id': cid, 'time': end_time} for cid, end_time in last_by_conversation.items()]
-
-    def extract_call_segments(segments):
-        calls = []
-        for segment in segments or []:
-            calls.append({
-                'conversation_id': segment.get('conversation_id'),
-                'start': segment.get('start', 0.0),
-                'end': segment.get('end', 0.0),
-                'type': segment.get('type', 'frame')
-            })
-        return calls
-
-    def build_offsets(base_offsets):
-        offsets = {}
-        for cid, value in base_offsets.items():
-            if cid in conversation_data:
-                offsets[cid] = max(0.0, value)
-
-        if offsets:
-            cursor = max(
-                offsets[cid] + max(
-                    conversation_data[cid]['completion_time'],
-                    conversation_data[cid]['processing_time'],
-                    conversation_data[cid]['duration']
-                )
-                for cid in offsets
-                if cid in conversation_data
-            )
-        else:
-            cursor = 0.0
-
-        for cid in unique_conversations:
-            if cid not in conversation_data or cid in offsets:
-                continue
-            offsets[cid] = cursor
-            cursor += max(
-                conversation_data[cid]['completion_time'],
-                conversation_data[cid]['processing_time'],
-                conversation_data[cid]['duration']
-            )
-        return offsets
-
-    def simulate_scenario(offsets):
-        events = []
-        prompts = []
-        starts = []
-        ends = []
-        for order, cid in enumerate(unique_conversations):
-            data = conversation_data.get(cid)
-            if not data:
-                continue
-            start_time = offsets.get(cid, data['original_start'])
-            starts.append({'time': start_time, 'conversation_id': cid})
-            ends.append({'time': start_time + data['completion_time'], 'conversation_id': cid})
-            for rel in data['prompts_relative']:
-                prompts.append({'time': start_time + rel, 'conversation_id': cid})
-            for frame in data['frames']:
-                event_time = start_time + frame['relative_time']
-                events.append((event_time, order, frame.get('frame_idx', 0), cid, frame))
-
-        events.sort(key=lambda item: (item[0], item[1], item[2]))
-
-        clock = 0.0
-        segments = []
-        idle = []
-        for event_time, _, _, cid, frame in events:
-            if event_time > clock:
-                idle.append({'start': clock, 'end': event_time})
-                clock = event_time
-
-            frame_duration = max(0.0, frame.get('frame_duration', 0.0))
-            generation_duration = max(0.0, frame.get('generation_duration', 0.0))
-            total_duration = frame_duration + generation_duration
-            if total_duration > 0.0:
-                segments.append({
-                    'conversation_id': cid,
-                    'start': clock,
-                    'end': clock + total_duration,
-                    'type': 'frame',
-                    'frame_duration': frame_duration,
-                    'generation_duration': generation_duration
-                })
-                clock += total_duration
-
-        return segments, idle, prompts, starts, ends
 
     scenario_results = [{
         'title': 'Processor Utilization: Concurrent Conversations',
@@ -1826,19 +1709,18 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
         ax2 = axes[1]
         if conversation_timing['frame_processing_times']:
             frame_count = len(conversation_timing['frame_processing_times'])
-            generation_count = max(1, len(conversation_timing.get('generated_turns', [])))
             
             visual_per_frame = conversation_timing['visual_embedding_time'] / frame_count
             model_per_frame = conversation_timing['model_forward_time'] / frame_count
-            generation_per_response = conversation_timing['generation_time'] / generation_count  # Per response, not per frame
+            generation_per_response = conversation_timing['generation_time'] / frame_count  # Per response, not per frame
             
             components = ['Visual', 'Model', 'Generation']
             per_frame_times = [visual_per_frame, model_per_frame, generation_per_response]
             colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
             
             bars = ax2.bar(components, per_frame_times, color=colors, alpha=0.8)
-            ax2.set_ylabel('Time per Frame/Response (s)')
-            ax2.set_title('Component Efficiency (Visual/Model per Frame, Generation per Response)')
+            ax2.set_ylabel('Time per Frame (s)')
+            ax2.set_title('Component Efficiency')
             ax2.grid(True, alpha=0.3)
             
             # Add value labels with appropriate units
@@ -1880,6 +1762,8 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
                     verticalalignment='top', fontsize=8,
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
         else:
+            print(f"No frame processing times available for conversation {conversation_number}")
+            exit(0)
             # Fallback: create synthetic data from total times if no per-frame data available
             if conversation_timing['frame_processing_times']:
                 frame_count = len(conversation_timing['frame_processing_times'])
@@ -2035,274 +1919,6 @@ def create_individual_conversation_timing_plots(conversation_timings, output_dir
     
     print(f"📊 Individual conversation timing plots saved to {output_dir}/")
 
-def create_individual_video_timing_plots(video_timings, output_dir=Config.OUTPUT_DIR):
-    """Create individual timing plots for each video with time series analysis"""
-    os.makedirs(output_dir, exist_ok=True)
-    
-    for i, video_timing in enumerate(video_timings):
-        video_number = i + 1  # Always use sequential numbering 1, 2, 3, ...
-        fig, axes = plt.subplots(2, 2, figsize=Config.PLOT_FIGSIZE_LARGE)
-        fig.suptitle(f'Video {video_number} - Detailed Timing Analysis', fontsize=14, fontweight='bold')
-        
-        # 1. Timing components breakdown
-        ax1 = axes[0, 0]
-        components = ['Visual Embedding', 'Model Forward', 'Generation']
-        times = [video_timing['visual_embedding_time'], 
-                video_timing['model_forward_time'], 
-                video_timing['generation_time']]
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
-        
-        bars = ax1.bar(components, times, color=colors, alpha=0.8)
-        ax1.set_ylabel('Time (seconds)', fontsize=9)
-        ax1.set_title('Timing Components Breakdown', fontsize=10)
-        ax1.grid(True, alpha=0.3)
-        
-        # Add value labels on bars
-        for bar, time in zip(bars, times):
-            height = bar.get_height()
-            ax1.text(bar.get_x() + bar.get_width()/2., height + 0.01,
-                    f'{time:.2f}s', ha='center', va='bottom')
-        
-        # 2. Timing components over time (top plot)
-        ax2 = axes[0, 1]
-        if video_timing['frame_processing_times']:
-            frame_times = video_timing['frame_processing_times']
-            frame_indices = range(len(frame_times))
-            
-            # Create realistic temporal variation for timing components
-            total_frames = len(frame_times)
-            base_frame_times = np.array(frame_times)
-            
-            # Use actual timing data from video - no fake variation
-            actual_visual_per_frame = video_timing['visual_embedding_time'] / total_frames
-            actual_model_per_frame = video_timing['model_forward_time'] / total_frames
-            
-            # Use actual per-frame timing data - create realistic temporal distribution
-            # Distribute the total time across frames with some realistic frame-to-frame variation
-            # based on actual frame processing times if available
-            if 'frame_processing_times' in video_timing and video_timing['frame_processing_times']:
-                # Use actual frame processing times to create realistic distribution
-                frame_times = video_timing['frame_processing_times']
-                # Normalize frame times to match the total visual/model time
-                visual_weights = np.array(frame_times) / np.sum(frame_times) if np.sum(frame_times) > 0 else np.ones(len(frame_times)) / len(frame_times)
-                model_weights = np.array(frame_times) / np.sum(frame_times) if np.sum(frame_times) > 0 else np.ones(len(frame_times)) / len(frame_times)
-                
-                visual_per_frame = actual_visual_per_frame * visual_weights
-                model_per_frame = actual_model_per_frame * model_weights
-            else:
-                # If no frame processing times available, use constant per-frame values
-                visual_per_frame = np.full(total_frames, actual_visual_per_frame)
-                model_per_frame = np.full(total_frames, actual_model_per_frame)
-            
-            # For generation, we need to simulate when responses occur
-            # Get response times from generated responses (stored in video_metrics)
-            response_frames = []
-            gt_response_frames = []  # Ground truth response frames
-            
-            if 'generated_responses' in video_timing and isinstance(video_timing['generated_responses'], list):
-                for response in video_timing['generated_responses']:
-                    if 'time' in response:
-                        # Scale response time to fit within available frame data using actual video duration
-                        response_time = response['time']
-                        video_duration = video_timing.get('video_duration', total_frames / Config.FRAME_FPS)  # Use actual video duration
-                        frame_idx = int((response_time / video_duration) * total_frames)
-                        frame_idx = min(frame_idx, total_frames - 1)
-                        frame_idx = max(frame_idx, 0)
-                        response_frames.append(frame_idx)
-            
-            # Get ground truth response times from conversation
-            gt_response_times = []  # Store actual times in seconds
-            if 'ground_truth_conversation' in video_timing:
-                conversation = video_timing['ground_truth_conversation']
-                assistant_turns = [t for t in conversation if t['role'] == 'assistant']
-                for turn in assistant_turns:
-                    if 'time' in turn:
-                        gt_time = turn['time']
-                        gt_response_times.append(gt_time)
-                        # Also convert to frame index for the generation spikes using actual video duration
-                        video_duration = video_timing.get('video_duration', total_frames / Config.FRAME_FPS)  # Use actual video duration
-                        gt_frame_idx = int((gt_time / video_duration) * total_frames)
-                        gt_frame_idx = min(gt_frame_idx, total_frames - 1)
-                        gt_frame_idx = max(gt_frame_idx, 0)
-                        gt_response_frames.append(gt_frame_idx)
-            
-            if not gt_response_times and 'conversation_turns' in video_timing and video_timing['conversation_turns'] > 0:
-                # Fallback: distribute responses evenly across frames using actual video duration
-                num_responses = video_timing['conversation_turns']
-                response_interval = total_frames // max(1, num_responses)
-                response_frames = [i * response_interval for i in range(num_responses)]
-                gt_response_frames = [i * response_interval for i in range(num_responses)]
-                # Use actual video duration for response times
-                video_duration = video_timing.get('video_duration', 2000.0)
-                gt_response_times = [i * response_interval * (video_duration / total_frames) for i in range(num_responses)]
-            
-            # Create generation time array with actual timing data - no fake scaling
-            generation_per_frame = np.zeros(total_frames)
-            if response_frames:
-                # Use actual generation time per response
-                actual_gen_per_response = video_timing['generation_time'] / max(1, len(response_frames))
-                for frame_idx in response_frames:
-                    if frame_idx < total_frames:
-                        # Use actual generation time - no fake variation
-                        generation_per_frame[frame_idx] = actual_gen_per_response
-            else:
-                pass
-            
-            # Convert frame indices to time in seconds for consistent plotting
-            # Use the actual video duration instead of hardcoded 2000s
-            video_duration = video_timing.get('video_duration', total_frames / Config.FRAME_FPS)  # Get actual duration
-            frame_duration = video_duration / total_frames  # Duration per frame in seconds
-            time_axis = np.array(frame_indices) * frame_duration
-            
-            # Calculate max_time for consistent scaling with ground truth plot
-            max_time = video_duration
-            # Also check generated response times to ensure we cover the full range
-            if 'generated_responses' in video_timing and isinstance(video_timing['generated_responses'], list):
-                for response in video_timing['generated_responses']:
-                    if 'time' in response:
-                        max_time = max(max_time, response['time'])
-            
-            # Plot the three components over time with actual temporal variation
-            # Scale visual and model to be more visible (multiply by 1000 to show in ms)
-            visual_scaled = np.array(visual_per_frame) * 1000  # Convert to ms
-            model_scaled = np.array(model_per_frame) * 1000    # Convert to ms
-            generation_scaled = np.array(generation_per_frame) * 1000  # Convert to ms
-            
-            ax2.plot(time_axis, visual_scaled, 'b-', linewidth=2, alpha=0.8, label='Visual Embedding (ms)')
-            ax2.plot(time_axis, model_scaled, 'orange', linewidth=2, alpha=0.8, label='Model Forward (ms)')
-            ax2.plot(time_axis, generation_scaled, 'g-', linewidth=2, alpha=0.8, label='Generation Spikes (ms)')
-            
-            # Highlight generated response times
-            if response_frames:
-                for frame_idx in response_frames:
-                    if frame_idx < total_frames:
-                        response_time = frame_idx * frame_duration
-                        ax2.axvline(x=response_time, color='red', linestyle='--', alpha=0.7, linewidth=2)
-            
-            # Add legend
-            ax2.legend(loc='upper right')
-            
-            # Add annotations for generated response count
-            if response_frames:
-                ax2.text(0.02, 0.98, f'Generated: {len(response_frames)}', 
-                        transform=ax2.transAxes, verticalalignment='top',
-                        bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
-            
-            # Set x-axis limits to match the ground truth plot
-            ax2.set_xlim(0, max_time)
-        
-        ax2.set_xlabel('Time (seconds)')
-        ax2.set_ylabel('Time per Frame (ms)')
-        ax2.set_title('Timing Components + Generated Responses', fontsize=10)
-        ax2.grid(True, alpha=0.3)
-        
-        # 3. Ground truth response times and prompt times (bottom plot)
-        ax3 = axes[1, 1]
-        if gt_response_times:
-            # Extract prompt times from conversation
-            prompt_times = []
-            if 'ground_truth_conversation' in video_timing:
-                conversation = video_timing['ground_truth_conversation']
-                for turn in conversation:
-                    if turn['role'] == 'user' and 'time' in turn:
-                        prompt_times.append(turn['time'])
-            
-            # Get the maximum time to ensure consistent x-axis scaling
-            # Use the same video_duration that the timing components plot uses
-            max_time = video_timing.get('video_duration', total_frames / Config.FRAME_FPS)  # Use actual video duration
-            
-            # Also check all response times to ensure we cover the full range
-            all_times = []
-            if gt_response_times:
-                all_times.extend(gt_response_times)
-            if prompt_times:
-                all_times.extend(prompt_times)
-            if 'generated_responses' in video_timing and isinstance(video_timing['generated_responses'], list):
-                for response in video_timing['generated_responses']:
-                    if 'time' in response:
-                        all_times.append(response['time'])
-            
-            # Use the maximum of video duration and actual data times
-            if all_times:
-                max_time = max(max_time, max(all_times))
-            
-            # Create a timeline plot for ground truth with separate y-levels
-            y_response = 0.8  # Higher level for responses
-            y_prompt = 0.2    # Lower level for prompts
-            
-            # Plot response times (purple solid lines) at higher level
-            for i, gt_time in enumerate(gt_response_times):
-                ax3.axvline(x=gt_time, ymin=y_response-0.1, ymax=y_response+0.1, 
-                           color='purple', linestyle='-', alpha=0.8, linewidth=2.0)
-                # Add small text labels for every 5th response to avoid clutter
-                if i % 5 == 0:
-                    ax3.text(gt_time, y_response+0.15, f'{gt_time:.0f}s', 
-                           rotation=90, ha='right', va='bottom', fontsize=8, color='purple')
-            
-            # Plot prompt times (blue dashed lines) at lower level
-            for i, prompt_time in enumerate(prompt_times):
-                ax3.axvline(x=prompt_time, ymin=y_prompt-0.1, ymax=y_prompt+0.1, 
-                           color='blue', linestyle='--', alpha=0.8, linewidth=2.0)
-                # Add small text labels for every prompt (since there are fewer)
-                ax3.text(prompt_time, y_prompt-0.15, f'{prompt_time:.0f}s', 
-                       rotation=90, ha='left', va='top', fontsize=8, color='blue')
-            
-            # Set consistent x-axis limits with the timing components plot
-            ax3.set_xlim(0, max_time)
-            ax3.set_ylim(0, 1)
-            ax3.set_ylabel('Ground Truth\nTimeline')
-            ax3.set_xlabel('Time (seconds)')
-            ax3.set_title(f'Ground Truth Timeline (Responses: {len(gt_response_times)}, Prompts: {len(prompt_times)})')
-            ax3.grid(True, alpha=0.3)
-            ax3.set_yticks([])  # Remove y-axis ticks
-            
-            # Add horizontal lines to separate the two levels
-            ax3.axhline(y=y_response, color='purple', linestyle='-', alpha=0.3, linewidth=0.5)
-            ax3.axhline(y=y_prompt, color='blue', linestyle='--', alpha=0.3, linewidth=0.5)
-            
-            # Add legend with proper positioning
-            ax3.axvline(x=0, color='purple', linestyle='-', alpha=0.8, linewidth=2.0, label='Response Times')
-            ax3.axvline(x=0, color='blue', linestyle='--', alpha=0.8, linewidth=2.0, label='Prompt Times')
-            ax3.legend(loc='upper right', fontsize=8)
-        else:
-            ax3.text(0.5, 0.5, 'No ground truth data available', ha='center', va='center', transform=ax3.transAxes)
-            ax3.set_ylabel('Ground Truth\nTimeline')
-            ax3.set_xlabel('Time (seconds)')
-            ax3.set_title('Ground Truth Timeline')
-        
-        # 4. Component efficiency per frame
-        ax4 = axes[1, 0]
-        if video_timing['frame_processing_times']:
-            frame_count = len(video_timing['frame_processing_times'])
-            generation_count = max(1, video_timing.get('generated_turns', 1))
-            
-            visual_per_frame = video_timing['visual_embedding_time'] / frame_count
-            model_per_frame = video_timing['model_forward_time'] / frame_count
-            generation_per_response = video_timing['generation_time'] / generation_count  # Per response, not per frame
-            
-            components = ['Visual', 'Model', 'Generation']
-            per_frame_times = [visual_per_frame, model_per_frame, generation_per_response]
-            colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
-            
-            bars = ax4.bar(components, per_frame_times, color=colors, alpha=0.8)
-            ax4.set_ylabel('Time per Frame/Response (s)')
-            ax4.set_title('Component Efficiency (Visual/Model per Frame, Generation per Response)')
-            ax4.grid(True, alpha=0.3)
-            
-            # Add value labels with appropriate units
-            labels = [f'{visual_per_frame*1000:.1f}ms/frame', f'{model_per_frame*1000:.1f}ms/frame', f'{generation_per_response*1000:.1f}ms/response']
-            for bar, time, label in zip(bars, per_frame_times, labels):
-                height = bar.get_height()
-                ax4.text(bar.get_x() + bar.get_width()/2., height + 0.0001,
-                        label, ha='center', va='bottom', fontsize=9)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'video_{video_number}_timing.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    print(f"📊 Individual video timing plots saved to {output_dir}/")
-
-
 class EventDrivenConversationContext:
     def __init__(self, conversation_idx, conversation_data, video_path, dataset, device, data_source, custom_threshold, conversation_start_time, model, tokenizer, model_memory_mb):
         self.conversation_idx = conversation_idx
@@ -2429,10 +2045,9 @@ class EventDrivenConversationContext:
             'detail': prompt_content,
             'conversation_id': self.conversation_id
         })
-        self.prompts_processed += 1
 
     def schedule_generation_event(self, event_queue, event_time, sequence_counter):
-        # print("schedule_generation_event", self.generation_event_pending, event_time, sequence_counter)
+        print("schedule_generation_event", self.generation_event_pending, event_time, sequence_counter)
         if self.generation_event_pending:
             return sequence_counter
         heapq.heappush(event_queue, (event_time, 1, sequence_counter, ('generation', self.conversation_id, None)))
@@ -2495,6 +2110,7 @@ class EventDrivenConversationContext:
 
         visual_embedding_time = timing_data.get('visual_embedding_time', 0.0)
         streaming_time = timing_data.get('streaming_time', 0.0)
+        # in case nothing is generated, use generation_time
         chunk_generation_time = timing_data.get('generation_chunk_time', timing_data.get('generation_time', 0.0))
         kv_reload_time = timing_data.get('kv_reload_time', 0.0)
         kv_offload_time = timing_data.get('kv_offload_time', 0.0)
@@ -2521,11 +2137,13 @@ class EventDrivenConversationContext:
         self.frame_timing_data.append({
             'frame_idx': frame_idx,
             'video_time': relative_time,
-            'visual_embedding_time': visual_embedding_time,
-            'model_forward_time': streaming_time,
+            'visual_embedding_time': visual_embedding_time, # from video (cpu) to embedding (gpu) (input_video_stream)
+            'model_forward_time': streaming_time, # from embedding to KV cache (call for streaming); kv cache offload involved
             'compute_time': frame_compute_time,
-            'generation_time': 0.0,
-            'total_processing_time': frame_processing_time
+            'generation_time': chunk_generation_time, # a chunk from KV cache to response (call for response) (gpu); kv cache offload involved
+            'total_processing_time': frame_processing_time,
+            'response_time': frame_processing_time if query else 0, # only count for frames that have prompts
+            'prompt_count': 1 if query else 0,
         })
 
         texts_generated_previous = liveinfer.texts_generated_previous
@@ -2540,22 +2158,25 @@ class EventDrivenConversationContext:
 
         if frame_processing_time > 0:
             self.total_generation_time += frame_processing_time
+            # print(f"========== frame_processing_time: {frame_processing_time}, total_generation_time: {self.total_generation_time}")
             self.event_log.append({
                 'time': start_time + frame_processing_time,
                 'type': 'response',
                 'detail': {'text': texts_generated_previous, 'frame_idx': frame_idx},
-                'conversation_id': self.conversation_id
+                'conversation_id': self.conversation_id,
+                'prompt_idx': self.prompts_processed,
             })
-            self.frame_timing_data[-1]['generation_time'] = chunk_generation_time
 
             if query:
                 print(f"[t={self.conversation_start_time + relative_time:.2f}s] Query: {query}")
             if texts_generated_previous:
                 print(f"[t={self.conversation_start_time + relative_time:.2f}s] Chunk: {texts_generated_previous}")
             if response:
+                self.prompts_processed += 1
                 print(f"[t={self.conversation_start_time + relative_time:.2f}s] Response: {response}")
             print(f"  └─ Generation time: {frame_processing_time:.3f}s")
             print(f"  └─ start_time: {start_time:.3f}")
+            # print(f"  └─ prompt_idx: {self.prompts_processed}")
 
         self.frames_processed += 1
         return {
@@ -2576,6 +2197,7 @@ class EventDrivenConversationContext:
         liveinfer.generation_event_pending = False
 
         self.total_generation_time += chunk_duration
+        # print(f"========== chunk_duration: {chunk_duration}, total_generation_time: {self.total_generation_time}")
 
         video_time = liveinfer.timing_data.get('generation_video_time', 0.0)
         kv_reload_time = liveinfer.timing_data.get('kv_reload_time', 0.0)
@@ -2599,7 +2221,8 @@ class EventDrivenConversationContext:
                 'time': chunk_duration + start_time,
                 'type': 'response',
                 'detail': {'text': texts_generated_previous, 'frame_idx': None},
-                'conversation_id': self.conversation_id
+                'conversation_id': self.conversation_id,
+                'prompt_idx': self.prompts_processed,
             })
             
             if query:
@@ -2607,9 +2230,11 @@ class EventDrivenConversationContext:
             if texts_generated_previous:
                 print(f"[t={video_time:.2f}s] Chunk: {texts_generated_previous}")
             if response:
+                self.prompts_processed += 1
                 print(f"[t={video_time:.2f}s] Response: {response}")
             print(f"  └─ Generation time: {chunk_duration:.3f}s")
             print(f"  └─ start_time: {start_time:.3f}")
+            # print(f"  └─ prompt_idx: {self.prompts_processed}")
         return {
             'frame_compute_time': 0.0,
             'frame_processing_time': 0.0,
@@ -2647,29 +2272,29 @@ class EventDrivenConversationContext:
             timing_data['listening_rebuffering_time'] = listening_rebuffering_times[i] if i < len(listening_rebuffering_times) else 0.0
             timing_data['resource_utilization'] = resource_utilization_times[i] if i < len(resource_utilization_times) else 0.0
 
-        total_frame_processing_time = sum(self.frame_processing_times)
-        total_processing_time = total_frame_processing_time
+        response_time = sum(timing_data['response_time'] for timing_data in self.frame_timing_data)/sum(timing_data['prompt_count'] for timing_data in self.frame_timing_data)
+        total_processing_time = sum(self.frame_processing_times)
         visual_embedding_time = self.total_visual_embedding_time
         model_forward_time = self.total_model_forward_time
         generation_time = self.total_generation_time
         num_processed_frames = len(self.frame_processing_times)
 
-        print(f"🔍 GOALSTEP TIMING METRICS FOR CONVERSATION {self.conversation_id[:8]}...:")
-        print(f"   • Conversation duration: {self.duration:.2f}s")
-        print(f"   • Frames processed: {num_processed_frames}")
-        print(f"   • Generated responses: {len(self.generated_turns)}")
-        print_timing_metrics(visual_embedding_time, model_forward_time, generation_time, num_processed_frames, len(self.generated_turns))
-        print(f"   • Total processing time: {total_processing_time:.3f}s")
-        if total_processing_time > 0:
-            print(f"   • Timing breakdown: Visual={visual_embedding_time/total_processing_time*100:.1f}%, Model={model_forward_time/total_processing_time*100:.1f}%, Generation={generation_time/total_processing_time*100:.1f}%")
-        print(f"   • Total rebuffering time: {total_rebuffering_time:.3f}s")
-        print(f"   • Average rebuffering time per frame: {average_rebuffering_time:.3f}s")
-        print(f"   • Total reading rebuffering time: {total_reading_rebuffering:.3f}s")
-        print(f"   • Average reading rebuffering time per frame: {average_reading_rebuffering:.3f}s")
-        print(f"   • Total listening rebuffering time: {total_listening_rebuffering:.3f}s")
-        print(f"   • Average listening rebuffering time per frame: {average_listening_rebuffering:.3f}s")
-        print(f"   • Final frame resource utilization: {final_frame_utilization:.3f}")
-        print("-" * 60)
+        # print(f"🔍 TIMING METRICS FOR CONVERSATION {self.conversation_id[:12]}...:")
+        # print(f"   • Conversation duration: {self.duration:.2f}s")
+        # print(f"   • Frames processed: {num_processed_frames}")
+        # print(f"   • Generated responses: {len(self.generated_turns)}")
+        # print_timing_metrics(visual_embedding_time, model_forward_time, generation_time, num_processed_frames, len(self.generated_turns))
+        # print(f"   • Total processing time: {total_processing_time:.3f}s")
+        # if total_processing_time > 0:
+        #     print(f"   • Timing breakdown: Visual={visual_embedding_time/total_processing_time*100:.1f}%, Model={model_forward_time/total_processing_time*100:.1f}%, Generation={generation_time/total_processing_time*100:.1f}%")
+        # print(f"   • Total rebuffering time: {total_rebuffering_time:.3f}s")
+        # print(f"   • Average rebuffering time per frame: {average_rebuffering_time:.3f}s")
+        # print(f"   • Total reading rebuffering time: {total_reading_rebuffering:.3f}s")
+        # print(f"   • Average reading rebuffering time per frame: {average_reading_rebuffering:.3f}s")
+        # print(f"   • Total listening rebuffering time: {total_listening_rebuffering:.3f}s")
+        # print(f"   • Average listening rebuffering time per frame: {average_listening_rebuffering:.3f}s")
+        # print(f"   • Final frame resource utilization: {final_frame_utilization:.3f}")
+        # print("-" * 60)
 
         content_metrics = calculate_metrics_like_benchmark(
             self.model,
@@ -2746,7 +2371,8 @@ class EventDrivenConversationContext:
             processor_segments,
             [conversation_summary],
             Config.USER_READING_SPEED_MAX,
-            Config.USER_LISTENING_SPEED_MAX
+            Config.USER_LISTENING_SPEED_MAX,
+            self.data_source
         )
 
         self.result = {
@@ -2767,6 +2393,7 @@ class EventDrivenConversationContext:
             'model_forward_time': model_forward_time,
             'generation_time': generation_time,
             'total_processing_time': total_processing_time,
+            'response_time': response_time,
             'processing_span': self.processing_span,
             'frame_processing_times': self.frame_processing_times,
             'eos_timing': {'eos_detection_time': 0.0, 'with_eos': 0.0, 'without_eos': 0.0},
@@ -2938,8 +2565,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 idle_segments.append({'start': processor_clock, 'end': event_time})
                 processor_clock = event_time
             context.handle_prompt(shared_liveinfer, relative_time, payload_data)
-            # sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
-            # context.generation_event_pending = False
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
             continue
@@ -2971,11 +2596,11 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     'frame_duration': max(0.0, total_duration),
                     'generation_duration': max(0.0, total_duration)
                 })
-                print(f"🔍 DEBUG: Created processor segment for {segment_label}: start={start_time:.2f}s, end={segment_end:.2f}s")
+                # print(f"🔍 DEBUG: Created processor segment for {segment_label}: start={start_time:.2f}s, end={segment_end:.2f}s")
             processor_clock = start_time + total_duration
 
             if shared_liveinfer.generation_state is not None:
-                sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
+                sequence_counter = context.schedule_generation_event(event_queue, event_time, sequence_counter)
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
 
@@ -3001,12 +2626,13 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     'frame_duration': generation_duration,
                     'generation_duration': generation_duration
                 })
-                print(f"🔍 DEBUG: Created generation segment for {segment_label}: start={start_time:.2f}s, end={segment_end:.2f}s")
+                # print(f"🔍 DEBUG: Created generation segment for {segment_label}: start={start_time:.2f}s, end={segment_end:.2f}s")
             processor_clock = start_time + max(0.0, generation_duration)
 
             if shared_liveinfer.generation_state is not None:
-                sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
+                sequence_counter = context.schedule_generation_event(event_queue, event_time, sequence_counter)
             else:
+                # if finished, start processing pending frames
                 while context.pending_frame_events:
                     pending_time, pending_priority, pending_payload = context.pending_frame_events.popleft()
                     heapq.heappush(event_queue, (max(processor_clock, pending_time), pending_priority, sequence_counter, ('frame', conversation_id, pending_payload)))
@@ -3893,8 +3519,9 @@ def main():
                         response_latency = visual_per_frame + model_per_frame + generation_per_response
                         response_timings.append(response_latency)
                         
-                        # print(f"   📊 Response {len(response_timings)}: latency = {response_latency:.3f}s (vis={visual_per_frame:.3f}s + model={model_per_frame:.3f}s + gen={generation_per_response:.3f}s)")
-                        # print(f"       Breakdown: {num_frames} frames, {num_responses} responses")
+                        print(f"   📊 Response {len(response_timings)}: latency = {response_latency:.3f}s (vis={visual_per_frame:.3f}s + model={model_per_frame:.3f}s + gen={generation_per_response:.3f}s)")
+                        print(f"       Breakdown: {num_frames} frames, {num_responses} responses")
+                        # print(f" visual_time: {visual_time:.3f}s, model_time: {model_time:.3f}s, generation_time: {generation_time:.3f}s")
             
             if response_timings:
                 avg_time_diff = sum(response_timings) / len(response_timings)
@@ -4940,7 +4567,7 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversatio
     gt_ppls_vlm_prefix_visual = []  # PPL using VLM responses as context with visual
     
     
-    print(f"📊 Calculating dual PPL (visual context) for {len(ground_truth_responses)} ground truth responses...")
+    # print(f"📊 Calculating dual PPL (visual context) for {len(ground_truth_responses)} ground truth responses...")
     
     for i, gt_response in enumerate(ground_truth_responses):
         
@@ -4984,23 +4611,12 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversatio
             torch.cuda.empty_cache()
     
     # Calculate average PPLs for all four contexts
-    if gt_ppls_gt_prefix_visual:
-        avg_gt_ppl_gt_prefix_visual = sum(gt_ppls_gt_prefix_visual) / len(gt_ppls_gt_prefix_visual)
-        print(f"📊 GT Prefix PPL (Visual): {len(gt_ppls_gt_prefix_visual)} responses, avg PPL: {avg_gt_ppl_gt_prefix_visual:.3f}")
-        print(f"📊 GT Prefix PPL (Visual) range: {min(gt_ppls_gt_prefix_visual):.3f} - {max(gt_ppls_gt_prefix_visual):.3f}")
-    else:
-        avg_gt_ppl_gt_prefix_visual = 0.0
-        print("📊 GT Prefix PPL (Visual): No valid calculations")
-        
-    if gt_ppls_vlm_prefix_visual:
-        avg_gt_ppl_vlm_prefix_visual = sum(gt_ppls_vlm_prefix_visual) / len(gt_ppls_vlm_prefix_visual)
-        print(f"📊 VLM Prefix PPL (Visual): {len(gt_ppls_vlm_prefix_visual)} responses, avg PPL: {avg_gt_ppl_vlm_prefix_visual:.3f}")
-        print(f"📊 VLM Prefix PPL (Visual) range: {min(gt_ppls_vlm_prefix_visual):.3f} - {max(gt_ppls_vlm_prefix_visual):.3f}")
-    else:
-        avg_gt_ppl_vlm_prefix_visual = 0.0
-        print("📊 VLM Prefix PPL (Visual): No valid calculations")
-        
-    # No visual PPL printing removed for simplification
+    avg_gt_ppl_gt_prefix_visual = sum(gt_ppls_gt_prefix_visual) / len(gt_ppls_gt_prefix_visual)
+    avg_gt_ppl_vlm_prefix_visual = sum(gt_ppls_vlm_prefix_visual) / len(gt_ppls_vlm_prefix_visual)
+    # print(f"📊 GT Prefix PPL (Visual): {len(gt_ppls_gt_prefix_visual)} responses, avg PPL: {avg_gt_ppl_gt_prefix_visual:.3f}")
+    # print(f"📊 GT Prefix PPL (Visual) range: {min(gt_ppls_gt_prefix_visual):.3f} - {max(gt_ppls_gt_prefix_visual):.3f}")
+    # print(f"📊 VLM Prefix PPL (Visual): {len(gt_ppls_vlm_prefix_visual)} responses, avg PPL: {avg_gt_ppl_vlm_prefix_visual:.3f}")
+    # print(f"📊 VLM Prefix PPL (Visual) range: {min(gt_ppls_vlm_prefix_visual):.3f} - {max(gt_ppls_vlm_prefix_visual):.3f}")
     
     # Use average of visual PPLs as the main metric
     avg_ppl = (avg_gt_ppl_gt_prefix_visual + avg_gt_ppl_vlm_prefix_visual) / 2 if (avg_gt_ppl_gt_prefix_visual > 0 and avg_gt_ppl_vlm_prefix_visual > 0) else max(avg_gt_ppl_gt_prefix_visual, avg_gt_ppl_vlm_prefix_visual)
@@ -5218,18 +4834,8 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
         # 4. Response latency data (calculated in aggregate metrics)
         if 'generated_turns' in result and len(result['generated_turns']) > 0:
             # Calculate per-response latency for this conversation
-            visual_time = result.get('visual_embedding_time', 0)
-            model_time = result.get('model_forward_time', 0)
-            generation_time = result.get('generation_time', 0)
-            num_frames = result.get('num_frames', 1)
-            num_responses = len(result['generated_turns'])
-            
-            if num_frames > 0 and num_responses > 0:
-                visual_per_frame = visual_time / num_frames
-                model_per_frame = model_time / num_frames
-                generation_per_response = generation_time / num_responses
-                response_latency = visual_per_frame + model_per_frame + generation_per_response
-                response_latencies.append(response_latency)
+            response_time = result.get('response_time', 0)
+            response_latencies.append(response_time)
         
         # 5. Rebuffering time data - will be extracted from buffer_data after processing all results
     
