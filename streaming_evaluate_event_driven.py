@@ -29,7 +29,6 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*")
 
 from models import build_model_and_tokenizer, parse_args, fast_greedy_generate
-from data.ego4d.narration import Ego4DRefinedNarrationStream
 
 # =============================================================================
 # CONFIGURATION CONSTANTS
@@ -63,16 +62,14 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 1200            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 600            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
-    DEFAULT_THRESHOLD_RANGE = (0.5, 0.99) # Default threshold range for sweep
-    DEFAULT_NUM_THRESHOLDS = 2           # Default number of thresholds for sweep
-    DEBUG_THRESHOLDS = [0.8, 0.9]         # Coarse-grained thresholds
+    DEFAULT_NUM_VIDEOS = 5             # Default number of videos for evaluation
+    DEBUG_THRESHOLDS = [0.9, 0.92, 0.94, 0.96, 0.98]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92, 0.94, 0.96, 0.98]  # Fine-grained thresholds
     
     # User-level rebuffering configuration
@@ -96,7 +93,7 @@ class Config:
     EXPECTED_RESPONSE_LENGTH = 20.0
     LENGTH_FACTOR_MIN = 0.5
     LENGTH_FACTOR_MAX = 2.0
-    GENERATION_CHUNK_SIZE = 3200
+    GENERATION_CHUNK_SIZE = 32
 
 class FilteredEgo4DRefinedNarrationStream:
     """Ego4D Refined Narration Stream that only includes videos with features - now processes per-conversation"""
@@ -220,9 +217,8 @@ class FilteredEgo4DRefinedNarrationStream:
                                 "content": turn['content']
                             })
             
-            self.instructions = all_user_prompts[:100]  # Use more diverse prompts
             print(f"📊 Loaded goalstep data: {len(self.data)} videos")
-            print(f"📊 Extracted {len(self.instructions)} unique user prompts from goalstep conversations")
+            print(f"📊 Extracted {len(all_user_prompts)} unique user prompts from goalstep conversations")
             print(f"📊 Created normalized conversations with first user prompt at time 0")
         else:
             raise ValueError(f"Unknown data source: {data_source}")
@@ -546,131 +542,6 @@ def defragment_gpu_memory():
         print(f"Warning: Memory defragmentation failed: {e}")
         return False
 
-def calculate_all_rebuffering_times(responses, frame_processing_times, reading_speed=4.0, listening_speed=2.35):
-    """
-    Calculate all types of rebuffering times and resource utilization in one consolidated function.
-    
-    This function calculates:
-    1. Generation rebuffering: Delay when processing exceeds real-time frame rate
-    2. Reading rebuffering: Delay when user reading time causes processing delays
-    3. Listening rebuffering: Delay when user listening time causes processing delays
-    4. Resource utilization: (all previous processing time) / (current video time + current processing time)
-    
-    Args:
-        responses: List of response dictionaries with 'text' field
-        frame_processing_times: List of processing times for each frame
-        reading_speed: Words per second for reading (default: 4.0 wps)
-        listening_speed: Words per second for listening (default: 2.35 wps)
-    
-    Returns:
-        dict: {
-            'generation_rebuffering_times': list,
-            'reading_rebuffering_times': list,
-            'listening_rebuffering_times': list,
-            'resource_utilization_times': list,
-            'total_generation_rebuffering': float,
-            'total_reading_rebuffering': float,
-            'total_listening_rebuffering': float,
-            'average_generation_rebuffering': float,
-            'average_reading_rebuffering': float,
-            'average_listening_rebuffering': float,
-            'final_frame_utilization': float
-        }
-    """
-    generation_rebuffering_times = []
-    reading_rebuffering_times = []
-    listening_rebuffering_times = []
-    resource_utilization_times = []
-    
-    # Track when previous activities finished
-    previous_processing_finish = 0.0
-    previous_reading_finish = 0.0
-    previous_listening_finish = 0.0
-    
-    # Track cumulative processing time for resource utilization
-    cumulative_processing_time = 0.0
-    
-    frame_interval = 1.0 / Config.FRAME_FPS  # e.g., 0.5s for 2 FPS
-    
-    # Process each frame
-    for frame_idx, processing_time in enumerate(frame_processing_times):
-        # Expected start time for processing is based on frame intervals (0, 0.5, 1.0, 1.5, ...)
-        expected_processing_start = frame_idx * frame_interval
-        
-        # Calculate reading/listening time for this frame's response (if any)
-        reading_time = 0.0
-        listening_time = 0.0
-        
-        # Check if there's a response for this frame
-        if frame_idx < len(responses) and 'text' in responses[frame_idx] and responses[frame_idx]['text']:
-            response_text = responses[frame_idx]['text']
-            word_count = len(response_text.split())
-            reading_time = word_count / reading_speed
-            listening_time = word_count / listening_speed
-        
-        # 2. READING REBUFFERING: Delay when user reading time causes processing delays
-        expected_reading_start = expected_processing_start + processing_time
-        reading_rebuffering_delay = max(0.0, previous_reading_finish - expected_reading_start)
-        reading_rebuffering_times.append(reading_rebuffering_delay)
-        
-        # 1. GENERATION REBUFFERING: Use buffer-based rebuffering (same as reading rebuffering)
-        # This measures rebuffering when buffer is empty but there are pending prompts
-        generation_rebuffering_delay = reading_rebuffering_delay  # Use same logic as reading rebuffering
-        generation_rebuffering_times.append(generation_rebuffering_delay)
-        
-        # 3. LISTENING REBUFFERING: Delay when user listening time causes processing delays
-        expected_listening_start = expected_processing_start + processing_time
-        listening_rebuffering_delay = max(0.0, previous_listening_finish - expected_listening_start)
-        listening_rebuffering_times.append(listening_rebuffering_delay)
-        
-        # 4. RESOURCE UTILIZATION: (all previous processing time) / (current video time + current processing time)
-        current_video_time = expected_processing_start  # 0, 0.5, 1.0, 1.5, ...
-        resource_utilization = cumulative_processing_time / (current_video_time + processing_time) if (current_video_time + processing_time) > 0 else 0.0
-        resource_utilization_times.append(resource_utilization)
-        
-        # Update finish times for next iteration
-        # Processing finishes at expected_start + generation_rebuffering + processing_time
-        actual_processing_finish = expected_processing_start + generation_rebuffering_delay + processing_time
-        
-        # Update cumulative processing time for next iteration
-        cumulative_processing_time += processing_time
-        
-        # Reading finishes when processing + reading is complete (independent of listening)
-        previous_reading_finish = actual_processing_finish + reading_time
-        
-        # Listening finishes when processing + listening is complete (independent of reading)
-        previous_listening_finish = actual_processing_finish + listening_time
-        
-        # Update processing finish time for next iteration
-        previous_processing_finish = actual_processing_finish
-    
-    # Calculate totals and averages
-    total_generation_rebuffering = sum(generation_rebuffering_times)
-    total_reading_rebuffering = sum(reading_rebuffering_times)
-    total_listening_rebuffering = sum(listening_rebuffering_times)
-    
-    average_generation_rebuffering = total_generation_rebuffering / len(generation_rebuffering_times) if generation_rebuffering_times else 0.0
-    average_reading_rebuffering = total_reading_rebuffering / len(reading_rebuffering_times) if reading_rebuffering_times else 0.0
-    average_listening_rebuffering = total_listening_rebuffering / len(listening_rebuffering_times) if listening_rebuffering_times else 0.0
-    
-    # Calculate final frame utilization
-    final_frame_utilization = resource_utilization_times[-1] if resource_utilization_times else 0.0
-    
-    return {
-        'generation_rebuffering_times': generation_rebuffering_times,
-        'reading_rebuffering_times': reading_rebuffering_times,
-        'listening_rebuffering_times': listening_rebuffering_times,
-        'resource_utilization_times': resource_utilization_times,
-        'total_generation_rebuffering': total_generation_rebuffering,
-        'total_reading_rebuffering': total_reading_rebuffering,
-        'total_listening_rebuffering': total_listening_rebuffering,
-        'average_generation_rebuffering': average_generation_rebuffering,
-        'average_reading_rebuffering': average_reading_rebuffering,
-        'average_listening_rebuffering': average_listening_rebuffering,
-        'final_frame_utilization': final_frame_utilization
-    }
-
-
 def simulate_text_buffer_trajectories(processor_segments, conversation_summaries, reading_speed, listening_speed, data_source):
     """Simulate text buffers plus cumulative rebuffer metrics per conversation."""
 
@@ -723,36 +594,6 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         # Track pending prompts: each prompt can have multiple chunks
         # We track which prompts are still pending (not all chunks completed)
         pending_prompts = set()  # Set of prompt indices that are still pending
-        # prompt_to_chunks = {}    # Map prompt index to list of chunk indices
-        # chunk_to_prompt = {}     # Map chunk index to prompt index
-        
-        # Initialize prompt-to-chunk mapping
-        # We need to map chunks to prompts based on timing
-        # A chunk belongs to the most recent prompt that occurred before it
-        # Only include chunks that generate text (words > 0)
-        # for chunk_idx, (chunk_time, words) in enumerate(chunk_events):
-        #     if words > 0:  # Only map chunks that generate text
-        #         # Find the most recent prompt before this chunk
-        #         prompt_idx = None
-        #         for p_idx, prompt_time in enumerate(prompt_times):
-        #             if prompt_time <= chunk_time:
-        #                 prompt_idx = p_idx
-        #             else:
-        #                 break
-                
-        #         if prompt_idx is not None:
-        #             if prompt_idx not in prompt_to_chunks:
-        #                 prompt_to_chunks[prompt_idx] = []
-        #             prompt_to_chunks[prompt_idx].append(chunk_idx)
-        #             chunk_to_prompt[chunk_idx] = prompt_idx
-        
-        # Special handling for narration datasets: if there's only one prompt with many chunks,
-        # we should treat each chunk as completing the prompt immediately to avoid infinite pending state
-        # if data_source == 'narration':
-        #     # For narration-like datasets, each chunk immediately completes the prompt
-        #     # This prevents the single prompt from staying pending forever
-        #     prompt_to_chunks = {0: list(range(len(chunk_events)))}
-        #     chunk_to_prompt = {i: 0 for i in range(len(chunk_events))}
         
         # Track conversation completion status
         conversation_finished = False
@@ -880,7 +721,7 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
 
     summary_lookup = {}
     for summary in conversation_summaries or []:
-        label = summary.get('label', summary.get('conversation_id', '')[:12])
+        label = summary.get('label', summary.get('conversation_id', ''))
         summary_lookup[label] = summary
 
     # Process all segments together, not per conversation
@@ -985,7 +826,7 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
     summary_lookup = {}
     if conversation_summaries:
         for summary in conversation_summaries:
-            label = summary.get('label', summary.get('conversation_id', '')[:12])
+            label = summary.get('label', summary.get('conversation_id', ''))
             summary_lookup[label] = summary
 
     base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
@@ -2010,7 +1851,7 @@ class EventDrivenConversationContext:
                 heapq.heappush(event_queue, (self.conversation_start_time + max(0.0, prompt_time), 0, sequence_counter, ('prompt', self.conversation_id, prompt_content)))
                 sequence_counter += 1
             else:
-                print(f"🔕 Skipping prompt at {prompt_time:.2f}s for {self.conversation_id[:12]} (beyond frame budget)")
+                print(f"🔕 Skipping prompt at {prompt_time:.2f}s for {self.conversation_id} (beyond frame budget)")
 
         for frame_idx in range(self.test_frames):
             frame_time = self.conversation_start_time + frame_idx / Config.FRAME_FPS
@@ -2246,31 +2087,8 @@ class EventDrivenConversationContext:
     def finalize(self, liveinfer):
         self.frame_scores_data = liveinfer.get_frame_scores()
 
-        rebuffering_data = calculate_all_rebuffering_times(
-            self.generated_turns,
-            self.frame_processing_times,
-            reading_speed=Config.USER_READING_SPEED_MAX,
-            listening_speed=Config.USER_LISTENING_SPEED_MAX
-        )
-
-        rebuffering_times = rebuffering_data['generation_rebuffering_times']
-        reading_rebuffering_times = rebuffering_data['reading_rebuffering_times']
-        listening_rebuffering_times = rebuffering_data['listening_rebuffering_times']
-        resource_utilization_times = rebuffering_data['resource_utilization_times']
-
-        total_rebuffering_time = rebuffering_data['total_generation_rebuffering']
-        average_rebuffering_time = rebuffering_data['average_generation_rebuffering']
-        total_reading_rebuffering = rebuffering_data['total_reading_rebuffering']
-        average_reading_rebuffering = rebuffering_data['average_reading_rebuffering']
-        total_listening_rebuffering = rebuffering_data['total_listening_rebuffering']
-        average_listening_rebuffering = rebuffering_data['average_listening_rebuffering']
-        final_frame_utilization = rebuffering_data['final_frame_utilization']
-
-        for i, timing_data in enumerate(self.frame_timing_data):
-            timing_data['rebuffering_time'] = rebuffering_times[i] if i < len(rebuffering_times) else 0.0
-            timing_data['reading_rebuffering_time'] = reading_rebuffering_times[i] if i < len(reading_rebuffering_times) else 0.0
-            timing_data['listening_rebuffering_time'] = listening_rebuffering_times[i] if i < len(listening_rebuffering_times) else 0.0
-            timing_data['resource_utilization'] = resource_utilization_times[i] if i < len(resource_utilization_times) else 0.0
+        # Note: Rebuffering calculations are now handled by buffer_data simulation
+        # which provides more accurate user experience metrics
 
         response_time = sum(timing_data['response_time'] for timing_data in self.frame_timing_data)/sum(timing_data['prompt_count'] for timing_data in self.frame_timing_data)
         total_processing_time = sum(self.frame_processing_times)
@@ -2346,7 +2164,7 @@ class EventDrivenConversationContext:
         # Create buffer simulation data for this conversation
         conversation_summary = {
             'conversation_id': self.conversation_id,
-            'label': self.conversation_id[:12],
+            'label': self.conversation_id,
             'start': self.conversation_start_time,
             'events': self.event_log
         }
@@ -2367,13 +2185,13 @@ class EventDrivenConversationContext:
                 })
         
         # Simulate buffer trajectories
-        buffer_data = simulate_text_buffer_trajectories(
-            processor_segments,
-            [conversation_summary],
-            Config.USER_READING_SPEED_MAX,
-            Config.USER_LISTENING_SPEED_MAX,
-            self.data_source
-        )
+        # buffer_data = simulate_text_buffer_trajectories(
+        #     processor_segments,
+        #     [conversation_summary],
+        #     Config.USER_READING_SPEED_MAX,
+        #     Config.USER_LISTENING_SPEED_MAX,
+        #     self.data_source
+        # )
 
         self.result = {
             'conversation_id': self.conversation_id,
@@ -2401,19 +2219,7 @@ class EventDrivenConversationContext:
             'generated_turns': self.generated_turns,
             'video_duration': self.duration,
             'frame_scores_data': self.frame_scores_data,
-            'frame_timing_data': self.frame_timing_data,
-            'rebuffering_times': rebuffering_times,
-            'total_rebuffering_time': total_rebuffering_time,
-            'average_rebuffering_time': average_rebuffering_time,
-            'reading_rebuffering_times': reading_rebuffering_times,
-            'total_reading_rebuffering_time': total_reading_rebuffering,
-            'average_reading_rebuffering_time': average_reading_rebuffering,
-            'listening_rebuffering_times': listening_rebuffering_times,
-            'total_listening_rebuffering_time': total_listening_rebuffering,
-            'average_listening_rebuffering_time': average_listening_rebuffering,
-            'resource_utilization_times': resource_utilization_times,
-            'final_frame_utilization': final_frame_utilization,
-            'buffer_data': buffer_data
+            'frame_timing_data': self.frame_timing_data
         }
 
         self.result['event_log'] = self.event_log
@@ -2579,7 +2385,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             assert segment_info.get('frame_compute_time', 0.0) > 0.0, f"frame_compute_time: {segment_info.get('frame_compute_time', 0.0)}, frame_processing_time: {segment_info.get('frame_processing_time', 0.0)}"
             frame_duration = segment_info.get('frame_compute_time', segment_info.get('frame_processing_time', 0.0))
             generation_duration = segment_info.get('generation_time', 0.0)
-            segment_label = context.conversation_id[:12]
+            segment_label = context.conversation_id
             frame_idx = payload_data
             if start_time > processor_clock:
                 idle_segments.append({'start': processor_clock, 'end': start_time})
@@ -2613,7 +2419,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 idle_segments.append({'start': processor_clock, 'end': start_time})
             segment_info = context.handle_generation(shared_liveinfer, relative_time, start_time)
             generation_duration = segment_info.get('generation_time', 0.0)
-            segment_label = context.conversation_id[:12]
+            segment_label = context.conversation_id
 
             if generation_duration > 0.0:
                 segment_end = start_time + generation_duration
@@ -2653,14 +2459,14 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             active_conversation_id = None
             shared_liveinfer.reset()
 
-            unique_key = f"{context.video_uid[:8]}_{context.conversation_id[:8]}"
+            unique_key = f"{context.video_uid}_{context.conversation_id}"
             results.append(context.result)
             all_memory_data[unique_key] = context.memory_data
             if context.result.get('frame_scores_data'):
                 all_frame_scores_data[unique_key] = context.result['frame_scores_data']
             conversation_summaries.append({
                 'conversation_id': context.conversation_id,
-                'label': context.conversation_id[:12],
+                'label': context.conversation_id,
                 'start': context.conversation_start_time,
                 'end': context.actual_end_time,
                 'events': context.event_log
@@ -2683,27 +2489,19 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
 
     return results, buffer_data
 
-def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda', num_conversations=None, random_selection=False, specific_indices=None, data_source='goalstep', threshold_range=None, num_thresholds=None):
+def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda', num_conversations=None, random_selection=False, specific_indices=None, data_source='goalstep'):
     """Evaluate conversations across different streaming thresholds to analyze threshold sensitivity."""
     import torch
     
     # Use config defaults if not provided
     if num_conversations is None:
         num_conversations = Config.DEFAULT_NUM_VIDEOS
-    if threshold_range is None:
-        threshold_range = Config.DEFAULT_THRESHOLD_RANGE
-    if num_thresholds is None:
-        num_thresholds = Config.DEFAULT_NUM_THRESHOLDS
     
     # Generate threshold values - use debug thresholds for quick testing
-    if num_thresholds == Config.DEFAULT_NUM_THRESHOLDS:  # Default case
-        thresholds = np.array(Config.DEBUG_THRESHOLDS)
-        num_thresholds = len(Config.DEBUG_THRESHOLDS)
-    else:
-        thresholds = np.linspace(threshold_range[0], threshold_range[1], num_thresholds)
+    thresholds = np.array(Config.DEBUG_THRESHOLDS)
+    num_thresholds = len(Config.DEBUG_THRESHOLDS)
     
     print(f"🔄 Starting threshold sweep analysis for {data_source} dataset")
-    print(f"📊 Threshold range: {threshold_range[0]:.3f} to {threshold_range[1]:.3f} ({num_thresholds} points)")
     print(f"📊 Thresholds: {[f'{t:.3f}' for t in thresholds]}")
     print("=" * 80)
     
@@ -2727,7 +2525,7 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
     # Store results for each threshold
     all_threshold_results = {}
     all_frame_scores_data = {}  # Collect frame scores data for all thresholds
-    all_rebuffering_data = {}  # Collect rebuffering time data for all thresholds
+    all_buffer_data = {}  # Collect buffer data for all thresholds
     
     for i, threshold in enumerate(thresholds):
         print(f"\n🎯 THRESHOLD {i+1}/{num_thresholds}: {threshold:.3f}")
@@ -2741,7 +2539,7 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
         print(f"🎲 Set random seeds for deterministic behavior")
         
         # Run evaluation with this threshold using the SAME conversations
-        results = streaming_evaluate_conversations(
+        results, buffer_data = streaming_evaluate_conversations(
             model=model,
             tokenizer=tokenizer,
             dataset=dataset,
@@ -2758,41 +2556,49 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
         
         # Collect frame scores data for this threshold
         threshold_frame_scores = {}
-        threshold_rebuffering_data = {}
         for j, result in enumerate(results):
             if 'frame_scores_data' in result and result['frame_scores_data']:
                 conv_key = f"conv_{j}"
                 threshold_frame_scores[conv_key] = result['frame_scores_data']
-            
-            # Collect rebuffering time data
-            if 'rebuffering_times' in result and result['rebuffering_times']:
-                conv_key = f"conv_{j}"
-                threshold_rebuffering_data[conv_key] = {
-                    'rebuffering_times': result['rebuffering_times'],
-                    'average_rebuffering_time': result.get('average_rebuffering_time', 0.0),
-                    'total_rebuffering_time': result.get('total_rebuffering_time', 0.0)
-                }
         
         all_frame_scores_data[threshold] = threshold_frame_scores
-        all_rebuffering_data[threshold] = threshold_rebuffering_data
+        all_buffer_data[threshold] = buffer_data
         
         # Print summary for this threshold
         if results:
             avg_ppl = sum(r['lm_ppl'] for r in results) / len(results)
             avg_fluency = sum(r['fluency'] for r in results) / len(results)
             avg_responses = sum(len(r['generated_turns']) for r in results) / len(results)
-            avg_rebuffering = sum(r.get('average_rebuffering_time', 0.0) for r in results) / len(results)
+            
+            # Calculate rebuffering metrics from buffer_data
+            reading_rebuffering_times = []
+            listening_rebuffering_times = []
+            avg_reading_rebuffering = 0.0
+            avg_listening_rebuffering = 0.0
+            
+            if buffer_data:
+                for cid, conversation_buffer in buffer_data.items():
+                    reading_traj = conversation_buffer.get('reading', {})
+                    listening_traj = conversation_buffer.get('listening', {})
+                    
+                    if 'rebuffer_values' in reading_traj and reading_traj['rebuffer_values']:
+                        final_reading_rebuffer = reading_traj['rebuffer_values'][-1]
+                        reading_rebuffering_times.append(final_reading_rebuffer)
+                    
+                    if 'rebuffer_values' in listening_traj and listening_traj['rebuffer_values']:
+                        final_listening_rebuffer = listening_traj['rebuffer_values'][-1]
+                        listening_rebuffering_times.append(final_listening_rebuffer)
+                
+                avg_reading_rebuffering = np.mean(reading_rebuffering_times) if reading_rebuffering_times else 0.0
+                avg_listening_rebuffering = np.mean(listening_rebuffering_times) if listening_rebuffering_times else 0.0
+            
+            # Calculate final frame utilization from results
+            avg_final_utilization = sum(r.get('final_frame_utilization', 0.0) for r in results) / len(results)
             
             print(f"📊 Threshold {threshold:.3f} Summary:")
             print(f"   • Average PPL: {avg_ppl:.3f}")
             print(f"   • Average Fluency: {avg_fluency:.3f}")
             print(f"   • Average Responses: {avg_responses:.1f}")
-            print(f"   • Average Rebuffering Time: {avg_rebuffering:.3f}s")
-            
-            # Add user rebuffering metrics to summary
-            avg_reading_rebuffering = sum(r.get('average_reading_rebuffering_time', 0.0) for r in results) / len(results)
-            avg_listening_rebuffering = sum(r.get('average_listening_rebuffering_time', 0.0) for r in results) / len(results)
-            avg_final_utilization = sum(r.get('final_frame_utilization', 0.0) for r in results) / len(results)
             print(f"   • Average Reading Rebuffering Time: {avg_reading_rebuffering:.3f}s")
             print(f"   • Average Listening Rebuffering Time: {avg_listening_rebuffering:.3f}s")
             print(f"   • Average Final Frame Utilization: {avg_final_utilization:.3f}")
@@ -2803,7 +2609,7 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
     
     # Create comprehensive threshold analysis visualization
     print(f"\n📊 Creating threshold sensitivity analysis...")
-    create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data, all_rebuffering_data, data_source=data_source)
+    create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data, all_buffer_data, data_source=data_source)
     
     return all_threshold_results
 
@@ -3410,7 +3216,6 @@ def main():
     print(f"   • Frame Num Tokens: {Config.FRAME_NUM_TOKENS}")
     print(f"   • V Placeholder ID: {Config.V_PLACEHOLDER_ID}")
     print(f"   • Default Num Videos: {Config.DEFAULT_NUM_VIDEOS}")
-    print(f"   • Default Threshold Range: {Config.DEFAULT_THRESHOLD_RANGE}")
     print(f"   • Debug Thresholds: {Config.DEBUG_THRESHOLDS}")
     print(f"   • User Reading Speed: {Config.USER_READING_SPEED_MIN}-{Config.USER_READING_SPEED_MAX} wps")
     print(f"   • User Listening Speed: {Config.USER_LISTENING_SPEED_MIN}-{Config.USER_LISTENING_SPEED_MAX} wps")
@@ -3458,7 +3263,6 @@ def main():
                 num_conversations=num_videos,
                 random_selection=True,
                 data_source=data_source
-                # Use config defaults for threshold_range and num_thresholds
             )
             print("✅ Threshold sweep analysis completed!")
             return
@@ -3595,7 +3399,7 @@ def main():
         print(f"❌ Error during evaluation: {e}")
         traceback.print_exc()
 
-def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data=None, all_rebuffering_data=None, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
+def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data=None, all_buffer_data=None, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create unified comprehensive threshold analysis with frame score trends and error bars."""
     
     # Create output directory if it doesn't exist
@@ -3620,8 +3424,6 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         'frame_score_means': [],
         'frame_score_stds': [],
         'frame_score_below_threshold_ratios': [],
-        'rebuffering_means': [],
-        'rebuffering_stds': [],
         'reading_rebuffering_means': [],
         'reading_rebuffering_stds': [],
         'listening_rebuffering_means': [],
@@ -3639,7 +3441,25 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         gt_ppls = [r.get('lm_ppl', 0.0) for r in results]
         fluencies = [r.get('fluency', 0.0) for r in results]
         response_counts = [len(r.get('generated_turns', [])) for r in results]
-        rebuffering_times = [r.get('average_rebuffering_time', 0.0) for r in results]
+        
+        # Extract rebuffering data from buffer_data for this threshold
+        reading_rebuffering_times = []
+        listening_rebuffering_times = []
+        
+        if all_buffer_data and threshold in all_buffer_data:
+            buffer_data = all_buffer_data[threshold]
+            if buffer_data:
+                for cid, conversation_buffer in buffer_data.items():
+                    reading_traj = conversation_buffer.get('reading', {})
+                    listening_traj = conversation_buffer.get('listening', {})
+                    
+                    if 'rebuffer_values' in reading_traj and reading_traj['rebuffer_values']:
+                        final_reading_rebuffer = reading_traj['rebuffer_values'][-1]
+                        reading_rebuffering_times.append(final_reading_rebuffer)
+                    
+                    if 'rebuffer_values' in listening_traj and listening_traj['rebuffer_values']:
+                        final_listening_rebuffer = listening_traj['rebuffer_values'][-1]
+                        listening_rebuffering_times.append(final_listening_rebuffer)
         
         gt_prefix_ppls = []
         vlm_prefix_ppls = []
@@ -3677,13 +3497,7 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         detailed_metrics['frame_score_means'].append(np.mean(frame_scores) if frame_scores else 0.0)
         detailed_metrics['frame_score_stds'].append(np.std(frame_scores) if frame_scores else 0.0)
         detailed_metrics['frame_score_below_threshold_ratios'].append(np.mean(below_threshold_ratios) if below_threshold_ratios else 0.0)
-        detailed_metrics['rebuffering_means'].append(np.mean(rebuffering_times) if rebuffering_times else 0.0)
-        detailed_metrics['rebuffering_stds'].append(np.std(rebuffering_times) if rebuffering_times else 0.0)
-        
-        # Collect user rebuffering metrics
-        reading_rebuffering_times = [r.get('average_reading_rebuffering_time', 0.0) for r in results]
-        listening_rebuffering_times = [r.get('average_listening_rebuffering_time', 0.0) for r in results]
-        
+        # Use the rebuffering data extracted from buffer_data
         detailed_metrics['reading_rebuffering_means'].append(np.mean(reading_rebuffering_times) if reading_rebuffering_times else 0.0)
         detailed_metrics['reading_rebuffering_stds'].append(np.std(reading_rebuffering_times) if reading_rebuffering_times else 0.0)
         detailed_metrics['listening_rebuffering_means'].append(np.mean(listening_rebuffering_times) if listening_rebuffering_times else 0.0)
@@ -3695,7 +3509,7 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         detailed_metrics['final_utilization_stds'].append(np.std(final_utilization_times) if final_utilization_times else 0.0)
     
     # Create comprehensive visualization with 2x4 grid (added user rebuffering analysis)
-    fig, axes = plt.subplots(2, 5, figsize=(30, 12))
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
     fig.suptitle(f'Unified Threshold Analysis - {data_source.upper()} Dataset', fontsize=18, fontweight='bold')
     
     # 1. Decomposed VLM PPL - One line per video
@@ -3879,177 +3693,26 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         ax4.text(0.5, 0.5, 'No frame score data available', ha='center', va='center', transform=ax4.transAxes)
         ax4.set_title('Frame Score Trends Over Time')
     
-    # 5. Rebuffering Time vs Threshold (Per Video)
+    # 5. Combined Reading vs Listening Rebuffering Comparison
     ax5 = axes[1, 1]
-    if all_rebuffering_data:
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+    if all_buffer_data and detailed_metrics['reading_rebuffering_means'] and detailed_metrics['listening_rebuffering_means']:
+        # Plot reading vs listening rebuffering comparison
+        ax5.errorbar(thresholds, detailed_metrics['reading_rebuffering_means'], yerr=detailed_metrics['reading_rebuffering_stds'], 
+                    fmt='o-', color='#1f77b4', linewidth=3, markersize=8, capsize=5, 
+                    label='Reading Rebuffering ± Std', alpha=0.9)
         
-        # Collect rebuffering data for each video across thresholds
-        video_rebuffering = {}  # {video_idx: {threshold: avg_rebuffering}}
-        
-        for threshold in thresholds:
-            if threshold in all_rebuffering_data:
-                threshold_data = all_rebuffering_data[threshold]
-                for j, (conv_key, conv_data) in enumerate(threshold_data.items()):
-                    if j not in video_rebuffering:
-                        video_rebuffering[j] = {}
-                    
-                    # Get average rebuffering time for this video at this threshold
-                    if 'average_rebuffering_time' in conv_data:
-                        video_rebuffering[j][threshold] = conv_data['average_rebuffering_time']
-        
-        # Plot each video's rebuffering trajectory
-        for j, video_data in video_rebuffering.items():
-            if len(video_data) > 1:  # Only plot if we have data for multiple thresholds
-                video_thresholds = sorted(video_data.keys())
-                video_rebuffering_list = [video_data[t] for t in video_thresholds]
-                color = colors[j % len(colors)]
-                ax5.plot(video_thresholds, video_rebuffering_list, 'o-', color=color, linewidth=2, markersize=4, 
-                        label=f'Video {j+1}', alpha=0.8)
-        
-        # Add average rebuffering time line with error bars
-        if detailed_metrics['rebuffering_means']:
-            ax5.errorbar(thresholds, detailed_metrics['rebuffering_means'], yerr=detailed_metrics['rebuffering_stds'], 
-                        fmt='s-', color='black', linewidth=3, markersize=8, capsize=5, 
-                        label='Average Rebuffering Time ± Std', alpha=0.9)
+        ax5.errorbar(thresholds, detailed_metrics['listening_rebuffering_means'], yerr=detailed_metrics['listening_rebuffering_stds'], 
+                    fmt='s-', color='#ff7f0e', linewidth=3, markersize=8, capsize=5, 
+                    label='Listening Rebuffering ± Std', alpha=0.9)
         
         ax5.set_xlabel('Streaming Threshold')
         ax5.set_ylabel('Rebuffering Time (seconds)')
-        ax5.set_title('Rebuffering Time vs Threshold (Per Video)')
+        ax5.set_title('Reading vs Listening Rebuffering Comparison')
         ax5.grid(True, alpha=0.3)
         ax5.legend(fontsize=9)
     else:
         ax5.text(0.5, 0.5, 'No rebuffering data available', ha='center', va='center', transform=ax5.transAxes)
-        ax5.set_title('Rebuffering Time vs Threshold (Per Video)')
-    
-    # 6. Reading Rebuffering Time vs Threshold (Per Video)
-    ax6 = axes[1, 2]
-    if detailed_metrics['reading_rebuffering_means']:
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-        
-        # Collect reading rebuffering data for each video across thresholds
-        video_reading_rebuffering = {}  # {video_idx: {threshold: avg_reading_rebuffering}}
-        
-        for threshold in thresholds:
-            if threshold in all_threshold_results:
-                results = all_threshold_results[threshold]
-                for j, result in enumerate(results):
-                    if j not in video_reading_rebuffering:
-                        video_reading_rebuffering[j] = {}
-                    
-                    # Get average reading rebuffering time for this video at this threshold
-                    if 'average_reading_rebuffering_time' in result:
-                        video_reading_rebuffering[j][threshold] = result['average_reading_rebuffering_time']
-        
-        # Plot each video's reading rebuffering trajectory
-        for j, video_data in video_reading_rebuffering.items():
-            if len(video_data) > 1:  # Only plot if we have data for multiple thresholds
-                video_thresholds = sorted(video_data.keys())
-                video_reading_rebuffering_list = [video_data[t] for t in video_thresholds]
-                color = colors[j % len(colors)]
-                ax6.plot(video_thresholds, video_reading_rebuffering_list, 'o-', color=color, linewidth=2, markersize=4, 
-                        label=f'Video {j+1}', alpha=0.8)
-        
-        # Add average reading rebuffering time line with error bars
-        ax6.errorbar(thresholds, detailed_metrics['reading_rebuffering_means'], yerr=detailed_metrics['reading_rebuffering_stds'], 
-                    fmt='s-', color='black', linewidth=3, markersize=8, capsize=5, 
-                    label='Average Reading Rebuffering ± Std', alpha=0.9)
-        
-        ax6.set_xlabel('Streaming Threshold')
-        ax6.set_ylabel('Reading Rebuffering Time (seconds)')
-        ax6.set_title('Reading Rebuffering Time vs Threshold (Per Video)')
-        ax6.grid(True, alpha=0.3)
-        ax6.legend(fontsize=9)
-    else:
-        ax6.text(0.5, 0.5, 'No reading rebuffering data available', ha='center', va='center', transform=ax6.transAxes)
-        ax6.set_title('Reading Rebuffering Time vs Threshold (Per Video)')
-    
-    # 7. Listening Rebuffering Time vs Threshold (Per Video)
-    ax7 = axes[1, 3]
-    if detailed_metrics['listening_rebuffering_means']:
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-        
-        # Collect listening rebuffering data for each video across thresholds
-        video_listening_rebuffering = {}  # {video_idx: {threshold: avg_listening_rebuffering}}
-        
-        for threshold in thresholds:
-            if threshold in all_threshold_results:
-                results = all_threshold_results[threshold]
-                for j, result in enumerate(results):
-                    if j not in video_listening_rebuffering:
-                        video_listening_rebuffering[j] = {}
-                    
-                    # Get average listening rebuffering time for this video at this threshold
-                    if 'average_listening_rebuffering_time' in result:
-                        video_listening_rebuffering[j][threshold] = result['average_listening_rebuffering_time']
-        
-        # Plot each video's listening rebuffering trajectory
-        for j, video_data in video_listening_rebuffering.items():
-            if len(video_data) > 1:  # Only plot if we have data for multiple thresholds
-                video_thresholds = sorted(video_data.keys())
-                video_listening_rebuffering_list = [video_data[t] for t in video_thresholds]
-                color = colors[j % len(colors)]
-                ax7.plot(video_thresholds, video_listening_rebuffering_list, 'o-', color=color, linewidth=2, markersize=4, 
-                        label=f'Video {j+1}', alpha=0.8)
-        
-        # Add average listening rebuffering time line with error bars
-        ax7.errorbar(thresholds, detailed_metrics['listening_rebuffering_means'], yerr=detailed_metrics['listening_rebuffering_stds'], 
-                    fmt='s-', color='black', linewidth=3, markersize=8, capsize=5, 
-                    label='Average Listening Rebuffering ± Std', alpha=0.9)
-        
-        ax7.set_xlabel('Streaming Threshold')
-        ax7.set_ylabel('Listening Rebuffering Time (seconds)')
-        ax7.set_title('Listening Rebuffering Time vs Threshold (Per Video)')
-        ax7.grid(True, alpha=0.3)
-        ax7.legend(fontsize=9)
-    else:
-        ax7.text(0.5, 0.5, 'No listening rebuffering data available', ha='center', va='center', transform=ax7.transAxes)
-        ax7.set_title('Listening Rebuffering Time vs Threshold (Per Video)')
-    
-    # 8. Final Frame Resource Utilization vs Threshold (Per Video)
-    ax8 = axes[1, 4]
-    if detailed_metrics['final_utilization_means']:
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-        
-        # Collect final utilization data for each video across thresholds
-        video_final_utilization = {}  # {video_idx: {threshold: final_utilization}}
-        
-        for threshold in thresholds:
-            if threshold in all_threshold_results:
-                results = all_threshold_results[threshold]
-                for j, result in enumerate(results):
-                    if j not in video_final_utilization:
-                        video_final_utilization[j] = {}
-                    
-                    # Get final frame utilization for this video at this threshold
-                    if 'final_frame_utilization' in result:
-                        video_final_utilization[j][threshold] = result['final_frame_utilization']
-        
-        # Plot each video's final utilization trajectory
-        for j, video_data in video_final_utilization.items():
-            if len(video_data) > 1:  # Only plot if we have data for multiple thresholds
-                video_thresholds = sorted(video_data.keys())
-                video_final_utilization_list = [video_data[t] for t in video_thresholds]
-                color = colors[j % len(colors)]
-                ax8.plot(video_thresholds, video_final_utilization_list, 'o-', color=color, linewidth=2, markersize=4, 
-                        label=f'Video {j+1}', alpha=0.8)
-        
-        # Add average final utilization line with error bars
-        ax8.errorbar(thresholds, detailed_metrics['final_utilization_means'], yerr=detailed_metrics['final_utilization_stds'], 
-                    fmt='s-', color='black', linewidth=3, markersize=8, capsize=5, 
-                    label='Average Final Utilization ± Std', alpha=0.9)
-        
-        # Add horizontal line at 1.0 (100% utilization)
-        ax8.axhline(y=1.0, color='red', linestyle='--', alpha=0.7, label='100% Utilization')
-        
-        ax8.set_xlabel('Streaming Threshold')
-        ax8.set_ylabel('Final Frame Resource Utilization')
-        ax8.set_title('Final Frame Resource Utilization vs Threshold (Per Video)')
-        ax8.grid(True, alpha=0.3)
-        ax8.legend(fontsize=9)
-    else:
-        ax8.text(0.5, 0.5, 'No final utilization data available', ha='center', va='center', transform=ax8.transAxes)
-        ax8.set_title('Final Frame Resource Utilization vs Threshold (Per Video)')
+        ax5.set_title('Reading vs Listening Rebuffering Comparison')
     
     plt.tight_layout()
     
@@ -4124,13 +3787,6 @@ def calculate_fluency_score(generated_turns, original_conversation, data_source=
 def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, device, data_source='goalstep', use_visual=True, custom_threshold=None):
     """Calculate PPL for a single response using the proper conversation format."""
     try:
-        # Limit conversation length to avoid OOM in stream_evaluate
-        max_conversation_length = 20  # Limit to last 20 turns to reduce memory usage
-        if len(conversation) > max_conversation_length:
-            # Keep system prompt and stream, then take last N turns
-            limited_conversation = conversation[:2]  # Keep system and stream
-            limited_conversation.extend(conversation[-(max_conversation_length-2):])  # Add last N-2 turns
-            conversation = limited_conversation
         
         # Tokenize the conversation
         input_text = tokenizer.apply_chat_template(
@@ -4688,122 +4344,6 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, conversatio
             }
         }
 
-def evaluate_video_with_model(model, tokenizer, video_tensor, conversation, generated_turns, device, frame_fps=2):
-    """Evaluate video using the same approach as evaluate.py - using stream_evaluate and compute_metrics."""
-    
-    try:
-        # Prepare conversation for evaluation (like the dataset does)
-        eval_conversation = []
-        for turn in conversation:
-            if turn['role'] == 'user':
-                eval_conversation.append({'role': 'user', 'content': turn['content']})
-            elif turn['role'] == 'assistant':
-                eval_conversation.append({'role': 'assistant', 'content': turn['content']})
-        
-        # Add generated turns to conversation
-        for turn in generated_turns:
-            eval_conversation.append({
-                'role': 'assistant', 
-                'content': turn['content'],
-                'time': turn['time']
-            })
-        
-        
-        # Tokenize conversation using the same approach as the dataset
-        input_text = " ".join([turn['content'] for turn in eval_conversation])
-        input_ids = tokenizer.encode(input_text, return_tensors='pt').to(device)
-        
-        
-        # Prepare video frames (use all frames for proper evaluation)
-        frames = video_tensor.unsqueeze(0).to(device)  # Add batch dimension
-        
-        
-        # Use model's stream_evaluate method (same as in evaluate.py)
-        if hasattr(model, 'stream_evaluate'):
-            try:
-                
-                # Create labels for evaluation (same as in the dataset)
-                labels = input_ids.clone()
-                
-                # Call stream_evaluate with the same parameters as the benchmark
-                raw_metrics = model.stream_evaluate(
-                    input_ids=input_ids,
-                    labels=labels,
-                    frames=frames,
-                    frame_token_interval_threshold=Config.STREAMING_THRESHOLD_GOALSTEP,
-                    ignore_token_id=-100
-                )
-                
-                
-                # Process metrics exactly like the dataset's compute_metrics method
-                lm_ppl, frame_diff, fluency, _ = raw_metrics.mean(dim=0).tolist()
-                
-                return {
-                    'lm_ppl': lm_ppl,
-                    'fluency': fluency
-                }
-                
-            except Exception as e:
-                print(f"Warning: stream_evaluate failed: {e}")
-                traceback.print_exc()
-        else:
-            print(f"Warning: Model does not have stream_evaluate method")
-        
-        # Fallback: calculate basic metrics from generated content
-        return calculate_basic_content_metrics(generated_turns, conversation)
-        
-    except Exception as e:
-        print(f"Warning: Video evaluation failed: {e}")
-        traceback.print_exc()
-        return calculate_basic_content_metrics(generated_turns, conversation)
-
-def calculate_basic_content_metrics(generated_turns, conversation):
-    """Calculate basic content metrics as fallback."""
-    # Basic content-based metrics
-    num_generated = len(generated_turns)
-    num_ground_truth = len([t for t in conversation if t['role'] == 'assistant'])
-    
-    # Calculate average response length
-    avg_response_length = sum(len(turn.get('content', turn.get('text', '')).split()) for turn in generated_turns) / max(1, num_generated)
-    
-    # Calculate timing accuracy (simplified)
-    time_accuracy = 1.0  # Default perfect timing accuracy
-    
-    # Simple PPL estimation based on response quality
-    # This is a fallback when proper PPL calculation fails
-    base_ppl = 2.5  # Base PPL for reasonable models
-    length_factor = max(0.5, min(2.0, avg_response_length / 20.0))  # Normalize by expected length
-    response_diversity = len(set(turn.get('content', turn.get('text', ''))[:50] for turn in generated_turns)) / max(1, num_generated)  # Character diversity
-    diversity_factor = max(0.5, min(2.0, response_diversity))  # Diversity factor
-    
-    lm_ppl = base_ppl * length_factor * diversity_factor
-    
-    # Skip unused calculations
-    # Calculate fluency: proportion of consecutive successful token predictions within a dialogue turn
-    # Based on the paper's implementation: fluency = (num_learn_v_tokens + num_lm_correct_tokens) / num_learn_valid_tokens
-    fluency = 1.0  # Default fluency score
-    if generated_turns and conversation:
-        total_turns = len(generated_turns)
-        total_gt_turns = len([t for t in conversation if t['role'] == 'assistant'])
-        
-        if total_gt_turns > 0:
-            # Simplified fluency calculation based on response success rate
-            # In streaming evaluation, we consider a response "successful" if it has reasonable length and content
-            successful_responses = 0
-            for turn in generated_turns:
-                response_text = turn.get('text', turn.get('content', ''))
-                if response_text and len(response_text.split()) >= 2:  # At least 2 words
-                    successful_responses += 1
-            
-            # Fluency as proportion of successful responses
-            fluency = successful_responses / total_gt_turns if total_gt_turns > 0 else 0.0
-            fluency = max(0.0, min(1.0, fluency))  # Clamp to [0, 1]
-    
-    return {
-        'lm_ppl': lm_ppl,
-        'fluency': fluency
-    }
-
 def create_aggregated_metrics_visualization(results, buffer_data=None, output_dir="timing_plots", data_source="goalstep"):
     """Create aggregated metrics visualization with 4 vertical bar plots in scientific style."""
     
@@ -4901,7 +4441,6 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
     ax1.axhline(gt_ppl_mean, color='red', linestyle='--', linewidth=1.5, 
                 label=f'GT: {gt_ppl_mean:.2f}')
     ax1.set_ylabel('Perplexity')
-    ax1.set_title('(a) VLM Perplexity', fontweight='bold')
     ax1.set_xticks([0])
     ax1.set_xticklabels(['VLM'])
     ax1.legend(loc='upper right', frameon=True, fancybox=False, shadow=False)
@@ -4925,7 +4464,6 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
                     color=rebuffer_colors, alpha=0.8, capsize=4, width=0.4,
                     edgecolor='black', linewidth=0.5)
     ax2.set_ylabel('Time (s)')
-    ax2.set_title('(b) Cumulative Rebuffering', fontweight='bold')
     ax2.set_xticks(x_pos_rebuffer)
     ax2.set_xticklabels(rebuffer_labels)
     ax2.grid(True, alpha=0.3, axis='y')
@@ -4943,7 +4481,6 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
                     color=colors[2], alpha=0.8, capsize=4, width=0.4,
                     edgecolor='black', linewidth=0.5)
     ax3.set_ylabel('Score')
-    ax3.set_title('(c) Fluency', fontweight='bold')
     ax3.set_ylim(0, 1.0)
     ax3.set_xticks([0])
     ax3.set_xticklabels(['Fluency'])
@@ -4961,7 +4498,6 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
                     color=colors[3], alpha=0.8, capsize=4, width=0.4,
                     edgecolor='black', linewidth=0.5)
     ax4.set_ylabel('Time (s)')
-    ax4.set_title('(d) Response Latency', fontweight='bold')
     ax4.set_xticks([0])
     ax4.set_xticklabels(['Latency'])
     ax4.grid(True, alpha=0.3, axis='y')
