@@ -62,7 +62,7 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 600            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 200            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
@@ -1394,7 +1394,116 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
 
     plt.show()
 
+    # Create additional comparison bar chart
+    create_memory_comparison_chart(all_memory_data, output_dir, data_source)
+
     return output_path
+
+
+def create_memory_comparison_chart(all_memory_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
+    """Create comparison bar chart for final memory usage and KV cache transfer times across videos"""
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    if not all_memory_data:
+        print("⚠️ No memory data available for comparison chart")
+        return None
+    
+    # Extract data for comparison
+    conversation_keys = []
+    final_memory_usage = []
+    total_kv_offload_time = []
+    total_kv_reload_time = []
+    max_kv_cache_memory = []
+    
+    for conversation_key, data in all_memory_data.items():
+        conversation_keys.append(conversation_key)
+        
+        # Final memory usage (last frame)
+        memory_usage = data.get('memory_usage', [])
+        final_memory = memory_usage[-1] if memory_usage else 0.0
+        final_memory_usage.append(final_memory)
+        
+        # Total KV cache transfer times
+        kv_offload_times = data.get('kv_offload_time', [])
+        kv_reload_times = data.get('kv_reload_time', [])
+        total_offload = sum(kv_offload_times) * 1000.0  # Convert to ms
+        total_reload = sum(kv_reload_times) * 1000.0    # Convert to ms
+        total_kv_offload_time.append(total_offload)
+        total_kv_reload_time.append(total_reload)
+        
+        # Max KV cache memory usage
+        kv_cache_memory = data.get('kv_cache_memory', [])
+        max_kv_cache = max(kv_cache_memory) if kv_cache_memory else 0.0
+        max_kv_cache_memory.append(max_kv_cache)
+    
+    # Create the comparison chart
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
+    fig.suptitle(f'Memory Usage Comparison Across Videos - {data_source.upper()} Dataset', fontsize=16, fontweight='bold')
+    
+    # Convert conversation keys to shorter labels for better display
+    video_labels = [f'Video {i+1}' for i in range(len(conversation_keys))]
+    
+    # 1. Final Memory Usage Comparison
+    bars1 = ax1.bar(video_labels, final_memory_usage, color='#1f77b4', alpha=0.7, edgecolor='black', linewidth=0.5)
+    ax1.set_title('Final Memory Usage (nvidia-smi)', fontweight='bold')
+    ax1.set_ylabel('Memory (MB)')
+    ax1.grid(True, alpha=0.3, axis='y')
+    ax1.tick_params(axis='x', rotation=45)
+    
+    # Add value labels on bars
+    for bar, value in zip(bars1, final_memory_usage):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height + max(final_memory_usage)*0.01,
+                f'{value:.0f}MB', ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
+    # 2. KV Cache Transfer Times Comparison
+    x_pos = np.arange(len(video_labels))
+    width = 0.35
+    
+    bars2_offload = ax2.bar(x_pos - width/2, total_kv_offload_time, width, 
+                           label='Offload → CPU', color='#ff7f0e', alpha=0.7, edgecolor='black', linewidth=0.5)
+    bars2_reload = ax2.bar(x_pos + width/2, total_kv_reload_time, width,
+                          label='Reload → GPU', color='#2ca02c', alpha=0.7, edgecolor='black', linewidth=0.5)
+    
+    ax2.set_title('Total KV Cache Transfer Times', fontweight='bold')
+    ax2.set_ylabel('Time (ms)')
+    ax2.set_xticks(x_pos)
+    ax2.set_xticklabels(video_labels, rotation=45)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3, axis='y')
+    
+    # Add value labels on bars
+    for bars, values in [(bars2_offload, total_kv_offload_time), (bars2_reload, total_kv_reload_time)]:
+        for bar, value in zip(bars, values):
+            height = bar.get_height()
+            ax2.text(bar.get_x() + bar.get_width()/2., height + max(max(total_kv_offload_time), max(total_kv_reload_time))*0.01,
+                    f'{value:.1f}ms', ha='center', va='bottom', fontsize=8, fontweight='bold')
+    
+    # 3. Max KV Cache Memory Usage
+    bars3 = ax3.bar(video_labels, max_kv_cache_memory, color='#d62728', alpha=0.7, edgecolor='black', linewidth=0.5)
+    ax3.set_title('Peak KV Cache Memory Usage', fontweight='bold')
+    ax3.set_ylabel('Memory (MB)')
+    ax3.grid(True, alpha=0.3, axis='y')
+    ax3.tick_params(axis='x', rotation=45)
+    
+    # Add value labels on bars
+    for bar, value in zip(bars3, max_kv_cache_memory):
+        height = bar.get_height()
+        ax3.text(bar.get_x() + bar.get_width()/2., height + max(max_kv_cache_memory)*0.01,
+                f'{value:.0f}MB', ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    
+    # Save the comparison chart
+    comparison_output_path = os.path.join(output_dir, f'memory_comparison_{data_source}.png')
+    plt.savefig(comparison_output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
+    print(f"📊 Memory comparison chart saved to: {comparison_output_path}")
+    
+    plt.show()
+    
+    return comparison_output_path
 
 
 def create_frame_score_analysis(all_frame_scores_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
@@ -2275,6 +2384,7 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
         model_memory_mb=model_memory_mb if model_memory_mb is not None else calculate_model_memory_mb(model)
     )
     return context
+    
 def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', num_conversations=3, random_selection=False, specific_indices=None, data_source='goalstep', custom_threshold=None, conversation_start_times=None):
     """Evaluate multiple conversations using a shared event-driven LiveInfer instance."""
 
@@ -2487,7 +2597,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         print("\n📊 Creating processor timeline...")
         _, buffer_data = create_processor_timeline(processor_segments, idle_segments, conversation_summaries, data_source=data_source)
 
-    return results, buffer_data
+    return results, buffer_data, all_memory_data
 
 def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda', num_conversations=None, random_selection=False, specific_indices=None, data_source='goalstep'):
     """Evaluate conversations across different streaming thresholds to analyze threshold sensitivity."""
@@ -2526,6 +2636,7 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
     all_threshold_results = {}
     all_frame_scores_data = {}  # Collect frame scores data for all thresholds
     all_buffer_data = {}  # Collect buffer data for all thresholds
+    all_memory_data = {}  # Collect memory data for all thresholds
     
     for i, threshold in enumerate(thresholds):
         print(f"\n🎯 THRESHOLD {i+1}/{num_thresholds}: {threshold:.3f}")
@@ -2539,7 +2650,7 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
         print(f"🎲 Set random seeds for deterministic behavior")
         
         # Run evaluation with this threshold using the SAME conversations
-        results, buffer_data = streaming_evaluate_conversations(
+        results, buffer_data, memory_data = streaming_evaluate_conversations(
             model=model,
             tokenizer=tokenizer,
             dataset=dataset,
@@ -2563,6 +2674,7 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
         
         all_frame_scores_data[threshold] = threshold_frame_scores
         all_buffer_data[threshold] = buffer_data
+        all_memory_data[threshold] = memory_data
         
         # Print summary for this threshold
         if results:
@@ -2609,7 +2721,7 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
     
     # Create comprehensive threshold analysis visualization
     print(f"\n📊 Creating threshold sensitivity analysis...")
-    create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data, all_buffer_data, data_source=data_source)
+    create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data, all_buffer_data, all_memory_data, data_source=data_source)
     
     return all_threshold_results
 
@@ -3399,7 +3511,7 @@ def main():
         print(f"❌ Error during evaluation: {e}")
         traceback.print_exc()
 
-def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data=None, all_buffer_data=None, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
+def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_data=None, all_buffer_data=None, all_memory_data=None, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create unified comprehensive threshold analysis with frame score trends and error bars."""
     
     # Create output directory if it doesn't exist
@@ -3429,7 +3541,11 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         'listening_rebuffering_means': [],
         'listening_rebuffering_stds': [],
         'final_utilization_means': [],
-        'final_utilization_stds': []
+        'final_utilization_stds': [],
+        'final_memory_means': [],
+        'final_memory_stds': [],
+        'peak_kv_cache_means': [],
+        'peak_kv_cache_stds': []
     }
     
     for threshold in thresholds:
@@ -3507,9 +3623,31 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         final_utilization_times = [r.get('final_frame_utilization', 0.0) for r in results]
         detailed_metrics['final_utilization_means'].append(np.mean(final_utilization_times) if final_utilization_times else 0.0)
         detailed_metrics['final_utilization_stds'].append(np.std(final_utilization_times) if final_utilization_times else 0.0)
+        
+        # Extract memory data for this threshold
+        final_memory_usage = []
+        peak_kv_cache_memory = []
+        
+        if all_memory_data and threshold in all_memory_data:
+            memory_data = all_memory_data[threshold]
+            for conversation_key, data in memory_data.items():
+                # Final memory usage (last frame)
+                memory_usage = data.get('memory_usage', [])
+                if memory_usage:
+                    final_memory_usage.append(memory_usage[-1])
+                
+                # Peak KV cache memory usage
+                kv_cache_memory = data.get('kv_cache_memory', [])
+                if kv_cache_memory:
+                    peak_kv_cache_memory.append(max(kv_cache_memory))
+        
+        detailed_metrics['final_memory_means'].append(np.mean(final_memory_usage) if final_memory_usage else 0.0)
+        detailed_metrics['final_memory_stds'].append(np.std(final_memory_usage) if final_memory_usage else 0.0)
+        detailed_metrics['peak_kv_cache_means'].append(np.mean(peak_kv_cache_memory) if peak_kv_cache_memory else 0.0)
+        detailed_metrics['peak_kv_cache_stds'].append(np.std(peak_kv_cache_memory) if peak_kv_cache_memory else 0.0)
     
-    # Create comprehensive visualization with 2x4 grid (added user rebuffering analysis)
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    # Create comprehensive visualization with 3x3 grid (added memory analysis)
+    fig, axes = plt.subplots(3, 3, figsize=(27, 18))
     fig.suptitle(f'Unified Threshold Analysis - {data_source.upper()} Dataset', fontsize=18, fontweight='bold')
     
     # 1. Decomposed VLM PPL - One line per video
@@ -3713,6 +3851,60 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
     else:
         ax5.text(0.5, 0.5, 'No rebuffering data available', ha='center', va='center', transform=ax5.transAxes)
         ax5.set_title('Reading vs Listening Rebuffering Comparison')
+    
+    # 6. Final Memory Usage vs Threshold
+    ax6 = axes[2, 0]
+    if detailed_metrics['final_memory_means']:
+        ax6.errorbar(thresholds, detailed_metrics['final_memory_means'], yerr=detailed_metrics['final_memory_stds'], 
+                    fmt='o-', color='#1f77b4', linewidth=3, markersize=8, capsize=5, 
+                    label='Final Memory Usage ± Std', alpha=0.9)
+        ax6.set_xlabel('Streaming Threshold')
+        ax6.set_ylabel('Memory (MB)')
+        ax6.set_title('Final Memory Usage vs Threshold')
+        ax6.grid(True, alpha=0.3)
+        ax6.legend(fontsize=9)
+    else:
+        ax6.text(0.5, 0.5, 'No memory data available', ha='center', va='center', transform=ax6.transAxes)
+        ax6.set_title('Final Memory Usage vs Threshold')
+    
+    # 7. Peak KV Cache Memory vs Threshold
+    ax7 = axes[2, 1]
+    if detailed_metrics['peak_kv_cache_means']:
+        ax7.errorbar(thresholds, detailed_metrics['peak_kv_cache_means'], yerr=detailed_metrics['peak_kv_cache_stds'], 
+                    fmt='s-', color='#ff7f0e', linewidth=3, markersize=8, capsize=5, 
+                    label='Peak KV Cache ± Std', alpha=0.9)
+        ax7.set_xlabel('Streaming Threshold')
+        ax7.set_ylabel('Memory (MB)')
+        ax7.set_title('Peak KV Cache Memory vs Threshold')
+        ax7.grid(True, alpha=0.3)
+        ax7.legend(fontsize=9)
+    else:
+        ax7.text(0.5, 0.5, 'No KV cache data available', ha='center', va='center', transform=ax7.transAxes)
+        ax7.set_title('Peak KV Cache Memory vs Threshold')
+    
+    # 8. Memory Efficiency Comparison
+    ax8 = axes[2, 2]
+    if detailed_metrics['final_memory_means'] and detailed_metrics['peak_kv_cache_means']:
+        # Normalize both metrics to 0-1 scale for comparison
+        final_memory_norm = np.array(detailed_metrics['final_memory_means'])
+        peak_kv_norm = np.array(detailed_metrics['peak_kv_cache_means'])
+        
+        # Normalize to 0-1 scale
+        final_memory_norm = (final_memory_norm - np.min(final_memory_norm)) / (np.max(final_memory_norm) - np.min(final_memory_norm) + 1e-8)
+        peak_kv_norm = (peak_kv_norm - np.min(peak_kv_norm)) / (np.max(peak_kv_norm) - np.min(peak_kv_norm) + 1e-8)
+        
+        ax8.plot(thresholds, final_memory_norm, 'o-', color='#1f77b4', linewidth=3, markersize=8, 
+                label='Final Memory (Normalized)', alpha=0.9)
+        ax8.plot(thresholds, peak_kv_norm, 's-', color='#ff7f0e', linewidth=3, markersize=8, 
+                label='Peak KV Cache (Normalized)', alpha=0.9)
+        ax8.set_xlabel('Streaming Threshold')
+        ax8.set_ylabel('Normalized Memory Usage')
+        ax8.set_title('Memory Usage Comparison (Normalized)')
+        ax8.grid(True, alpha=0.3)
+        ax8.legend(fontsize=9)
+    else:
+        ax8.text(0.5, 0.5, 'No memory data available', ha='center', va='center', transform=ax8.transAxes)
+        ax8.set_title('Memory Usage Comparison (Normalized)')
     
     plt.tight_layout()
     
