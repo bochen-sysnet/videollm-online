@@ -62,15 +62,15 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 20            # Max frames for evaluation (use full video)
-    BATCH_SIZE_LIMIT = 10                # Max frames to load at once
+    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
+    BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
     DEFAULT_NUM_VIDEOS = 2             # Default number of videos for evaluation
-    # DEBUG_THRESHOLDS = [0.9, 0.92]         # Coarse-grained thresholds
-    DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
+    DEBUG_THRESHOLDS = [0.92, 0.94]         # Coarse-grained thresholds
+    # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
     # User-level rebuffering configuration
     USER_READING_SPEED_MIN = 3.0          # Words per second (slow reading)
@@ -1444,8 +1444,6 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
     plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
     print(f"📊 Memory usage analysis saved to: {output_path}")
 
-    plt.show()
-
     # Create additional comparison bar chart
     create_memory_comparison_chart(all_memory_data, output_dir, data_source)
 
@@ -1991,26 +1989,64 @@ class EventDrivenConversationContext:
 
         kv_cache_memory_mb = calculate_kv_cache_memory_mb(liveinfer.past_key_values)
         
-        # Estimate activation memory (reserved - allocated = cached/workspace memory)
-        # This includes CUDA kernels, cuDNN workspace, etc.
-        activation_memory_mb = max(torch_reserved_mb - torch_allocated_mb, 0.0)
+        # === Complete Memory Breakdown ===
+        # 1. Model parameters (static)
+        model_memory_mb = self.model_memory_mb
         
-        # Other memory = nvidia-smi total - model - kv_cache - activations
-        # This includes CUDA context, driver allocations, and misc buffers
-        other_memory_mb = max(
-            current_memory - self.model_memory_mb - kv_cache_memory_mb - activation_memory_mb, 0.0
-        )
+        # 2. KV cache (grows with sequence length)
+        # kv_cache_memory_mb already calculated above
+        
+        # 3. Other allocated tensors (intermediate activations, embeddings, buffers)
+        other_allocated_mb = max(torch_allocated_mb - model_memory_mb - kv_cache_memory_mb, 0.0)
+        
+        # 4. PyTorch memory pool overhead (reserved - allocated)
+        pytorch_pool_mb = max(torch_reserved_mb - torch_allocated_mb, 0.0)
+        
+        # 5. Non-PyTorch memory (nvidia-smi - reserved)
+        # Includes CUDA context, cuDNN workspace, driver allocations
+        cuda_overhead_mb = max(current_memory - torch_reserved_mb, 0.0)
+        
+        # For visualization compatibility, combine intermediate tensors
+        activation_memory_mb = other_allocated_mb
+        
+        # "Other" now represents everything outside core model + KV cache + activations
+        other_memory_mb = pytorch_pool_mb + cuda_overhead_mb
 
         self.memory_data['frames'].append(frame_idx)
         self.memory_data['memory_usage'].append(current_memory)
         self.memory_data['memory_growth'].append(memory_growth)
         self.memory_data['memory_per_frame'].append(memory_per_frame)
-        self.memory_data['model_memory'].append(self.model_memory_mb)
+        self.memory_data['model_memory'].append(model_memory_mb)
         self.memory_data['kv_cache_memory'].append(kv_cache_memory_mb)
         self.memory_data['activation_memory'].append(activation_memory_mb)
         self.memory_data['other_memory'].append(other_memory_mb)
         self.memory_data['torch_allocated'].append(torch_allocated_mb)
         self.memory_data['torch_reserved'].append(torch_reserved_mb)
+        
+        # Additional detailed breakdown
+        self.memory_data.setdefault('other_allocated', []).append(other_allocated_mb)
+        self.memory_data.setdefault('pytorch_pool', []).append(pytorch_pool_mb)
+        self.memory_data.setdefault('cuda_overhead', []).append(cuda_overhead_mb)
+        
+        # Print detailed breakdown every 10 frames for debugging
+        # if frame_idx % 10 == 0:
+        #     print(f"\n📊 Memory Breakdown at Frame {frame_idx}:")
+        #     print(f"   nvidia-smi total:        {current_memory:7.1f} MB")
+        #     print(f"   ├─ torch.reserved:       {torch_reserved_mb:7.1f} MB")
+        #     print(f"   │  ├─ torch.allocated:   {torch_allocated_mb:7.1f} MB")
+        #     print(f"   │  │  ├─ Model params:   {model_memory_mb:7.1f} MB")
+        #     print(f"   │  │  ├─ KV cache:       {kv_cache_memory_mb:7.1f} MB")
+        #     print(f"   │  │  └─ Activations:    {other_allocated_mb:7.1f} MB (model buffers, embeddings, etc.)")
+        #     print(f"   │  └─ PyTorch pool:      {pytorch_pool_mb:7.1f} MB (reserved - allocated)")
+        #     print(f"   └─ CUDA overhead:        {cuda_overhead_mb:7.1f} MB (nvidia-smi - reserved)")
+            
+        #     # Show what activations are growing
+        #     if len(self.memory_data.get('other_allocated', [])) > 1:
+        #         prev_activation = self.memory_data['other_allocated'][-2]
+        #         activation_growth = other_allocated_mb - prev_activation
+        #         if abs(activation_growth) > 1.0:  # Only show if > 1MB change
+        #             print(f"   ⚠️  Activation growth: {activation_growth:+.1f} MB since last measurement")
+        
         self.completed = False
         self.result = None
         self.generation_event_pending = False
@@ -2932,23 +2968,24 @@ class SimpleLiveInfer:
         frame_idx = int(video_time * self.frame_fps)
         if frame_idx > self.last_frame_idx:
             # Process frames one at a time to avoid OOM
-            for single_frame_idx in range(self.last_frame_idx + 1, frame_idx + 1):
-                # Stream single frame from CPU to GPU as needed
-                if self.video_tensor is not None:
-                    # Get single frame from CPU memory and move to GPU
-                    cpu_frame = self.video_tensor[single_frame_idx:single_frame_idx+1]  # Keep batch dimension
-                    gpu_frame = cpu_frame.to(self.device)
-                    
-                    # Process single frame on GPU
-                    frame_embeds = self.model.visual_embed(gpu_frame).split(self.frame_num_tokens)
-                    self.frame_embeds_queue.extend([
-                        (single_frame_idx / self.frame_fps, embed.cpu())
-                        for embed in frame_embeds
-                    ])
-                    
-                    # Immediately release GPU frame to free memory
-                    del gpu_frame
-            torch.cuda.empty_cache()
+            with torch.no_grad():
+                for single_frame_idx in range(self.last_frame_idx + 1, frame_idx + 1):
+                    # Stream single frame from CPU to GPU as needed
+                    if self.video_tensor is not None:
+                        # Get single frame from CPU memory and move to GPU
+                        cpu_frame = self.video_tensor[single_frame_idx:single_frame_idx+1]  # Keep batch dimension
+                        gpu_frame = cpu_frame.to(self.device)
+                        
+                        # Process single frame on GPU
+                        frame_embeds = self.model.visual_embed(gpu_frame).split(self.frame_num_tokens)
+                        self.frame_embeds_queue.extend([
+                            (single_frame_idx / self.frame_fps, embed.cpu())
+                            for embed in frame_embeds
+                        ])
+                        
+                        # Immediately release GPU frame to free memory
+                        del gpu_frame
+                torch.cuda.empty_cache()
         else:
             print(f"Warning: Video tensor not loaded")
                 
@@ -3129,8 +3166,9 @@ class SimpleLiveInfer:
         # print(f"Previous responses: {context_info['num_responses']}", end=", ")
         # print(f"Total tokens in past_key_values: {context_info['total_tokens']}")
 
-        inputs_embeds = self.model.get_input_embeddings()(self.last_ids)
-        next_inputs_cpu = inputs_embeds.detach().cpu()
+        with torch.no_grad():
+            inputs_embeds = self.model.get_input_embeddings()(self.last_ids)
+            next_inputs_cpu = inputs_embeds.detach().cpu()
 
         # Ensure KV cache resides on CPU while idle
         self.past_key_values = self._offload_kv_cache(self.past_key_values)
@@ -3153,44 +3191,45 @@ class SimpleLiveInfer:
         if chunk_size <= 0:
             chunk_size = Config.INPLACE_OUTPUT_SIZE
 
-        next_inputs = state['next_inputs_embeds_cpu'].to(self.device)
-        past_key_values = self._ensure_kv_on_device(state['past_key_values_cpu'])
+        with torch.no_grad():
+            next_inputs = state['next_inputs_embeds_cpu'].to(self.device)
+            past_key_values = self._ensure_kv_on_device(state['past_key_values_cpu'])
 
-        buffer = torch.zeros(1, chunk_size, dtype=torch.long, device=self.device)
-        output_ids, past_key_values, next_inputs_embeds, finished = fast_greedy_generate(
-            model=self.model,
-            inputs_embeds=next_inputs,
-            past_key_values=past_key_values,
-            eos_token_id=self.eos_token_id,
-            inplace_output_ids=buffer,
-            max_new_tokens=chunk_size,
-        )
-
-        self.timing_data['generation_video_time'] = state['video_time']
-
-        if output_ids.numel() > 0:
-            state['tokens'].append(output_ids.detach().cpu())
-            state['tokens_generated'] += output_ids.size(1)
-            self.last_ids = output_ids[:, -1:].to(self.device)
-            # decode partial response
-            self.texts_generated_previous = self.tokenizer.decode(
-                output_ids[0],
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=True,
+            buffer = torch.zeros(1, chunk_size, dtype=torch.long, device=self.device)
+            output_ids, past_key_values, next_inputs_embeds, finished = fast_greedy_generate(
+                model=self.model,
+                inputs_embeds=next_inputs,
+                past_key_values=past_key_values,
+                eos_token_id=self.eos_token_id,
+                inplace_output_ids=buffer,
+                max_new_tokens=chunk_size,
             )
 
-        if next_inputs_embeds is not None:
-            state['next_inputs_embeds_cpu'] = next_inputs_embeds.detach().cpu()
-        else:
-            state['next_inputs_embeds_cpu'] = None
+            self.timing_data['generation_video_time'] = state['video_time']
 
-        state['past_key_values_cpu'] = self._offload_kv_cache(past_key_values)
-        self.past_key_values = state['past_key_values_cpu']
+            if output_ids.numel() > 0:
+                state['tokens'].append(output_ids.detach().cpu())
+                state['tokens_generated'] += output_ids.size(1)
+                self.last_ids = output_ids[:, -1:].to(self.device)
+                # decode partial response
+                self.texts_generated_previous = self.tokenizer.decode(
+                    output_ids[0],
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=True,
+                )
 
-        if finished or state['tokens_generated'] >= Config.INPLACE_OUTPUT_SIZE:
-            state['finished'] = True
-            all_tokens = torch.cat(state['tokens'], dim=1) if state['tokens'] else torch.empty((1, 0), dtype=torch.long)
-            return all_tokens
+            if next_inputs_embeds is not None:
+                state['next_inputs_embeds_cpu'] = next_inputs_embeds.detach().cpu()
+            else:
+                state['next_inputs_embeds_cpu'] = None
+
+            state['past_key_values_cpu'] = self._offload_kv_cache(past_key_values)
+            self.past_key_values = state['past_key_values_cpu']
+
+            if finished or state['tokens_generated'] >= Config.INPLACE_OUTPUT_SIZE:
+                state['finished'] = True
+                all_tokens = torch.cat(state['tokens'], dim=1) if state['tokens'] else torch.empty((1, 0), dtype=torch.long)
+                return all_tokens
 
         return None
 
@@ -3207,40 +3246,60 @@ class SimpleLiveInfer:
                 self.last_ids = torch.cat([self.last_ids, self._added_stream_prompt_ids], dim=1)
 
             # MEASURE MODEL FORWARD PASS TIME (this is the main VLM computation)
-            model_forward_start = time.time()
-            self.past_key_values = self._ensure_kv_on_device(self.past_key_values)
-            frame_embeds = frame_embeds.to(self.device)
-            inputs_embeds = torch.cat([
-                self.model.get_input_embeddings()(self.last_ids).view(1, -1, self.hidden_size),
-                frame_embeds.view(1, -1, self.hidden_size),
-            ], dim=1)
-            del frame_embeds
-            outputs = self.model(inputs_embeds=inputs_embeds, use_cache=True, past_key_values=self.past_key_values)
-            model_forward_time = time.time() - model_forward_start
-            
-            # Store the actual model forward time
-            self.timing_data['model_forward_time'] = model_forward_time
-            
-            self.past_key_values = outputs.past_key_values
-            # 2. if the same time, response after frame at that time
-            if self.query_queue and video_time >= self.query_queue[0][0]:
-                video_time, query = self.query_queue.popleft()
-                # Note: Response triggers are now tracked in _call_for_response
-                return video_time, query
-            # 3. if the next is frame but next is not interval, then response
-            next_score = outputs.logits[:,-1:].softmax(dim=-1)
-            frame_token_interval_score = next_score[:,:,self.frame_token_interval_id].item()
-            
-            # Track frame_token_interval_score for analysis
-            self.frame_scores.append(frame_token_interval_score)
-            self.frame_times.append(video_time)
-            
-            if frame_token_interval_score < self.frame_token_interval_threshold:
-                next_score[:,:,self.frame_token_interval_id].zero_()
-            self.last_ids = next_score.argmax(dim=-1)
-            if self.last_ids.numel() == 1 and int(self.last_ids.item()) != self.frame_token_interval_id: 
-                # Note: Response triggers are now tracked in _call_for_response
-                return video_time, None
+            with torch.no_grad():
+                model_forward_start = time.time()
+                self.past_key_values = self._ensure_kv_on_device(self.past_key_values)
+                frame_embeds = frame_embeds.to(self.device)
+                inputs_embeds = torch.cat([
+                    self.model.get_input_embeddings()(self.last_ids).view(1, -1, self.hidden_size),
+                    frame_embeds.view(1, -1, self.hidden_size),
+                ], dim=1)
+                del frame_embeds
+                outputs = self.model(inputs_embeds=inputs_embeds, use_cache=True, past_key_values=self.past_key_values)
+                
+                # Free inputs_embeds immediately after forward pass
+                del inputs_embeds
+                
+                model_forward_time = time.time() - model_forward_start
+                
+                # Store the actual model forward time
+                self.timing_data['model_forward_time'] = model_forward_time
+                
+                self.past_key_values = outputs.past_key_values
+                
+                # Extract logits and break reference to outputs immediately
+                # Clone to create independent tensor, breaking reference to model buffers
+                last_logits = outputs.logits[:, -1:].clone()
+                del outputs  # Free outputs immediately to release model buffers
+                
+                # 2. if the same time, response after frame at that time
+                if self.query_queue and video_time >= self.query_queue[0][0]:
+                    video_time, query = self.query_queue.popleft()
+                    # Note: Response triggers are now tracked in _call_for_response
+                    del last_logits  # Clean up
+                    return video_time, query
+                
+                # 3. if the next is frame but next is not interval, then response
+                next_score = last_logits.softmax(dim=-1)
+                frame_token_interval_score = next_score[:,:,self.frame_token_interval_id].item()
+                
+                # Track frame_token_interval_score for analysis
+                self.frame_scores.append(frame_token_interval_score)
+                self.frame_times.append(video_time)
+                
+                if frame_token_interval_score < self.frame_token_interval_threshold:
+                    next_score[:,:,self.frame_token_interval_id].zero_()
+                self.last_ids = next_score.argmax(dim=-1)
+                
+                # Free tensors immediately
+                del next_score
+                del last_logits
+                torch.cuda.empty_cache()  # Force PyTorch to release memory to CUDA
+                
+                if self.last_ids.numel() == 1 and int(self.last_ids.item()) != self.frame_token_interval_id: 
+                    # Note: Response triggers are now tracked in _call_for_response
+                    return video_time, None
+        
         return None, None
 
     def __call__(self):
@@ -3392,6 +3451,7 @@ def main():
     model, tokenizer = build_model_and_tokenizer(is_training=False, set_vision_inside=True, **asdict(args))
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model.to(device)
+    model.eval()  # Explicitly set to eval mode to disable dropout, etc.
     
     print(f"🔧 Device: {device}")
     print(f"🤖 Model loaded successfully")
@@ -3545,28 +3605,9 @@ def main():
             # Create individual conversation timing plots
             create_individual_conversation_timing_plots(conversation_timings, data_source=data_source)
         
-        # Create PPL analysis visualization
+        # Create PPL analysis visualization (includes PPL over time visualization)
         print(f"\n📊 Creating dual PPL analysis...")
         create_dual_ppl_frame_visualization(results, data_source=data_source)
-        
-        # Create PPL over time visualization for different videos
-        # Extract PPL data from results for visualization
-        ppl_video_data = []
-        for i, result in enumerate(results):
-            if 'ppl_data' in result and 'gt_ppls_gt_prefix_visual' in result['ppl_data']:
-                gt_prefix_ppls_visual = result['ppl_data']['gt_ppls_gt_prefix_visual']
-                vlm_prefix_ppls_visual = result['ppl_data']['gt_ppls_vlm_prefix_visual']
-                
-                if gt_prefix_ppls_visual and vlm_prefix_ppls_visual:
-                    ppl_video_data.append({
-                        'video_idx': i,
-                        'gt_prefix_ppls_visual': gt_prefix_ppls_visual,
-                        'vlm_prefix_ppls_visual': vlm_prefix_ppls_visual,
-                        'num_responses': len(gt_prefix_ppls_visual)
-                    })
-        
-        if ppl_video_data:
-            create_ppl_over_time_visualization(ppl_video_data, data_source=data_source)
         
         # Create aggregated metrics visualization
         print(f"\n📊 Creating aggregated metrics visualization...")

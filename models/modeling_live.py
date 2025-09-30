@@ -181,35 +181,36 @@ def fast_greedy_generate(
     inplace_output_ids: torch.Tensor,
     max_new_tokens: int | None = None,
 ):
-    collected_tokens = []
-    steps = 0
-    finished = False
-    current_inputs = inputs_embeds
-    next_inputs_embeds = None
+    with torch.no_grad():
+        collected_tokens = []
+        steps = 0
+        finished = False
+        current_inputs = inputs_embeds
+        next_inputs_embeds = None
 
-    # When max_new_tokens is None, fall back to buffer size to mimic original behaviour
-    token_budget = max_new_tokens or inplace_output_ids.size(1)
+        # When max_new_tokens is None, fall back to buffer size to mimic original behaviour
+        token_budget = max_new_tokens or inplace_output_ids.size(1)
 
-    while steps < token_budget:
-        outputs = model(inputs_embeds=current_inputs, past_key_values=past_key_values, use_cache=True)
-        past_key_values = outputs.past_key_values
-        new_token_id = outputs.logits[:, -1:].argmax(dim=-1)
-        collected_tokens.append(new_token_id)
-        inplace_output_ids[:, steps] = new_token_id
-        steps += 1
+        while steps < token_budget:
+            outputs = model(inputs_embeds=current_inputs, past_key_values=past_key_values, use_cache=True)
+            past_key_values = outputs.past_key_values
+            new_token_id = outputs.logits[:, -1:].argmax(dim=-1)
+            collected_tokens.append(new_token_id)
+            inplace_output_ids[:, steps] = new_token_id
+            steps += 1
 
-        if int(new_token_id.item()) == eos_token_id:
-            finished = True
-            next_inputs_embeds = None
-            break
+            if int(new_token_id.item()) == eos_token_id:
+                finished = True
+                next_inputs_embeds = None
+                break
 
-        current_inputs = model.get_input_embeddings()(new_token_id)
-        if steps >= token_budget:
-            next_inputs_embeds = current_inputs
-            break
+            current_inputs = model.get_input_embeddings()(new_token_id)
+            if steps >= token_budget:
+                next_inputs_embeds = current_inputs
+                break
 
-    output_ids = torch.cat(collected_tokens, dim=1) if collected_tokens else torch.empty_like(inplace_output_ids[:, :0])
-    return output_ids, past_key_values, next_inputs_embeds, finished
+        output_ids = torch.cat(collected_tokens, dim=1) if collected_tokens else torch.empty_like(inplace_output_ids[:, :0])
+        return output_ids, past_key_values, next_inputs_embeds, finished
 
 def build_live(
     *,
