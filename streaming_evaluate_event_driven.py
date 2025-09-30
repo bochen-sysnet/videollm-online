@@ -62,13 +62,13 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 10            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 20            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 1             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 2             # Default number of videos for evaluation
     # DEBUG_THRESHOLDS = [0.9, 0.92]         # Coarse-grained thresholds
     DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -449,6 +449,13 @@ def calculate_kv_cache_memory_mb(past_key_values):
     return total_bytes / (1024**2)
 
 
+def calculate_inputs_embeds_memory_mb(inputs_embeds):
+    """Estimate input embeddings footprint in MB."""
+    if inputs_embeds is None:
+        return 0.0
+    return _tensor_numel_bytes(inputs_embeds) / (1024**2)
+
+
 def _move_cache_to_device(obj, device):
     """Recursively move cache containers to a target device."""
     if obj is None:
@@ -461,6 +468,9 @@ def _move_cache_to_device(obj, device):
         return tuple(_move_cache_to_device(list(obj), device))
     if isinstance(obj, dict):
         return {key: _move_cache_to_device(value, device) for key, value in obj.items()}
+    # Handle objects with .to() method (like DynamicCache from transformers)
+    if hasattr(obj, 'to') and callable(obj.to):
+        return obj.to(device)
     return obj
 
 
@@ -652,7 +662,6 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                 # this part is independent of the current buffer
                 # it adds the delay for each prompt that is past due without any chunks being generated
                 # if the smallest one is pending, the remaining ones have nothing generated yet
-                print(f"current_time: {current_time}", f"target: {target}", f"pending_prompts: {pending_prompts}", f"rebuffer_total: {rebuffer_total}")
                 
                 if current_buffer > 1e-9:
                     time_to_empty = current_buffer / speed
@@ -712,10 +721,10 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                 # Add prompt to pending set
                 pending_prompts.add(idx)
                 prompt_start_times[idx] = event_time
-                print("Prompt time: ", event_time, f"prompt_start_times: {prompt_start_times}", conversation_id[:12])
+                
             else:
                 # This is a chunk completion - only count chunks that generate text
-                print("Chunk time: ", event_time, f"chunk_to_prompt: {chunk_to_prompt}", conversation_id[:12])
+                
                 words = payload
                 assert words > 0, f"words is {words} for chunk {idx} of conversation {conversation_id[:12]}"
                 current_buffer += words
@@ -1281,63 +1290,66 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
 
     num_conversations = max(1, len(all_memory_data))
     figure_height = Config.PLOT_FIGSIZE_SMALL[1] * max(1, num_conversations)
-    fig, axes = plt.subplots(num_conversations, 5, figsize=(Config.PLOT_FIGSIZE_LARGE[0] + 4, figure_height))
+    fig, axes = plt.subplots(num_conversations, 4, figsize=(Config.PLOT_FIGSIZE_LARGE[0], figure_height))
     fig.suptitle('GPU Memory Usage Analysis - CPU-First Conversation Processing', fontsize=16, fontweight='bold')
 
     # Normalise axes shape for single conversation runs
     if num_conversations == 1:
         axes = np.array([axes])
 
-    component_colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+    component_colors = ['#1f77b4', '#ff7f0e', '#8c564b', '#7f7f7f']  # Blue, Orange, Brown, Gray
 
     for row_idx, (conversation_key, data) in enumerate(all_memory_data.items() or {"conversation": {}}.items()):
-        ax_breakdown, ax_kv_cache, ax_kv_transfer, ax_efficiency, ax_allocator = axes[row_idx]
+        ax_breakdown, ax_kv_cache, ax_kv_transfer, ax_peak = axes[row_idx]
 
         frames = data.get('frames', [])
         if not frames:
             ax_breakdown.text(0.5, 0.5, 'No memory data collected', ha='center', va='center', transform=ax_breakdown.transAxes)
             ax_kv_cache.axis('off')
             ax_kv_transfer.axis('off')
-            ax_efficiency.axis('off')
-            ax_allocator.axis('off')
+            ax_peak.axis('off')
             continue
 
         totals = data.get('memory_usage', [])
         model_memory = data.get('model_memory', [])
         kv_cache_memory = data.get('kv_cache_memory', [])
+        activation_memory = data.get('activation_memory', [])
         other_memory = data.get('other_memory', [])
         memory_per_frame = data.get('memory_per_frame', [])
         torch_allocated = data.get('torch_allocated', [])
         torch_reserved = data.get('torch_reserved', [])
 
-        lengths = [len(frames), len(totals), len(model_memory), len(kv_cache_memory), len(other_memory), len(memory_per_frame), len(torch_allocated), len(torch_reserved)]
+        lengths = [len(frames), len(totals), len(model_memory), len(kv_cache_memory), 
+                   len(activation_memory), len(other_memory), len(memory_per_frame), 
+                   len(torch_allocated), len(torch_reserved)]
         min_length = min(lengths) if all(lengths) else 0
 
         if min_length == 0:
             ax_breakdown.text(0.5, 0.5, 'Incomplete memory data', ha='center', va='center', transform=ax_breakdown.transAxes)
             ax_kv_cache.axis('off')
             ax_kv_transfer.axis('off')
-            ax_efficiency.axis('off')
-            ax_allocator.axis('off')
+            ax_peak.axis('off')
             continue
 
         frames = np.array(frames[:min_length])
         totals = np.array(totals[:min_length])
         model_memory = np.array(model_memory[:min_length])
         kv_cache_memory = np.array(kv_cache_memory[:min_length])
+        activation_memory = np.array(activation_memory[:min_length])
         other_memory = np.array(other_memory[:min_length])
         memory_per_frame = np.array(memory_per_frame[:min_length])
         torch_allocated = np.array(torch_allocated[:min_length])
         torch_reserved = np.array(torch_reserved[:min_length])
 
-        # 1. Component breakdown stackplot
+        # 1. Component breakdown stackplot with 4 components
         ax_breakdown.stackplot(
             frames,
             model_memory,
             kv_cache_memory,
+            activation_memory,
             other_memory,
             colors=component_colors,
-            labels=['Model Parameters', 'KV Cache', 'Other Allocations'],
+            labels=['Model Params', 'KV Cache', 'Activations', 'Other (CUDA Context + Misc)'],
             alpha=0.7,
         )
         ax_breakdown.plot(frames, totals, color='black', linestyle='--', linewidth=1.5, label='nvidia-smi Total')
@@ -1403,22 +1415,27 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
             ax_kv_transfer.set_ylabel('Transfer Time (ms)')
             ax_kv_transfer.grid(True, alpha=0.3)
 
-        # 4. Memory efficiency per frame
-        ax_efficiency.plot(frames, memory_per_frame, color='#9467bd', linewidth=2, marker='^', markersize=3)
-        ax_efficiency.set_title('Memory Efficiency (Lower is Better)', fontsize=10)
-        ax_efficiency.set_xlabel('Frame Number')
-        ax_efficiency.set_ylabel('Δ Memory / Frame (MB)')
-        ax_efficiency.grid(True, alpha=0.3)
-
-        # 5. Allocator view (PyTorch vs nvidia-smi)
-        ax_allocator.plot(frames, torch_allocated, color='#17becf', linewidth=2, label='torch.cuda.memory_allocated')
-        ax_allocator.plot(frames, torch_reserved, color='#bcbd22', linewidth=2, linestyle='--', label='torch.cuda.memory_reserved')
-        ax_allocator.plot(frames, totals, color='black', linewidth=1.5, linestyle=':', label='nvidia-smi Total')
-        ax_allocator.set_title('Allocator View', fontsize=10)
-        ax_allocator.set_xlabel('Frame Number')
-        ax_allocator.set_ylabel('Memory (MB)')
-        ax_allocator.grid(True, alpha=0.3)
-        ax_allocator.legend(fontsize=8, loc='upper left')
+        # 4. Peak Memory Consumption Bar Plot
+        component_names = ['Model\nParams', 'KV\nCache', 'Activations', 'Other']
+        peak_values = [
+            max(model_memory) if len(model_memory) > 0 else 0,
+            max(kv_cache_memory) if len(kv_cache_memory) > 0 else 0,
+            max(activation_memory) if len(activation_memory) > 0 else 0,
+            max(other_memory) if len(other_memory) > 0 else 0,
+        ]
+        
+        bars = ax_peak.bar(component_names, peak_values, color=component_colors, alpha=0.7, edgecolor='black', linewidth=1)
+        
+        # Add value labels on top of bars
+        for bar, value in zip(bars, peak_values):
+            height = bar.get_height()
+            ax_peak.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{value:.0f}', ha='center', va='bottom', fontsize=8)
+        
+        ax_peak.set_title(f'Peak Memory by Component (Total: {max(totals):.0f} MB)', fontsize=10)
+        ax_peak.set_ylabel('Memory (MB)')
+        ax_peak.grid(True, alpha=0.3, axis='y')
+        ax_peak.tick_params(axis='x', labelsize=9)
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
 
@@ -1936,6 +1953,7 @@ class EventDrivenConversationContext:
             'memory_per_frame': [],
             'model_memory': [],
             'kv_cache_memory': [],
+            'activation_memory': [],
             'other_memory': [],
             'torch_allocated': [],
             'torch_reserved': [],
@@ -1956,6 +1974,43 @@ class EventDrivenConversationContext:
         self.liveinfer_state = None
         self.frames_processed = 0
         self.prompts_processed = 0
+    
+    def track_memory_snapshot(self, liveinfer, frame_idx):
+        """Track memory usage snapshot at a given frame index."""
+        current_memory = get_gpu_memory()
+        if self.initial_memory is None:
+            self.initial_memory = current_memory
+        memory_growth = current_memory - self.initial_memory
+        memory_per_frame = memory_growth / max(1, frame_idx) if frame_idx > 0 else 0
+
+        torch_allocated_mb = 0.0
+        torch_reserved_mb = 0.0
+        if torch.cuda.is_available():
+            torch_allocated_mb = torch.cuda.memory_allocated(self.device_obj) / (1024**2)
+            torch_reserved_mb = torch.cuda.memory_reserved(self.device_obj) / (1024**2)
+
+        kv_cache_memory_mb = calculate_kv_cache_memory_mb(liveinfer.past_key_values)
+        
+        # Estimate activation memory (reserved - allocated = cached/workspace memory)
+        # This includes CUDA kernels, cuDNN workspace, etc.
+        activation_memory_mb = max(torch_reserved_mb - torch_allocated_mb, 0.0)
+        
+        # Other memory = nvidia-smi total - model - kv_cache - activations
+        # This includes CUDA context, driver allocations, and misc buffers
+        other_memory_mb = max(
+            current_memory - self.model_memory_mb - kv_cache_memory_mb - activation_memory_mb, 0.0
+        )
+
+        self.memory_data['frames'].append(frame_idx)
+        self.memory_data['memory_usage'].append(current_memory)
+        self.memory_data['memory_growth'].append(memory_growth)
+        self.memory_data['memory_per_frame'].append(memory_per_frame)
+        self.memory_data['model_memory'].append(self.model_memory_mb)
+        self.memory_data['kv_cache_memory'].append(kv_cache_memory_mb)
+        self.memory_data['activation_memory'].append(activation_memory_mb)
+        self.memory_data['other_memory'].append(other_memory_mb)
+        self.memory_data['torch_allocated'].append(torch_allocated_mb)
+        self.memory_data['torch_reserved'].append(torch_reserved_mb)
         self.completed = False
         self.result = None
         self.generation_event_pending = False
@@ -2015,30 +2070,7 @@ class EventDrivenConversationContext:
     def handle_frame(self, liveinfer, relative_time, frame_idx, start_time):
         # print("handle_frame", frame_idx, "conversation_id", self.conversation_id)
         if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
-            current_memory = get_gpu_memory()
-            if self.initial_memory is None:
-                self.initial_memory = current_memory
-            memory_growth = current_memory - self.initial_memory
-            memory_per_frame = memory_growth / max(1, frame_idx) if frame_idx > 0 else 0
-
-            torch_allocated_mb = 0.0
-            torch_reserved_mb = 0.0
-            if torch.cuda.is_available():
-                torch_allocated_mb = torch.cuda.memory_allocated(self.device_obj) / (1024**2)
-                torch_reserved_mb = torch.cuda.memory_reserved(self.device_obj) / (1024**2)
-
-            kv_cache_memory_mb = calculate_kv_cache_memory_mb(liveinfer.past_key_values)
-            other_memory_mb = max(torch_allocated_mb - self.model_memory_mb - kv_cache_memory_mb, 0.0)
-
-            self.memory_data['frames'].append(frame_idx)
-            self.memory_data['memory_usage'].append(current_memory)
-            self.memory_data['memory_growth'].append(memory_growth)
-            self.memory_data['memory_per_frame'].append(memory_per_frame)
-            self.memory_data['model_memory'].append(self.model_memory_mb)
-            self.memory_data['kv_cache_memory'].append(kv_cache_memory_mb)
-            self.memory_data['other_memory'].append(other_memory_mb)
-            self.memory_data['torch_allocated'].append(torch_allocated_mb)
-            self.memory_data['torch_reserved'].append(torch_reserved_mb)
+            self.track_memory_snapshot(liveinfer, frame_idx)
 
         frame_start_time = time.time()
         frame_processing_time = 0.0
@@ -2070,8 +2102,6 @@ class EventDrivenConversationContext:
         streaming_time = timing_data.get('streaming_time', 0.0)
         # in case nothing is generated, use generation_time
         chunk_generation_time = timing_data.get('generation_chunk_time', timing_data.get('generation_time', 0.0))
-        kv_reload_time = timing_data.get('kv_reload_time', 0.0)
-        kv_offload_time = timing_data.get('kv_offload_time', 0.0)
         decode_time = timing_data.get('decode_time', 0.0)
         frame_compute_time = max(
             0.0,
@@ -2155,6 +2185,12 @@ class EventDrivenConversationContext:
         # print(f"========== chunk_duration: {chunk_duration}, total_generation_time: {self.total_generation_time}")
 
         video_time = liveinfer.timing_data.get('generation_video_time', 0.0)
+        
+        # Track memory during generation chunks (use video_time as pseudo frame index for tracking)
+        # Convert video time to frame index for consistency
+        pseudo_frame_idx = int(video_time * Config.FRAME_FPS)
+        if pseudo_frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
+            self.track_memory_snapshot(liveinfer, pseudo_frame_idx)
         
         texts_generated_previous = liveinfer.texts_generated_previous
 
@@ -2995,14 +3031,51 @@ class SimpleLiveInfer:
                         context_info['total_tokens'] += key_tensor.shape[-2]  # sequence length
 
         return context_info
+    
+    def _get_sample_tensor_from_cache(self, cache):
+        """Extract a sample tensor from KV cache to check device, handling different cache types."""
+        if cache is None:
+            return None
+        
+        # Handle transformers DynamicCache and similar objects with iteration
+        if hasattr(cache, '__iter__') and not isinstance(cache, (str, bytes)):
+            try:
+                for layer in cache:
+                    if layer is None:
+                        continue
+                    # Check if layer is a tensor
+                    if torch.is_tensor(layer):
+                        return layer
+                    # Check if layer is a dict
+                    if isinstance(layer, dict):
+                        for value in layer.values():
+                            if torch.is_tensor(value):
+                                return value
+                    # Check if layer is iterable (tuple/list)
+                    if hasattr(layer, '__iter__') and not isinstance(layer, (str, bytes)):
+                        for item in layer:
+                            if torch.is_tensor(item):
+                                return item
+            except (TypeError, StopIteration):
+                pass
+        
+        # Handle direct tensor
+        if torch.is_tensor(cache):
+            return cache
+        
+        return None
 
     def _ensure_kv_on_device(self, past_key_values=None):
+        """Ensure KV cache is on the correct device (GPU), moving from CPU if needed."""
         target = past_key_values if past_key_values is not None else self.past_key_values
         if target is None:
             return target
+        
         if self.device_obj.type == 'cuda':
-            sample_layer = target[0] if isinstance(target, (list, tuple)) and target else None
-            sample_tensor = sample_layer[0] if sample_layer and isinstance(sample_layer, (list, tuple)) and sample_layer else None
+            # Get a sample tensor to check current device
+            sample_tensor = self._get_sample_tensor_from_cache(target)
+            
+            # Only move if we have a tensor and it's not on the target device
             if sample_tensor is not None and sample_tensor.device != self.device_obj:
                 start = time.time()
                 target = move_kv_cache_to_device(target, self.device_obj)
@@ -3010,11 +3083,15 @@ class SimpleLiveInfer:
         return target
 
     def _offload_kv_cache(self, past_key_values=None):
+        """Offload KV cache to CPU to save GPU memory."""
         target = past_key_values if past_key_values is not None else self.past_key_values
         if target is None:
             return target
-        sample_layer = target[0] if isinstance(target, (list, tuple)) and target else None
-        sample_tensor = sample_layer[0] if sample_layer and isinstance(sample_layer, (list, tuple)) and sample_layer else None
+        
+        # Get a sample tensor to check current device
+        sample_tensor = self._get_sample_tensor_from_cache(target)
+        
+        # Only move if we have a tensor and it's not already on CPU
         if sample_tensor is not None and sample_tensor.device != torch.device('cpu'):
             start = time.time()
             target = move_kv_cache_to_device(target, torch.device('cpu'))
