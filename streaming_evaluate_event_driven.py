@@ -62,14 +62,14 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 600            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 2             # Default number of videos for evaluation
-    DEBUG_THRESHOLDS = [0.92, 0.94]         # Coarse-grained thresholds
+    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
+    DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
     # User-level rebuffering configuration
@@ -3875,8 +3875,8 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
                     video_responses[j] = {}
                 
                 # Get response count for this video at this threshold
-                if 'response_count' in result:
-                    video_responses[j][threshold] = result['response_count']
+                response_count = len(result.get('generated_turns', []))
+                video_responses[j][threshold] = response_count
         
         # Plot each video's response count trajectory
         for j, video_data in video_responses.items():
@@ -3968,6 +3968,59 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
     else:
         ax5.text(0.5, 0.5, 'No rebuffering data available', ha='center', va='center', transform=ax5.transAxes)
         ax5.set_title('Reading vs Listening Rebuffering Comparison')
+    
+    # 5.5. VLM PPL vs Response Count (Per Video)
+    ax5_5 = axes[1, 2]
+    if all_threshold_results:
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        # Collect VLM PPL and response count for each video across all thresholds
+        video_vlm_ppl = {}  # {video_idx: [ppl_values]}
+        video_response_counts = {}  # {video_idx: [response_counts]}
+        
+        for threshold in thresholds:
+            results = all_threshold_results[threshold]
+            for j, result in enumerate(results):
+                if j not in video_vlm_ppl:
+                    video_vlm_ppl[j] = []
+                    video_response_counts[j] = []
+                
+                # Get VLM PPL
+                if 'ppl_data' in result and 'gt_ppls_vlm_prefix_visual' in result['ppl_data']:
+                    vlm_ppls = result['ppl_data']['gt_ppls_vlm_prefix_visual']
+                    if vlm_ppls:
+                        video_vlm_ppl[j].append(np.mean(vlm_ppls))
+                    else:
+                        video_vlm_ppl[j].append(None)
+                else:
+                    video_vlm_ppl[j].append(None)
+                
+                # Get response count from generated_turns
+                response_count = len(result.get('generated_turns', []))
+                video_response_counts[j].append(response_count if response_count > 0 else None)
+        
+        # Plot each video as a scatter point (one per threshold)
+        for j in video_vlm_ppl.keys():
+            ppls = video_vlm_ppl[j]
+            counts = video_response_counts[j]
+            
+            # Filter out None values
+            valid_data = [(p, c) for p, c in zip(ppls, counts) if p is not None and c is not None]
+            if valid_data:
+                valid_ppls, valid_counts = zip(*valid_data)
+                color = colors[j % len(colors)]
+                ax5_5.scatter(valid_counts, valid_ppls, s=100, color=color, alpha=0.7, 
+                            label=f'Video {j+1}', edgecolors='black', linewidth=1)
+        
+        ax5_5.set_xlabel('Response Count')
+        ax5_5.set_ylabel('VLM PPL (Average)')
+        ax5_5.set_title('VLM PPL vs Response Count (Per Video)')
+        ax5_5.grid(True, alpha=0.3)
+        if video_vlm_ppl:
+            ax5_5.legend(fontsize=9, loc='best')
+    else:
+        ax5_5.text(0.5, 0.5, 'No PPL data available', ha='center', va='center', transform=ax5_5.transAxes)
+        ax5_5.set_title('VLM PPL vs Response Count (Per Video)')
     
     # 6. Final Memory Usage vs Threshold
     ax6 = axes[2, 0]
