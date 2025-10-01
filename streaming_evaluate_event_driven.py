@@ -62,13 +62,13 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 600            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 5             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -578,7 +578,7 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
             word_count = float(len(tokens))
             if word_count <= 0.0:
                 continue
-            extracted.append((event_time, word_count, event.get('prompt_idx', 0)))
+            extracted.append((event_time, word_count, event.get('response_idx', 0)))
         extracted.sort(key=lambda item: item[0])
         return extracted
 
@@ -605,7 +605,7 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
         # Track pending prompts: each prompt can have multiple chunks
         # We track which prompts are still pending (not all chunks completed)
         pending_prompts = set()  # Set of prompt indices that are still pending
-        prompt_start_times = {}  # {prompt_idx: start_time}
+        unanswered_prompts = 0
         
         # Track conversation completion status
         conversation_finished = False
@@ -637,7 +637,7 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
             rebuffer_times.append(ts)
             rebuffer_values.append(rebuffer_total)
 
-        def advance_to(target_time, event_type):
+        def advance_to(target_time):
             nonlocal current_time, current_buffer, rebuffer_total, conversation_finished, finished_prompt_idx
             target = float(target_time)
             if target <= current_time + 1e-9:
@@ -649,11 +649,6 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
             # Check if conversation is finished (all segments completed)
             if target >= conversation_end_time:
                 conversation_finished = True
-
-            prompt_start_time = None
-            if event_type == 'chunk' and finished_prompt_idx is not None and finished_prompt_idx + 1 in prompt_start_times:
-                prompt_start_time = prompt_start_times[finished_prompt_idx+1]
-                assert current_time >= prompt_start_time, f"current_time is {current_time} and prompt_start_time is {prompt_start_time}"
 
             while current_time + 1e-9 < target:
                 remaining = target - current_time
@@ -671,11 +666,8 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                         current_buffer = 0.0
                         current_time = empty_time
                         # add here
-                        if prompt_start_time is not None:
-                            rebuffer_total += (current_time - prompt_start_time)
-                            prompt_start_time = current_time
-                            # dont change the finished_prompt_idx until the target time is reached
-                            # finished_prompt_idx = None
+                        if unanswered_prompts > 0:
+                            rebuffer_total += time_to_empty
                         # 
                         record(empty_time, current_buffer)
                         record_rebuffer(empty_time)
@@ -685,8 +677,8 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                     current_buffer = max(0.0, current_buffer - reduction)
                     current_time = target
                     # add here
-                    if prompt_start_time is not None:
-                        rebuffer_total += (current_time - prompt_start_time)
+                    if unanswered_prompts > 0:
+                        rebuffer_total += remaining
                         finished_prompt_idx = None
                     # 
                     record(target, current_buffer)
@@ -700,12 +692,13 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                     # same buffer, increasing rebuffering
                     if pending_prompts and current_buffer <= 1e-9:
                         rebuffer_total += remaining
-                    current_time = target
                     # add here
-                    if prompt_start_time is not None:
-                        rebuffer_total += (current_time - prompt_start_time)
+                    # only add once
+                    elif unanswered_prompts > 0:
+                        rebuffer_total += remaining
                         finished_prompt_idx = None
                     # 
+                    current_time = target
                     record(target, current_buffer)
                     record_rebuffer(target)
                     break
@@ -715,16 +708,15 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
 
         for event_time, _, event_type, idx, payload in events:
             # Advance time to this event (consumes buffer at user speed)
-            advance_to(event_time, event_type)
+            advance_to(event_time)
             
             if event_type == 'prompt':
                 # Add prompt to pending set
                 pending_prompts.add(idx)
-                prompt_start_times[idx] = event_time
+                unanswered_prompts += 1
                 
             else:
                 # This is a chunk completion - only count chunks that generate text
-                
                 words = payload
                 assert words > 0, f"words is {words} for chunk {idx} of conversation {conversation_id[:12]}"
                 current_buffer += words
@@ -746,11 +738,13 @@ def simulate_text_buffer_trajectories(processor_segments, conversation_summaries
                             # This is the last chunk for this prompt, remove from pending
                             pending_prompts.discard(prompt_idx)
                             finished_prompt_idx = prompt_idx # finishing the current prompt
+                        if prompt_chunks and idx == min(prompt_chunks):
+                            unanswered_prompts -= 1
             # Record buffer and rebuffer values AFTER processing the event (with new words added)
             record(event_time, current_buffer)
             record_rebuffer(event_time)
         if end_time is not None and end_time > current_time + 1e-9:
-            advance_to(end_time, 'end')
+            advance_to(end_time)
 
         return {
             'times': times,
@@ -1282,6 +1276,90 @@ def create_processor_timeline(processor_segments, idle_segments=None, conversati
 
     return output_path, buffer_data
 
+def create_buffer_comparison_visualization(buffer_data_postprocess, buffer_data_onthefly, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
+    """Compare post-processed buffer simulation with on-the-fly buffer tracking to verify consistency"""
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get unique conversations (only those present in both datasets)
+    conversations_postprocess = set(buffer_data_postprocess.keys())
+    conversations_onthefly = set(buffer_data_onthefly.keys())
+    unique_conversations = sorted(conversations_postprocess & conversations_onthefly)
+    
+    if not unique_conversations:
+        print("⚠️  No matching conversations found between post-processed and on-the-fly buffer data")
+        return
+    
+    num_conversations = len(unique_conversations)
+    colors_post = colors_onthefly = plt.cm.Set2(np.linspace(0, 1, num_conversations))
+    
+    # Create 2x2 grid: buffer level (post vs onthefly) and rebuffering (post vs onthefly)
+    fig, axes = plt.subplots(2, 2, figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_MEDIUM[1]))
+    fig.suptitle('Buffer Tracking Comparison: Post-Processed vs On-The-Fly (Listening Speed)', fontsize=14, fontweight='bold')
+    
+    ax_buffer_post, ax_buffer_onthefly = axes[0]
+    ax_rebuffer_post, ax_rebuffer_onthefly = axes[1]
+    
+    for idx, cid in enumerate(unique_conversations):
+        # Post-processed data (from simulate_text_buffer_trajectories)
+        post_data = buffer_data_postprocess.get(cid, {})
+        post_listening = post_data.get('listening', {}) or {}
+        post_times = post_listening.get('times', [])
+        post_values = post_listening.get('values', [])
+        post_rebuffer_times = post_listening.get('rebuffer_times', [])
+        post_rebuffer_values = post_listening.get('rebuffer_values', [])
+        
+        # On-the-fly data (from event handling)
+        onthefly_data = buffer_data_onthefly.get(cid, {})
+        onthefly_listening = onthefly_data.get('listening', {}) or {}
+        onthefly_times = onthefly_listening.get('times', [])
+        onthefly_values = onthefly_listening.get('values', [])
+        onthefly_rebuffer_times = onthefly_listening.get('rebuffer_times', [])
+        onthefly_rebuffer_values = onthefly_listening.get('rebuffer_values', [])
+        
+        # Plot buffer levels
+        if post_times:
+            ax_buffer_post.plot(post_times, post_values, color=colors_post[idx], linewidth=2, label=cid[:12], alpha=0.9)
+        if onthefly_times:
+            ax_buffer_onthefly.plot(onthefly_times, onthefly_values, color=colors_onthefly[idx], linewidth=2, label=cid[:12], alpha=0.9)
+        
+        # Plot rebuffering
+        if post_rebuffer_times:
+            ax_rebuffer_post.plot(post_rebuffer_times, post_rebuffer_values, color=colors_post[idx], linewidth=2, alpha=0.9)
+        if onthefly_rebuffer_times:
+            ax_rebuffer_onthefly.plot(onthefly_rebuffer_times, onthefly_rebuffer_values, color=colors_onthefly[idx], linewidth=2, alpha=0.9)
+        
+        # Calculate and print differences for verification
+        if post_rebuffer_values and onthefly_rebuffer_values:
+            final_rebuffer_post = post_rebuffer_values[-1]
+            final_rebuffer_onthefly = onthefly_rebuffer_values[-1]
+            diff = abs(final_rebuffer_post - final_rebuffer_onthefly)
+            rel_diff = (diff / max(final_rebuffer_post, 1e-9)) * 100
+            print(f"   {cid[:12]}: Post={final_rebuffer_post:.2f}s, OnTheFly={final_rebuffer_onthefly:.2f}s, Diff={diff:.3f}s ({rel_diff:.1f}%)")
+    
+    # Configure axes
+    for ax in [ax_buffer_post, ax_buffer_onthefly]:
+        ax.set_ylabel('Buffer Size (words)')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right', fontsize=8, title='Conversation')
+    
+    for ax in [ax_rebuffer_post, ax_rebuffer_onthefly]:
+        ax.set_xlabel('Processor Time (s)')
+        ax.set_ylabel('Cumulative Rebuffer (s)')
+        ax.grid(True, alpha=0.3)
+    
+    ax_buffer_post.set_title('Buffer Level - Post-Processed (simulate_text_buffer_trajectories)', fontsize=11)
+    ax_buffer_onthefly.set_title('Buffer Level - On-The-Fly (event handling)', fontsize=11)
+    ax_rebuffer_post.set_title('Cumulative Rebuffering - Post-Processed', fontsize=11)
+    ax_rebuffer_onthefly.set_title('Cumulative Rebuffering - On-The-Fly', fontsize=11)
+    
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    
+    output_path = os.path.join(output_dir, f'buffer_comparison_{data_source}.png')
+    fig.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
+    plt.close(fig)
+    print(f"   ✅ Buffer comparison saved to {output_path}")
+
 def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create detailed memory usage visualization for all videos"""
 
@@ -1300,12 +1378,12 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
     component_colors = ['#1f77b4', '#ff7f0e', '#8c564b', '#7f7f7f']  # Blue, Orange, Brown, Gray
 
     for row_idx, (conversation_key, data) in enumerate(all_memory_data.items() or {"conversation": {}}.items()):
-        ax_breakdown, ax_kv_cache, ax_kv_transfer, ax_peak = axes[row_idx]
+        ax_breakdown, ax_components, ax_kv_transfer, ax_peak = axes[row_idx]
 
         frames = data.get('frames', [])
         if not frames:
             ax_breakdown.text(0.5, 0.5, 'No memory data collected', ha='center', va='center', transform=ax_breakdown.transAxes)
-            ax_kv_cache.axis('off')
+            ax_components.axis('off')
             ax_kv_transfer.axis('off')
             ax_peak.axis('off')
             continue
@@ -1326,7 +1404,7 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
 
         if min_length == 0:
             ax_breakdown.text(0.5, 0.5, 'Incomplete memory data', ha='center', va='center', transform=ax_breakdown.transAxes)
-            ax_kv_cache.axis('off')
+            ax_components.axis('off')
             ax_kv_transfer.axis('off')
             ax_peak.axis('off')
             continue
@@ -1359,19 +1437,27 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
         ax_breakdown.grid(True, alpha=0.3)
         ax_breakdown.legend(fontsize=8, loc='upper left')
 
-        # 2. KV cache trajectory with dedicated view
-        ax_kv_cache.plot(frames, kv_cache_memory, color='#ff7f0e', linewidth=2.0)
-        ax_kv_cache.fill_between(frames, kv_cache_memory, alpha=0.2, color='#ffbb78')
-        ax_kv_cache.set_title('KV Cache Footprint', fontsize=10)
-        ax_kv_cache.set_xlabel('Frame Number')
-        ax_kv_cache.set_ylabel('Memory (MB)')
-        ax_kv_cache.grid(True, alpha=0.3)
-        if kv_cache_memory.size > 0:
-            ax_kv_cache.text(
+        # 2. Combined component trajectories (KV Cache, Activations, Other)
+        ax_components.plot(frames, kv_cache_memory, color='#ff7f0e', linewidth=2.0, label='KV Cache', alpha=0.9)
+        ax_components.plot(frames, activation_memory, color='#8c564b', linewidth=2.0, label='Activations', alpha=0.9)
+        ax_components.plot(frames, other_memory, color='#7f7f7f', linewidth=2.0, label='Other (CUDA + Pool)', alpha=0.9)
+        
+        ax_components.set_title('Memory Component Trajectories', fontsize=10)
+        ax_components.set_xlabel('Frame Number')
+        ax_components.set_ylabel('Memory (MB)')
+        ax_components.grid(True, alpha=0.3)
+        ax_components.legend(fontsize=8, loc='upper left')
+        
+        # Add summary stats in text box
+        if kv_cache_memory.size > 0 and activation_memory.size > 0 and other_memory.size > 0:
+            kv_growth = kv_cache_memory[-1] - kv_cache_memory[0] if len(kv_cache_memory) > 0 else 0
+            act_growth = activation_memory[-1] - activation_memory[0] if len(activation_memory) > 0 else 0
+            other_growth = other_memory[-1] - other_memory[0] if len(other_memory) > 0 else 0
+            ax_components.text(
                 0.98,
                 0.02,
-                f'Max: {np.max(kv_cache_memory):.0f}MB\nEnd: {kv_cache_memory[-1]:.0f}MB',
-                transform=ax_kv_cache.transAxes,
+                f'Growth:\nKV: {kv_growth:+.0f}MB\nAct: {act_growth:+.0f}MB\nOther: {other_growth:+.0f}MB',
+                transform=ax_components.transAxes,
                 ha='right',
                 va='bottom',
                 fontsize=8,
@@ -1971,7 +2057,7 @@ class EventDrivenConversationContext:
         self.initial_memory = None
         self.liveinfer_state = None
         self.frames_processed = 0
-        self.prompts_processed = 0
+        self.response_generated = 0
     
     def track_memory_snapshot(self, liveinfer, frame_idx):
         """Track memory usage snapshot at a given frame index."""
@@ -2188,16 +2274,16 @@ class EventDrivenConversationContext:
                 'type': 'response',
                 'detail': {'text': texts_generated_previous, 'frame_idx': frame_idx},
                 'conversation_id': self.conversation_id,
-                'prompt_idx': self.prompts_processed,
+                'response_idx': self.response_generated,
             })
             if response:
-                self.prompts_processed += 1
+                self.response_generated += 1
             #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Response: {response}")
             # elif texts_generated_previous:
             #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Chunk: {texts_generated_previous}")
             # elif query:
             #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Query: {query}")
-            # print(f"  └─ Generation time: {frame_processing_time:.3f}s\t start_time: {start_time:.3f}\t prompt_idx: {self.prompts_processed}")
+            # print(f"  └─ Generation time: {frame_processing_time:.3f}s\t start_time: {start_time:.3f}\t prompt_idx: {self.response_generated}")
 
         self.frames_processed += 1
         return {
@@ -2244,17 +2330,17 @@ class EventDrivenConversationContext:
                 'type': 'response',
                 'detail': {'text': texts_generated_previous, 'frame_idx': None},
                 'conversation_id': self.conversation_id,
-                'prompt_idx': self.prompts_processed,
+                'response_idx': self.response_generated,
             })
             
             if response:
-                self.prompts_processed += 1
+                self.response_generated += 1
             #     print(f"[t={video_time:.2f}s] Response: {response}")
             # elif texts_generated_previous:
             #     print(f"[t={video_time:.2f}s] Chunk: {texts_generated_previous}")
             # elif query:
             #     print(f"[t={video_time:.2f}s] Query: {query}")
-            # print(f"  └─ Generation time: {chunk_duration:.3f}s\t start_time: {start_time:.3f}\t prompt_idx: {self.prompts_processed}")
+            # print(f"  └─ Generation time: {chunk_duration:.3f}s\t start_time: {start_time:.3f}\t prompt_idx: {self.response_generated}")
         return {
             'frame_compute_time': 0.0,
             'frame_processing_time': 0.0,
@@ -2275,23 +2361,6 @@ class EventDrivenConversationContext:
         model_forward_time = self.total_model_forward_time
         generation_time = self.total_generation_time
         num_processed_frames = len(self.frame_processing_times)
-
-        # print(f"🔍 TIMING METRICS FOR CONVERSATION {self.conversation_id[:12]}...:")
-        # print(f"   • Conversation duration: {self.duration:.2f}s")
-        # print(f"   • Frames processed: {num_processed_frames}")
-        # print(f"   • Generated responses: {len(self.generated_turns)}")
-        # print_timing_metrics(visual_embedding_time, model_forward_time, generation_time, num_processed_frames, len(self.generated_turns))
-        # print(f"   • Total processing time: {total_processing_time:.3f}s")
-        # if total_processing_time > 0:
-        #     print(f"   • Timing breakdown: Visual={visual_embedding_time/total_processing_time*100:.1f}%, Model={model_forward_time/total_processing_time*100:.1f}%, Generation={generation_time/total_processing_time*100:.1f}%")
-        # print(f"   • Total rebuffering time: {total_rebuffering_time:.3f}s")
-        # print(f"   • Average rebuffering time per frame: {average_rebuffering_time:.3f}s")
-        # print(f"   • Total reading rebuffering time: {total_reading_rebuffering:.3f}s")
-        # print(f"   • Average reading rebuffering time per frame: {average_reading_rebuffering:.3f}s")
-        # print(f"   • Total listening rebuffering time: {total_listening_rebuffering:.3f}s")
-        # print(f"   • Average listening rebuffering time per frame: {average_listening_rebuffering:.3f}s")
-        # print(f"   • Final frame resource utilization: {final_frame_utilization:.3f}")
-        # print("-" * 60)
 
         content_metrics = calculate_metrics_like_benchmark(
             self.model,
@@ -2341,12 +2410,12 @@ class EventDrivenConversationContext:
         })
 
         # Create buffer simulation data for this conversation
-        conversation_summary = {
-            'conversation_id': self.conversation_id,
-            'label': self.conversation_id,
-            'start': self.conversation_start_time,
-            'events': self.event_log
-        }
+        # conversation_summary = {
+        #     'conversation_id': self.conversation_id,
+        #     'label': self.conversation_id,
+        #     'start': self.conversation_start_time,
+        #     'events': self.event_log
+        # }
         # print("Event log:")
         # for event in self.event_log:
         #     if event.get('type') == 'response':
@@ -2484,6 +2553,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
     processor_segments = []
     idle_segments = []
     conversation_summaries = []
+    
+    # On-the-fly buffer tracking for each conversation
+    listening_speed = Config.USER_LISTENING_SPEED_MAX  # Use listening speed as requested
+    onthefly_buffer_data = {}  # {conversation_id: {'buffer': float, 'last_update_time': float, 'times': [], 'values': [], 'rebuffer_times': [], 'rebuffer_values': [], 'total_rebuffer': float, 'pending_prompts': set()}}
 
     first_conversation_duration = None
 
@@ -2528,8 +2601,120 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         current_time = max(current_time, arrival_time + context.duration)
         if idx_in_list == 0:
             first_conversation_duration = context.duration
+        
+        # Initialize on-the-fly buffer tracking for this conversation
+        onthefly_buffer_data[context.conversation_id] = {
+            'buffer': 0.0,
+            'last_update_time': arrival_time,
+            'times': [arrival_time],
+            'values': [0.0],
+            'rebuffer_times': [arrival_time],
+            'rebuffer_values': [0.0],
+            'total_rebuffer': 0.0,
+            'pending_prompts': set(),
+            'prompt_to_chunks': {},
+            'chunk_to_prompt': {},
+            'prompt_start_times': {},
+            'finished_prompt_idx': None,
+            'conversation_start_time': arrival_time
+        }
 
     active_conversation_id = None
+    
+    # Helper functions for on-the-fly buffer tracking (following simulate_text_buffer_trajectories logic)
+    def update_buffer_to_time(buffer_state, target_time, speed, data_source_type, event_type=None):
+        """Advance buffer simulation to target_time, consuming buffer at speed and accumulating rebuffering
+        
+        Args:
+            buffer_state: Current buffer state dictionary
+            target_time: Time to advance to
+            speed: Consumption speed (words/second)
+            data_source_type: 'narration' or 'goalstep'
+            event_type: Type of event we're advancing to ('chunk', 'prompt', 'frame', etc.)
+        """
+        current_time = buffer_state['last_update_time']
+        current_buffer = buffer_state['buffer']
+        rebuffer_total = buffer_state['total_rebuffer']
+        pending_prompts = buffer_state['pending_prompts']
+        finished_prompt_idx = buffer_state['finished_prompt_idx']
+        prompt_start_times = buffer_state['prompt_start_times']
+        
+        if target_time <= current_time + 1e-9:
+            buffer_state['last_update_time'] = max(current_time, target_time)
+            buffer_state['times'].append(target_time)
+            buffer_state['values'].append(current_buffer)
+            buffer_state['rebuffer_times'].append(target_time)
+            buffer_state['rebuffer_values'].append(rebuffer_total)
+            return
+        
+        # Determine if there's a prompt that just finished (for chunk events)
+        # This calculates rebuffering from when the next prompt was issued to when this chunk completes
+        prompt_start_time = None
+        if event_type == 'chunk' and finished_prompt_idx is not None and finished_prompt_idx + 1 in prompt_start_times:
+            prompt_start_time = prompt_start_times[finished_prompt_idx + 1]
+            if current_time < prompt_start_time:
+                prompt_start_time = None
+            # Verify we're past the prompt start time (should always be true)
+            if prompt_start_time is not None and current_time < prompt_start_time:
+                print(f"⚠️ WARNING: current_time {current_time} < prompt_start_time {prompt_start_time}")
+                prompt_start_time = None
+        
+        while current_time + 1e-9 < target_time:
+            remaining = target_time - current_time
+            
+            if current_buffer > 1e-9:
+                time_to_empty = current_buffer / speed
+                if time_to_empty <= remaining + 1e-9:
+                    # Buffer empties before target time
+                    empty_time = current_time + time_to_empty
+                    current_buffer = 0.0
+                    current_time = empty_time
+                    
+                    if prompt_start_time is not None:
+                        rebuffer_total += (current_time - prompt_start_time)
+                        prompt_start_time = current_time
+                    
+                    buffer_state['times'].append(empty_time)
+                    buffer_state['values'].append(current_buffer)
+                    buffer_state['rebuffer_times'].append(empty_time)
+                    buffer_state['rebuffer_values'].append(rebuffer_total)
+                    continue
+                
+                # Buffer doesn't empty - consume and advance to target
+                reduction = speed * remaining
+                current_buffer = max(0.0, current_buffer - reduction)
+                current_time = target_time
+                
+                if prompt_start_time is not None:
+                    rebuffer_total += (current_time - prompt_start_time)
+                    finished_prompt_idx = None
+                    buffer_state['finished_prompt_idx'] = None
+                
+                buffer_state['times'].append(target_time)
+                buffer_state['values'].append(current_buffer)
+                buffer_state['rebuffer_times'].append(target_time)
+                buffer_state['rebuffer_values'].append(rebuffer_total)
+                break
+            else:
+                # Buffer is empty - accumulate rebuffering if there are pending prompts
+                if pending_prompts and current_buffer <= 1e-9:
+                    rebuffer_total += remaining
+                current_time = target_time
+                
+                if prompt_start_time is not None:
+                    rebuffer_total += (current_time - prompt_start_time)
+                    finished_prompt_idx = None
+                    buffer_state['finished_prompt_idx'] = None
+                
+                buffer_state['times'].append(target_time)
+                buffer_state['values'].append(current_buffer)
+                buffer_state['rebuffer_times'].append(target_time)
+                buffer_state['rebuffer_values'].append(rebuffer_total)
+                break
+        
+        buffer_state['last_update_time'] = current_time
+        buffer_state['buffer'] = current_buffer
+        buffer_state['total_rebuffer'] = rebuffer_total
 
     while event_queue:
         event_time, priority, _, payload = heapq.heappop(event_queue)
@@ -2544,12 +2729,24 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             active_conversation_id = conversation_id
 
         relative_time = max(0.0, event_time - context.conversation_start_time)
-        # print("--------EVENT", event_type, relative_time, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id[:12], "--------")
+        print("--------EVENT", event_type, relative_time, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id[:12], "--------")
 
         if event_type == 'prompt':
             if event_time > processor_clock:
                 idle_segments.append({'start': processor_clock, 'end': event_time})
                 processor_clock = event_time
+            
+            # Update buffer to current processor_clock before handling prompt
+            buffer_state = onthefly_buffer_data[conversation_id]
+            update_buffer_to_time(buffer_state, processor_clock, listening_speed, data_source, event_type='prompt')
+            
+            # Mark this prompt as pending
+            # Use the current response_generated count from context as the prompt index
+            # This matches how response_idx is used in the event log
+            prompt_idx = context.response_generated
+            buffer_state['pending_prompts'].add(prompt_idx)
+            buffer_state['prompt_start_times'][prompt_idx] = processor_clock
+            
             context.handle_prompt(shared_liveinfer, relative_time, payload_data)
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
@@ -2560,6 +2757,11 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 context.pending_frame_events.append((event_time, priority, payload_data))
                 continue
             start_time = max(processor_clock, event_time)
+            
+            # Update buffer to start_time before handling frame
+            buffer_state = onthefly_buffer_data[conversation_id]
+            update_buffer_to_time(buffer_state, start_time, listening_speed, data_source)
+            
             segment_info = context.handle_frame(shared_liveinfer, relative_time, payload_data, start_time)
             
             assert segment_info.get('frame_compute_time', 0.0) > 0.0, f"frame_compute_time: {segment_info.get('frame_compute_time', 0.0)}, frame_processing_time: {segment_info.get('frame_processing_time', 0.0)}"
@@ -2584,6 +2786,47 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 })
                 # print(f"🔍 DEBUG: Created processor segment for {segment_label}: start={start_time:.2f}s, end={segment_end:.2f}s")
             processor_clock = start_time + total_duration
+            
+            # Check if text was generated and update buffer
+            if context.event_log and context.event_log[-1].get('type') == 'response':
+                last_event = context.event_log[-1]
+                text = last_event.get('detail', {}).get('text', '') if isinstance(last_event.get('detail'), dict) else last_event.get('detail', '')
+                if text:
+                    tokens = re.findall(r"\b\w+\b", text)
+                    word_count = float(len(tokens))
+                    if word_count > 0:
+                        buffer_state = onthefly_buffer_data[conversation_id]
+                        response_idx = last_event.get('response_idx', 0)
+                        
+                        # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
+                        update_buffer_to_time(buffer_state, processor_clock, listening_speed, data_source, event_type='chunk')
+                        
+                        # Add words to buffer (happens at chunk completion time)
+                        buffer_state['buffer'] += word_count
+                        
+                        # Track chunk to prompt mapping
+                        chunk_idx = len(buffer_state.get('chunk_to_prompt', {}))
+                        buffer_state['chunk_to_prompt'][chunk_idx] = response_idx
+                        if response_idx not in buffer_state['prompt_to_chunks']:
+                            buffer_state['prompt_to_chunks'][response_idx] = []
+                        buffer_state['prompt_to_chunks'][response_idx].append(chunk_idx)
+                        
+                        # Handle prompt completion logic (same as simulate_text_buffer_trajectories)
+                        if data_source == 'narration':
+                            # In narration, each chunk immediately completes the prompt
+                            buffer_state['pending_prompts'].discard(response_idx)
+                        else:
+                            # For goalstep, only remove prompt when all chunks are completed
+                            prompt_chunks = buffer_state['prompt_to_chunks'].get(response_idx, [])
+                            if prompt_chunks and chunk_idx == max(prompt_chunks):
+                                buffer_state['pending_prompts'].discard(response_idx)
+                                buffer_state['finished_prompt_idx'] = response_idx
+                        
+                        # Record buffer state after adding words
+                        buffer_state['times'].append(processor_clock)
+                        buffer_state['values'].append(buffer_state['buffer'])
+                        buffer_state['rebuffer_times'].append(processor_clock)
+                        buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, event_time, sequence_counter)
@@ -2597,6 +2840,11 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             start_time = max(processor_clock, event_time)
             if start_time > processor_clock:
                 idle_segments.append({'start': processor_clock, 'end': start_time})
+            
+            # Update buffer to start_time before handling generation
+            buffer_state = onthefly_buffer_data[conversation_id]
+            update_buffer_to_time(buffer_state, start_time, listening_speed, data_source)
+            
             segment_info = context.handle_generation(shared_liveinfer, relative_time, start_time)
             generation_duration = segment_info.get('generation_time', 0.0)
             segment_label = context.conversation_id
@@ -2614,6 +2862,47 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 })
                 # print(f"🔍 DEBUG: Created generation segment for {segment_label}: start={start_time:.2f}s, end={segment_end:.2f}s")
             processor_clock = start_time + max(0.0, generation_duration)
+            
+            # Check if text was generated and update buffer
+            if context.event_log and context.event_log[-1].get('type') == 'response':
+                last_event = context.event_log[-1]
+                text = last_event.get('detail', {}).get('text', '') if isinstance(last_event.get('detail'), dict) else last_event.get('detail', '')
+                if text:
+                    tokens = re.findall(r"\b\w+\b", text)
+                    word_count = float(len(tokens))
+                    if word_count > 0:
+                        buffer_state = onthefly_buffer_data[conversation_id]
+                        response_idx = last_event.get('response_idx', 0)
+                        
+                        # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
+                        update_buffer_to_time(buffer_state, processor_clock, listening_speed, data_source, event_type='chunk')
+                        
+                        # Add words to buffer (happens at chunk completion time)
+                        buffer_state['buffer'] += word_count
+                        
+                        # Track chunk to prompt mapping
+                        chunk_idx = len(buffer_state.get('chunk_to_prompt', {}))
+                        buffer_state['chunk_to_prompt'][chunk_idx] = response_idx
+                        if response_idx not in buffer_state['prompt_to_chunks']:
+                            buffer_state['prompt_to_chunks'][response_idx] = []
+                        buffer_state['prompt_to_chunks'][response_idx].append(chunk_idx)
+                        
+                        # Handle prompt completion logic (same as simulate_text_buffer_trajectories)
+                        if data_source == 'narration':
+                            # In narration, each chunk immediately completes the prompt
+                            buffer_state['pending_prompts'].discard(response_idx)
+                        else:
+                            # For goalstep, only remove prompt when all chunks are completed
+                            prompt_chunks = buffer_state['prompt_to_chunks'].get(response_idx, [])
+                            if prompt_chunks and chunk_idx == max(prompt_chunks):
+                                buffer_state['pending_prompts'].discard(response_idx)
+                                buffer_state['finished_prompt_idx'] = response_idx
+                        
+                        # Record buffer state after adding words
+                        buffer_state['times'].append(processor_clock)
+                        buffer_state['values'].append(buffer_state['buffer'])
+                        buffer_state['rebuffer_times'].append(processor_clock)
+                        buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, event_time, sequence_counter)
@@ -2666,8 +2955,23 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
     if processor_segments:
         print("\n📊 Creating processor timeline...")
         _, buffer_data = create_processor_timeline(processor_segments, idle_segments, conversation_summaries, data_source=data_source)
+    
+    # Convert on-the-fly buffer data to match buffer_data format for comparison
+    onthefly_comparison_data = {}
+    for cid, state in onthefly_buffer_data.items():
+        onthefly_comparison_data[cid] = {
+            'listening': {
+                'times': state['times'],
+                'values': state['values'],
+                'rebuffer_times': state['rebuffer_times'],
+                'rebuffer_values': state['rebuffer_values'],
+                'final_time': state['last_update_time'],
+                'total_rebuffer': state['total_rebuffer'],
+            },
+            'conversation_id': cid
+        }
 
-    return results, buffer_data, all_memory_data
+    return results, buffer_data, all_memory_data, onthefly_comparison_data
 
 def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda', num_conversations=None, random_selection=False, specific_indices=None, data_source='goalstep', conversation_start_times=None):
     """Evaluate conversations across different streaming thresholds to analyze threshold sensitivity."""
@@ -2720,7 +3024,7 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
         print(f"🎲 Set random seeds for deterministic behavior")
         
         # Run evaluation with this threshold using the SAME conversations
-        results, buffer_data, memory_data = streaming_evaluate_conversations(
+        results, buffer_data, memory_data, onthefly_buffer_data = streaming_evaluate_conversations(
             model=model,
             tokenizer=tokenizer,
             dataset=dataset,
@@ -3520,7 +3824,7 @@ def main():
             print("✅ Threshold sweep analysis completed!")
             return
 
-        results, buffer_data, memory_data  = streaming_evaluate_conversations(
+        results, buffer_data, memory_data, onthefly_buffer_data  = streaming_evaluate_conversations(
             model,
             tokenizer,
             dataset,
@@ -3530,6 +3834,12 @@ def main():
             data_source=data_source,
             conversation_start_times=default_start_times
         )
+        
+        # Create buffer comparison visualization
+        if buffer_data and onthefly_buffer_data:
+            print("\n📊 Creating buffer comparison visualization...")
+            create_buffer_comparison_visualization(buffer_data, onthefly_buffer_data, data_source=data_source)
+        
         print("\n" + "=" * 60)
         print("📊 EVALUATION RESULTS")
         print("=" * 60)
