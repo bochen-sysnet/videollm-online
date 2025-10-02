@@ -68,13 +68,13 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 600            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 60            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 5             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -1887,13 +1887,14 @@ class EventDrivenConversationContext:
                 'detail': {'text': texts_generated_previous, 'frame_idx': frame_idx},
                 'conversation_id': self.conversation_id,
                 'response_idx': self.response_generated,
+                'is_response': True if response else False,
                 'is_last_chunk': True if response else False,
                 'is_first_chunk': True,
                 'trigger_method': liveinfer.trigger_method,
             })
             if response:
                 self.response_generated += 1
-                # print(f"[t={self.conversation_start_time + relative_time:.2f}s] Response: {response}")
+            #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Response: {response}")
             # elif texts_generated_previous:
             #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Chunk: {texts_generated_previous}")
             # elif query:
@@ -1948,6 +1949,7 @@ class EventDrivenConversationContext:
                 'detail': {'text': texts_generated_previous, 'frame_idx': None},
                 'conversation_id': self.conversation_id,
                 'response_idx': self.response_generated,
+                'is_response': True if response else False,
                 'is_last_chunk': True if response else False,
                 'is_first_chunk': False,
                 'trigger_method': liveinfer.trigger_method,
@@ -1955,7 +1957,7 @@ class EventDrivenConversationContext:
             
             if response:
                 self.response_generated += 1
-                # print(f"[t={video_time:.2f}s] Response: {response}")
+            #     print(f"[t={video_time:.2f}s] Response: {response}")
             # elif texts_generated_previous:
             #     print(f"[t={video_time:.2f}s] Chunk: {texts_generated_previous}")
             # elif query:
@@ -2416,7 +2418,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         rebuffer_total = buffer_state['total_rebuffer']
         pending_responses = buffer_state['pending_responses']
         # if 'goalstep_4c6' in conversation_id:
-        #     print("update_buffer_to_time", current_time, target_time, current_buffer, rebuffer_total, pending_responses, \
+        #     print("update", "current time", current_time, "target time", target_time, "current buffer", current_buffer, "pending responses", pending_responses, \
         #         buffer_state['unanswered_prompts'])
         
         # handle the case where prompt arrives before the finish of a chunk
@@ -2541,9 +2543,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         # print("--------EVENT", event_type, relative_time, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id[:12], "--------")
 
         if event_type == 'prompt':
+            processor_clock = max(processor_clock, event_time)
             # Update buffer to current processor_clock before handling prompt
             buffer_state = onthefly_buffer_data[conversation_id]
-            update_buffer_to_time(buffer_state, event_time, listening_speed, conversation_id)
+            update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id)
             
             buffer_state['pending_responses'].add(context.response_expected)
             context.response_expected += 1
@@ -2587,7 +2590,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 assert context.event_log[-1].get('type') == 'response', f"event_log: {context.event_log}"
                 last_event = context.event_log[-1]
                 text = last_event.get('detail', {}).get('text', '') if isinstance(last_event.get('detail'), dict) else last_event.get('detail', '')
-                if text:
+                is_response = last_event.get('is_response', False)
+                if text or is_response:
                     tokens = re.findall(r"\b\w+\b", text)
                     word_count = float(len(tokens))
                     
@@ -2607,11 +2611,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                         buffer_state['prompt_to_chunks'][response_idx] = []
                     buffer_state['prompt_to_chunks'][response_idx].append(chunk_idx)
                     
-                    # Handle prompt completion logic (same as simulate_text_buffer_trajectories)
-                    # if data_source == 'narration':
-                    #     # In narration, each chunk immediately completes the prompt
-                    #     buffer_state['pending_responses'].discard(response_idx)
-                    # else:
                     is_last_chunk = last_event.get('is_last_chunk', False)
                     is_first_chunk = last_event.get('is_first_chunk', False)
                     if is_first_chunk:
@@ -2662,7 +2661,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 assert context.event_log[-1].get('type') == 'response', f"event_log: {context.event_log}"
                 last_event = context.event_log[-1]
                 text = last_event.get('detail', {}).get('text', '') if isinstance(last_event.get('detail'), dict) else last_event.get('detail', '')
-                if text:
+                is_response = last_event.get('is_response', False)
+                if text or is_response:
                     tokens = re.findall(r"\b\w+\b", text)
                     word_count = float(len(tokens))
                     
@@ -2682,14 +2682,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                         buffer_state['prompt_to_chunks'][response_idx] = []
                     buffer_state['prompt_to_chunks'][response_idx].append(chunk_idx)
                     
-                    # Handle prompt completion logic (same as simulate_text_buffer_trajectories)
-                    # if data_source == 'narration':
-                    #     # In narration, each chunk immediately completes the prompt
-                    #     buffer_state['pending_responses'].discard(response_idx)
-                    # else:
                     is_last_chunk = last_event.get('is_last_chunk', False)
                     is_first_chunk = last_event.get('is_first_chunk', False)
-                    # pending responses are those with more than one chunk
                     if is_first_chunk:
                         buffer_state['unanswered_prompts'] -= 1
                         if not is_last_chunk and last_event.get('trigger_method') == 'score':
@@ -2697,8 +2691,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                             context.response_expected += 1
                     if is_last_chunk:
                         buffer_state['pending_responses'].discard(response_idx)
-                        
-                    
+
                     # Record buffer state after adding words
                     buffer_state['times'].append(processor_clock)
                     buffer_state['values'].append(buffer_state['buffer'])
