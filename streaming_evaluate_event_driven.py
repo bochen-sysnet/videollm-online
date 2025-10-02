@@ -552,304 +552,14 @@ def defragment_gpu_memory():
         print(f"Warning: Memory defragmentation failed: {e}")
         return False
 
-def simulate_text_buffer_trajectories(processor_segments, conversation_summaries, reading_speed, listening_speed, data_source):
-    """Simulate text buffers plus cumulative rebuffer metrics per conversation."""
-
-    if not processor_segments or not conversation_summaries:
-        return {}
-
-    def _extract_response_events(events, fallback_time):
-        extracted = []
-        for event in events or []:
-            if event.get('type') != 'response':
-                continue
-            event_time = float(event.get('time', fallback_time))
-            detail = event.get('detail') or {}
-            if isinstance(detail, str):
-                text = detail
-            else:
-                text = detail.get('text', '') if isinstance(detail, dict) else ''
-            if not text:
-                continue
-            if 'Assistant:' in text:
-                text = text.split('Assistant:', 1)[-1]
-            # tokens = [token for token in text.strip().split() if token]
-            tokens = re.findall(r"\b\w+\b", text)
-            word_count = float(len(tokens))
-            if word_count <= 0.0:
-                continue
-            extracted.append((event_time, word_count, event.get('response_idx', 0)))
-        extracted.sort(key=lambda item: item[0])
-        return extracted
-
-    def _simulate(chunk_events, prompt_times, start_time, end_time, speed, conversation_id=None, all_segments=None, chunk_to_prompt=None, prompt_to_chunks=None):
-        assert speed > 0.0, f"speed is {speed}"
-        times = [float(start_time)]
-        values = [0.0]
-        rebuffer_times = [float(start_time)]
-        rebuffer_values = [0.0]
-
-        # Create events for prompts and chunks
-        events = []
-        for idx, prompt_time in enumerate(prompt_times):
-            events.append((float(prompt_time), 0, 'prompt', idx, 0.0))
-        for idx, (chunk_time, words) in enumerate(chunk_events):
-            events.append((float(chunk_time), 1, 'chunk', idx, float(words)))
-        events.sort(key=lambda item: (item[0], item[1], item[2]))
-
-        current_time = float(start_time)
-        current_buffer = 0.0
-        rebuffer_total = 0.0
-        
-        # Track pending prompts: each prompt can have multiple chunks
-        # We track which prompts are still pending (not all chunks completed)
-        pending_prompts = set()  # Set of prompt indices that are still pending
-        unanswered_prompts = 0
-        
-        # Track conversation completion status
-        conversation_finished = False
-        if conversation_id and all_segments:
-            # Find the latest segment end time for this conversation
-            conversation_segments = [seg for seg in all_segments if seg.get('conversation_id') == conversation_id]
-            if conversation_segments:
-                conversation_end_time = max(seg.get('end', seg.get('start', 0.0)) for seg in conversation_segments)
-            else:
-                conversation_end_time = end_time
-        else:
-            conversation_end_time = end_time
-
-        def record(timestamp, buffer_value):
-            ts = float(timestamp)
-            value = max(0.0, float(buffer_value))
-            if times and abs(times[-1] - ts) < 1e-9 and abs(values[-1] - value) < 1e-6:
-                values[-1] = value
-                return
-            times.append(ts)
-            values.append(value)
+# simulate_text_buffer_trajectories function removed - using on-the-fly buffer tracking instead
 
 
-        def record_rebuffer(timestamp):
-            ts = float(timestamp)
-            if rebuffer_times and abs(rebuffer_times[-1] - ts) < 1e-9:
-                rebuffer_values[-1] = rebuffer_total
-                return
-            rebuffer_times.append(ts)
-            rebuffer_values.append(rebuffer_total)
-
-        def advance_to(target_time):
-            nonlocal current_time, current_buffer, rebuffer_total, conversation_finished
-            target = float(target_time)
-            if target <= current_time + 1e-9:
-                current_time = max(current_time, target)
-                record(target, current_buffer)
-                record_rebuffer(target)
-                return
-
-            # Check if conversation is finished (all segments completed)
-            if target >= conversation_end_time:
-                conversation_finished = True
-
-            while current_time + 1e-9 < target:
-                remaining = target - current_time
-                # if there is a next prompt and its time is before the current time (past due), then we increment the rebuffering time
-                # if more than one prompt is pending, iterate through the ones except the first one among pending prompts
-                # this part is independent of the current buffer
-                # it adds the delay for each prompt that is past due without any chunks being generated
-                # if the smallest one is pending, the remaining ones have nothing generated yet
-                
-                if current_buffer > 1e-9:
-                    time_to_empty = current_buffer / speed
-                    if time_to_empty <= remaining + 1e-9:
-                        # empty the buffer, no rebuffering
-                        empty_time = current_time + time_to_empty
-                        current_buffer = 0.0
-                        current_time = empty_time
-                        # add here
-                        if unanswered_prompts > 0:
-                            rebuffer_total += time_to_empty
-                        # 
-                        record(empty_time, current_buffer)
-                        record_rebuffer(empty_time)
-                        continue
-                    # non empty buffer, just advance to the target time
-                    reduction = speed * remaining
-                    current_buffer = max(0.0, current_buffer - reduction)
-                    current_time = target
-                    # add here
-                    if unanswered_prompts > 0:
-                        rebuffer_total += remaining
-                    # 
-                    record(target, current_buffer)
-                    record_rebuffer(target)
-                    break
-                else:
-                    # New rebuffering metric: accumulate only if buffer is empty AND there are pending prompts
-                    # This means we only count rebuffering time when:
-                    # 1. Buffer is empty (no text to consume)
-                    # 2. There are pending prompts (not all chunks completed for some prompts)
-                    # same buffer, increasing rebuffering
-                    if pending_prompts and current_buffer <= 1e-9:
-                        rebuffer_total += remaining
-                    # add here
-                    # only add once
-                    elif unanswered_prompts > 0:
-                        rebuffer_total += remaining
-                    # 
-                    current_time = target
-                    record(target, current_buffer)
-                    record_rebuffer(target)
-                    break
-
-        record(start_time, current_buffer)
-        record_rebuffer(start_time)
-
-        for event_time, _, event_type, idx, payload in events:
-            # Advance time to this event (consumes buffer at user speed)
-            advance_to(event_time)
-            
-            if event_type == 'prompt':
-                # Add prompt to pending set
-                pending_prompts.add(idx)
-                unanswered_prompts += 1
-                
-            else:
-                # This is a chunk completion - only count chunks that generate text
-                words = payload
-                assert words > 0, f"words is {words} for chunk {idx} of conversation {conversation_id[:12]}"
-                current_buffer += words
-                
-                # Check if this chunk completes all chunks for its prompt
-                if idx in chunk_to_prompt:
-                    prompt_idx = chunk_to_prompt[idx]
-                    
-                    # For narration-like datasets, each chunk immediately completes the prompt
-                    # to prevent infinite pending state
-                    if data_source == 'narration':
-                        # In narration datasets, each chunk immediately completes the prompt
-                        # This prevents the single prompt from staying pending forever
-                        pending_prompts.discard(prompt_idx)
-                    else:
-                        # For goalstep datasets, only remove prompt when all chunks are completed
-                        prompt_chunks = prompt_to_chunks.get(prompt_idx, [])
-                        if prompt_chunks and idx == max(prompt_chunks):
-                            # This is the last chunk for this prompt, remove from pending
-                            pending_prompts.discard(prompt_idx)
-                        if prompt_chunks and idx == min(prompt_chunks):
-                            unanswered_prompts -= 1
-            # Record buffer and rebuffer values AFTER processing the event (with new words added)
-            record(event_time, current_buffer)
-            record_rebuffer(event_time)
-        if end_time is not None and end_time > current_time + 1e-9:
-            advance_to(end_time)
-
-        return {
-            'times': times,
-            'values': values,
-            'rebuffer_times': rebuffer_times,
-            'rebuffer_values': rebuffer_values,
-            'final_time': current_time,
-            'total_rebuffer': rebuffer_total,
-        }
-
-    buffer_data = {}
-
-    summary_lookup = {}
-    for summary in conversation_summaries or []:
-        label = summary.get('label', summary.get('conversation_id', ''))
-        summary_lookup[label] = summary
-
-    # Process all segments together, not per conversation
-    all_segments = sorted(processor_segments or [], key=lambda seg: seg.get('end', seg.get('start', 0.0)))
-    
-    # Group segments by conversation for response event mapping
-    segments_by_cid = collections.defaultdict(list)
-    for segment in all_segments:
-        cid = segment.get('conversation_id')
-        if not cid:
-            continue
-        segments_by_cid[cid].append(segment)
-
-    # Create chunk events from response events directly (more reliable for narration)
-    # Group chunk events by conversation ID for proper isolation
-    chunk_events_by_conversation = {}
-    chunk_to_prompt_by_conversation = {}
-    prompt_to_chunks_by_conversation = {}
-    
-    # For narration datasets, use response events directly instead of segments
-    # This is more reliable because segments may not have proper generation_duration
-    for cid, segments in segments_by_cid.items():
-        summary = summary_lookup.get(cid)
-        if summary:
-            response_events = _extract_response_events(summary.get('events', []), 0.0)
-            conversation_chunks = []
-            
-            for chunk_idx, (resp_time, words, prompt_idx) in enumerate(response_events):
-                assert words > 0, f"words is {words} for chunk {chunk_idx} of conversation {cid}"
-                conversation_chunks.append((resp_time, float(words)))
-                if cid not in chunk_to_prompt_by_conversation:
-                    chunk_to_prompt_by_conversation[cid] = {}
-                chunk_to_prompt_by_conversation[cid][chunk_idx] = prompt_idx
-                if cid not in prompt_to_chunks_by_conversation:
-                    prompt_to_chunks_by_conversation[cid] = {}
-                if prompt_idx not in prompt_to_chunks_by_conversation[cid]:
-                    prompt_to_chunks_by_conversation[cid][prompt_idx] = []
-                prompt_to_chunks_by_conversation[cid][prompt_idx].append(chunk_idx)
-
-            chunk_events_by_conversation[cid] = conversation_chunks
-    
-    # Fallback: if no response events found, try segments
-    if not any(chunk_events_by_conversation.values()):
-        print("📊 No response events found, falling back to segments")
-        exit(1)
-
-    total_chunk_events = sum(len(events) for events in chunk_events_by_conversation.values())
-    # print(f"📊 Created {total_chunk_events} chunk events across {len(chunk_events_by_conversation)} conversations for buffer simulation")
-    # for cid, events in chunk_events_by_conversation.items():
-    #     print(f"📊 {cid}: {events}")
-    if total_chunk_events > 0:
-        total_words = sum(sum(words for _, words in events) for events in chunk_events_by_conversation.values())
-        avg_words_per_chunk = total_words / total_chunk_events
-        # print(f"📊 Total words: {total_words}, Avg words per chunk: {avg_words_per_chunk:.1f}")
-
-    # Now create buffer trajectories for each conversation
-    for cid, segments in segments_by_cid.items():
-        summary = summary_lookup.get(cid)
-        if not summary or not segments:
-            continue
-
-        segments.sort(key=lambda seg: seg.get('end', seg.get('start', 0.0)))
-        start_time = float(summary.get('start', segments[0].get('start', 0.0)))
-        end_time = float(max(seg.get('end', seg.get('start', start_time)) for seg in segments))
-
-        # Use only chunk events for this specific conversation
-        conversation_chunk_events = chunk_events_by_conversation.get(cid, [])
-
-        prompt_times = sorted(
-            float(event.get('time', start_time))
-            for event in summary.get('events', [])
-            if event.get('type') == 'prompt'
-        )
-        # Trim to number of chunks to maintain one-to-one pairing
-        if len(prompt_times) > len(conversation_chunk_events):
-            prompt_times = prompt_times[:len(conversation_chunk_events)]
-
-        reading_traj = _simulate(conversation_chunk_events, prompt_times, start_time, end_time, reading_speed, cid, all_segments, chunk_to_prompt_by_conversation[cid], prompt_to_chunks_by_conversation[cid])
-        listening_traj = _simulate(conversation_chunk_events, prompt_times, start_time, end_time, listening_speed, cid, all_segments, chunk_to_prompt_by_conversation[cid], prompt_to_chunks_by_conversation[cid])
-
-        buffer_data[cid] = {
-            'reading': reading_traj,
-            'listening': listening_traj,
-            'conversation_id': summary.get('conversation_id', cid)
-        }
-
-    return buffer_data
-
-
-def create_processor_timeline(processor_segments, conversation_summaries=None, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
-    """Visualize processor usage timeline across four arrival scenarios with shared axes."""
+def create_processor_timeline(processor_segments, onthefly_buffer_data=None, conversation_summaries=None, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
+    """Visualize processor usage timeline and buffer evolution using on-the-fly buffer tracking."""
 
     if not processor_segments:
-        return None
+        return None, None
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -949,13 +659,21 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
             completion_time = max(data['duration'], total_processing)
         data['completion_time'] = completion_time
 
-    buffer_data = simulate_text_buffer_trajectories(
-        sorted_segments,
-        conversation_summaries,
-        Config.USER_READING_SPEED_MAX,
-        Config.USER_LISTENING_SPEED_MAX,
-        data_source
-    )
+    # Convert onthefly_buffer_data to buffer_data format (only listening mode)
+    buffer_data = {}
+    if onthefly_buffer_data:
+        for cid, state in onthefly_buffer_data.items():
+            buffer_data[cid] = {
+                'listening': {
+                    'times': state['times'],
+                    'values': state['values'],
+                    'rebuffer_times': state['rebuffer_times'],
+                    'rebuffer_values': state['rebuffer_values'],
+                    'final_time': state['last_update_time'],
+                    'total_rebuffer': state['total_rebuffer'],
+                },
+                'conversation_id': cid
+            }
 
     actual_starts = []
     actual_ends = []
@@ -1140,15 +858,15 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
     if buffer_data:
         fig_buffer, axes_grid = plt.subplots(
             2,
-            2,
-            figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_MEDIUM[1] * 1.0),
-            sharex='col'
+            1,
+            figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_MEDIUM[1] * 0.8),
+            sharex=True
         )
-        axes_grid = np.asarray(axes_grid)
-        fig_buffer.suptitle('Text Buffer and Rebuffer Evolution', fontsize=14, fontweight='bold')
+        axes_grid = np.asarray(axes_grid).reshape(-1)
+        fig_buffer.suptitle('Text Buffer and Rebuffer Evolution (Listening Mode)', fontsize=14, fontweight='bold')
 
-        time_max_by_mode = {'reading': 0.0, 'listening': 0.0}
-        data_present = {'reading': False, 'listening': False}
+        time_max_listening = 0.0
+        data_present = False
 
         # Collect critical events for dashed lines
         critical_events = {'prompts': [], 'chunks': []}
@@ -1200,20 +918,6 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
 
             color = colors.get(cid, '#333333')
 
-            reading_traj = conversation_buffer.get('reading', {}) or {}
-            reading_times = reading_traj.get('times', [])
-            reading_values = reading_traj.get('values', [])
-            reading_rebuffer_times = reading_traj.get('rebuffer_times', [])
-            reading_rebuffer_values = reading_traj.get('rebuffer_values', [])
-
-            if reading_times:
-                axes_grid[0, 0].plot(reading_times, reading_values, color=color, linewidth=2, label=cid[:12])
-                time_max_by_mode['reading'] = max(time_max_by_mode['reading'], max(reading_times))
-                data_present['reading'] = True
-            if reading_rebuffer_times:
-                axes_grid[1, 0].plot(reading_rebuffer_times, reading_rebuffer_values, color=color, linewidth=2)
-                time_max_by_mode['reading'] = max(time_max_by_mode['reading'], max(reading_rebuffer_times))
-
             listening_traj = conversation_buffer.get('listening', {}) or {}
             listening_times = listening_traj.get('times', [])
             listening_values = listening_traj.get('values', [])
@@ -1221,47 +925,38 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
             listening_rebuffer_values = listening_traj.get('rebuffer_values', [])
 
             if listening_times:
-                axes_grid[0, 1].plot(listening_times, listening_values, color=color, linewidth=2, label=cid[:12])
-                time_max_by_mode['listening'] = max(time_max_by_mode['listening'], max(listening_times))
-                data_present['listening'] = True
+                axes_grid[0].plot(listening_times, listening_values, color=color, linewidth=2, label=cid[:12])
+                time_max_listening = max(time_max_listening, max(listening_times))
+                data_present = True
             if listening_rebuffer_times:
-                axes_grid[1, 1].plot(listening_rebuffer_times, listening_rebuffer_values, color=color, linewidth=2)
-                time_max_by_mode['listening'] = max(time_max_by_mode['listening'], max(listening_rebuffer_times))
+                axes_grid[1].plot(listening_rebuffer_times, listening_rebuffer_values, color=color, linewidth=2)
+                time_max_listening = max(time_max_listening, max(listening_rebuffer_times))
 
-        mode_configs = [
-            ('reading', Config.USER_READING_SPEED_MAX, 'Reading'),
-            ('listening', Config.USER_LISTENING_SPEED_MAX, 'Listening')
-        ]
+        max_time = time_max_listening if time_max_listening > 0.0 else (overall_max if overall_max > 0.0 else 1.0)
         row_labels = ['Buffer Size (words)', 'Cumulative Rebuffer (s)']
 
-        for col, (mode_key, mode_speed, mode_label) in enumerate(mode_configs):
-            max_time = time_max_by_mode[mode_key]
-            if max_time <= 0.0:
-                max_time = overall_max if overall_max > 0.0 else 1.0
-            for row in range(2):
-                axes_grid[row, col].set_xlim(0.0, max_time * 1.05)
-                axes_grid[row, col].set_ylim(bottom=0.0)
-                axes_grid[row, col].grid(True, alpha=0.3)
-                axes_grid[row, col].set_ylabel(row_labels[row])
-                if not axes_grid[row, col].lines:
-                    axes_grid[row, col].text(
-                        0.5,
-                        0.5,
-                        'No data',
-                        ha='center',
-                        va='center',
-                        transform=axes_grid[row, col].transAxes,
-                        fontsize=9,
-                        color='#666666'
-                    )
+        for row in range(2):
+            axes_grid[row].set_xlim(0.0, max_time * 1.05)
+            axes_grid[row].set_ylim(bottom=0.0)
+            axes_grid[row].grid(True, alpha=0.3)
+            axes_grid[row].set_ylabel(row_labels[row])
+            if not axes_grid[row].lines:
+                axes_grid[row].text(
+                    0.5,
+                    0.5,
+                    'No data',
+                    ha='center',
+                    va='center',
+                    transform=axes_grid[row].transAxes,
+                    fontsize=9,
+                    color='#666666'
+                )
 
-            axes_grid[0, col].set_title(f'{mode_label} ({mode_speed:.2f} words/s)', fontsize=11)
-            axes_grid[1, col].set_xlabel('Processor Time (s)')
+        axes_grid[0].set_title(f'Listening ({Config.USER_LISTENING_SPEED_MAX:.2f} words/s)', fontsize=11)
+        axes_grid[1].set_xlabel('Processor Time (s)')
 
-        if data_present['reading']:
-            axes_grid[0, 0].legend(loc='upper right', fontsize=8, title='Conversation')
-        if data_present['listening']:
-            axes_grid[0, 1].legend(loc='upper right', fontsize=8, title='Conversation')
+        if data_present:
+            axes_grid[0].legend(loc='upper right', fontsize=8, title='Conversation')
 
         fig_buffer.tight_layout(rect=[0, 0, 1, 0.94])
         buffer_output_path = os.path.join(output_dir, f'text_buffer_evolution_{data_source}.png')
@@ -1270,89 +965,7 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
 
     return output_path, buffer_data
 
-def create_buffer_comparison_visualization(buffer_data_postprocess, buffer_data_onthefly, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
-    """Compare post-processed buffer simulation with on-the-fly buffer tracking to verify consistency"""
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Get unique conversations (only those present in both datasets)
-    conversations_postprocess = set(buffer_data_postprocess.keys())
-    conversations_onthefly = set(buffer_data_onthefly.keys())
-    unique_conversations = sorted(conversations_postprocess & conversations_onthefly)
-    
-    if not unique_conversations:
-        print("⚠️  No matching conversations found between post-processed and on-the-fly buffer data")
-        return
-    
-    num_conversations = len(unique_conversations)
-    colors_post = colors_onthefly = plt.cm.Set2(np.linspace(0, 1, num_conversations))
-    
-    # Create 2x2 grid: buffer level (post vs onthefly) and rebuffering (post vs onthefly)
-    fig, axes = plt.subplots(2, 2, figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_MEDIUM[1]))
-    fig.suptitle('Buffer Tracking Comparison: Post-Processed vs On-The-Fly (Listening Speed)', fontsize=14, fontweight='bold')
-    
-    ax_buffer_post, ax_buffer_onthefly = axes[0]
-    ax_rebuffer_post, ax_rebuffer_onthefly = axes[1]
-    
-    for idx, cid in enumerate(unique_conversations):
-        # Post-processed data (from simulate_text_buffer_trajectories)
-        post_data = buffer_data_postprocess.get(cid, {})
-        post_listening = post_data.get('listening', {}) or {}
-        post_times = post_listening.get('times', [])
-        post_values = post_listening.get('values', [])
-        post_rebuffer_times = post_listening.get('rebuffer_times', [])
-        post_rebuffer_values = post_listening.get('rebuffer_values', [])
-        
-        # On-the-fly data (from event handling)
-        onthefly_data = buffer_data_onthefly.get(cid, {})
-        onthefly_listening = onthefly_data.get('listening', {}) or {}
-        onthefly_times = onthefly_listening.get('times', [])
-        onthefly_values = onthefly_listening.get('values', [])
-        onthefly_rebuffer_times = onthefly_listening.get('rebuffer_times', [])
-        onthefly_rebuffer_values = onthefly_listening.get('rebuffer_values', [])
-        
-        # Plot buffer levels
-        if post_times:
-            ax_buffer_post.plot(post_times, post_values, color=colors_post[idx], linewidth=2, label=cid[:12], alpha=0.9)
-        if onthefly_times:
-            ax_buffer_onthefly.plot(onthefly_times, onthefly_values, color=colors_onthefly[idx], linewidth=2, label=cid[:12], alpha=0.9)
-        
-        # Plot rebuffering
-        if post_rebuffer_times:
-            ax_rebuffer_post.plot(post_rebuffer_times, post_rebuffer_values, color=colors_post[idx], linewidth=2, alpha=0.9)
-        if onthefly_rebuffer_times:
-            ax_rebuffer_onthefly.plot(onthefly_rebuffer_times, onthefly_rebuffer_values, color=colors_onthefly[idx], linewidth=2, alpha=0.9)
-        
-        # Calculate and print differences for verification
-        if post_rebuffer_values and onthefly_rebuffer_values:
-            final_rebuffer_post = post_rebuffer_values[-1]
-            final_rebuffer_onthefly = onthefly_rebuffer_values[-1]
-            diff = abs(final_rebuffer_post - final_rebuffer_onthefly)
-            rel_diff = (diff / max(final_rebuffer_post, 1e-9)) * 100
-            # print(f"   {cid[:12]}: Post={final_rebuffer_post:.2f}s, OnTheFly={final_rebuffer_onthefly:.2f}s, Diff={diff:.3f}s ({rel_diff:.1f}%)")
-    
-    # Configure axes
-    for ax in [ax_buffer_post, ax_buffer_onthefly]:
-        ax.set_ylabel('Buffer Size (words)')
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc='upper right', fontsize=8, title='Conversation')
-    
-    for ax in [ax_rebuffer_post, ax_rebuffer_onthefly]:
-        ax.set_xlabel('Processor Time (s)')
-        ax.set_ylabel('Cumulative Rebuffer (s)')
-        ax.grid(True, alpha=0.3)
-    
-    ax_buffer_post.set_title('Buffer Level - Post-Processed (simulate_text_buffer_trajectories)', fontsize=11)
-    ax_buffer_onthefly.set_title('Buffer Level - On-The-Fly (event handling)', fontsize=11)
-    ax_rebuffer_post.set_title('Cumulative Rebuffering - Post-Processed', fontsize=11)
-    ax_rebuffer_onthefly.set_title('Cumulative Rebuffering - On-The-Fly', fontsize=11)
-    
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    
-    output_path = os.path.join(output_dir, f'buffer_comparison_{data_source}.png')
-    fig.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
-    plt.close(fig)
-    print(f"   ✅ Buffer comparison saved to {output_path}")
+# create_buffer_comparison_visualization function removed - using on-the-fly buffer tracking only
 
 def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """Create detailed memory usage visualization for all videos"""
@@ -2946,15 +2559,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         print("\n📊 Creating frame score analysis...")
         create_frame_score_analysis(all_frame_scores_data, data_source=data_source)
 
-    buffer_data = None
-    if processor_segments:
-        print("\n📊 Creating processor timeline...")
-        _, buffer_data = create_processor_timeline(processor_segments, conversation_summaries, data_source=data_source)
-    
-    # Convert on-the-fly buffer data to match buffer_data format for comparison
-    onthefly_comparison_data = {}
+    # Convert on-the-fly buffer data to standard format (only listening mode)
+    buffer_data = {}
     for cid, state in onthefly_buffer_data.items():
-        onthefly_comparison_data[cid] = {
+        buffer_data[cid] = {
             'listening': {
                 'times': state['times'],
                 'values': state['values'],
@@ -2965,8 +2573,12 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             },
             'conversation_id': cid
         }
+    
+    if processor_segments:
+        print("\n📊 Creating processor timeline...")
+        create_processor_timeline(processor_segments, onthefly_buffer_data, conversation_summaries, data_source=data_source)
 
-    return results, buffer_data, all_memory_data, onthefly_comparison_data
+    return results, buffer_data, all_memory_data
 
 def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda', num_conversations=None, random_selection=False, specific_indices=None, data_source='goalstep', conversation_start_times=None):
     """Evaluate conversations across different streaming thresholds to analyze threshold sensitivity."""
@@ -3019,7 +2631,7 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
         print(f"🎲 Set random seeds for deterministic behavior")
         
         # Run evaluation with this threshold using the SAME conversations
-        results, buffer_data, memory_data, onthefly_buffer_data = streaming_evaluate_conversations(
+        results, buffer_data, memory_data = streaming_evaluate_conversations(
             model=model,
             tokenizer=tokenizer,
             dataset=dataset,
@@ -3052,26 +2664,18 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
             avg_fluency = sum(r['fluency'] for r in results) / len(results)
             avg_responses = sum(len(r['generated_turns']) for r in results) / len(results)
             
-            # Calculate rebuffering metrics from buffer_data
-            reading_rebuffering_times = []
+            # Calculate rebuffering metrics from buffer_data (listening mode only)
             listening_rebuffering_times = []
-            avg_reading_rebuffering = 0.0
             avg_listening_rebuffering = 0.0
             
             if buffer_data:
                 for cid, conversation_buffer in buffer_data.items():
-                    reading_traj = conversation_buffer.get('reading', {})
                     listening_traj = conversation_buffer.get('listening', {})
-                    
-                    if 'rebuffer_values' in reading_traj and reading_traj['rebuffer_values']:
-                        final_reading_rebuffer = reading_traj['rebuffer_values'][-1]
-                        reading_rebuffering_times.append(final_reading_rebuffer)
                     
                     if 'rebuffer_values' in listening_traj and listening_traj['rebuffer_values']:
                         final_listening_rebuffer = listening_traj['rebuffer_values'][-1]
                         listening_rebuffering_times.append(final_listening_rebuffer)
                 
-                avg_reading_rebuffering = np.mean(reading_rebuffering_times) if reading_rebuffering_times else 0.0
                 avg_listening_rebuffering = np.mean(listening_rebuffering_times) if listening_rebuffering_times else 0.0
             
             # Calculate final frame utilization from results
@@ -3081,7 +2685,6 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
             print(f"   • Average PPL: {avg_ppl:.3f}")
             print(f"   • Average Fluency: {avg_fluency:.3f}")
             print(f"   • Average Responses: {avg_responses:.1f}")
-            print(f"   • Average Reading Rebuffering Time: {avg_reading_rebuffering:.3f}s")
             print(f"   • Average Listening Rebuffering Time: {avg_listening_rebuffering:.3f}s")
             # print(f"   • Average Final Frame Utilization: {avg_final_utilization:.3f}")
         
@@ -3822,7 +3425,7 @@ def main():
             print("✅ Threshold sweep analysis completed!")
             return
 
-        results, buffer_data, memory_data, onthefly_buffer_data  = streaming_evaluate_conversations(
+        results, buffer_data, memory_data = streaming_evaluate_conversations(
             model,
             tokenizer,
             dataset,
@@ -3832,11 +3435,6 @@ def main():
             data_source=data_source,
             conversation_start_times=default_start_times
         )
-        
-        # Create buffer comparison visualization
-        if buffer_data and onthefly_buffer_data:
-            print("\n📊 Creating buffer comparison visualization...")
-            create_buffer_comparison_visualization(buffer_data, onthefly_buffer_data, data_source=data_source)
         
         # print("\n" + "=" * 60)
         # print("📊 EVALUATION RESULTS")
@@ -3961,8 +3559,6 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         'frame_score_means': [],
         'frame_score_stds': [],
         'frame_score_below_threshold_ratios': [],
-        'reading_rebuffering_means': [],
-        'reading_rebuffering_stds': [],
         'listening_rebuffering_means': [],
         'listening_rebuffering_stds': [],
         'final_utilization_means': [],
@@ -3983,20 +3579,14 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         fluencies = [r.get('fluency', 0.0) for r in results]
         response_counts = [len(r.get('generated_turns', [])) for r in results]
         
-        # Extract rebuffering data from buffer_data for this threshold
-        reading_rebuffering_times = []
+        # Extract rebuffering data from buffer_data for this threshold (listening mode only)
         listening_rebuffering_times = []
         
         if all_buffer_data and threshold in all_buffer_data:
             buffer_data = all_buffer_data[threshold]
             if buffer_data:
                 for cid, conversation_buffer in buffer_data.items():
-                    reading_traj = conversation_buffer.get('reading', {})
                     listening_traj = conversation_buffer.get('listening', {})
-                    
-                    if 'rebuffer_values' in reading_traj and reading_traj['rebuffer_values']:
-                        final_reading_rebuffer = reading_traj['rebuffer_values'][-1]
-                        reading_rebuffering_times.append(final_reading_rebuffer)
                     
                     if 'rebuffer_values' in listening_traj and listening_traj['rebuffer_values']:
                         final_listening_rebuffer = listening_traj['rebuffer_values'][-1]
@@ -4039,8 +3629,6 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         detailed_metrics['frame_score_stds'].append(np.std(frame_scores) if frame_scores else 0.0)
         detailed_metrics['frame_score_below_threshold_ratios'].append(np.mean(below_threshold_ratios) if below_threshold_ratios else 0.0)
         # Use the rebuffering data extracted from buffer_data
-        detailed_metrics['reading_rebuffering_means'].append(np.mean(reading_rebuffering_times) if reading_rebuffering_times else 0.0)
-        detailed_metrics['reading_rebuffering_stds'].append(np.std(reading_rebuffering_times) if reading_rebuffering_times else 0.0)
         detailed_metrics['listening_rebuffering_means'].append(np.mean(listening_rebuffering_times) if listening_rebuffering_times else 0.0)
         detailed_metrics['listening_rebuffering_stds'].append(np.std(listening_rebuffering_times) if listening_rebuffering_times else 0.0)
         
@@ -4256,26 +3844,22 @@ def create_unified_threshold_analysis(all_threshold_results, all_frame_scores_da
         ax4.text(0.5, 0.5, 'No frame score data available', ha='center', va='center', transform=ax4.transAxes)
         ax4.set_title('Frame Score Trends Over Time')
     
-    # 5. Combined Reading vs Listening Rebuffering Comparison
+    # 5. Listening Rebuffering Time vs Threshold
     ax5 = axes[1, 1]
-    if all_buffer_data and detailed_metrics['reading_rebuffering_means'] and detailed_metrics['listening_rebuffering_means']:
-        # Plot reading vs listening rebuffering comparison
-        ax5.errorbar(thresholds, detailed_metrics['reading_rebuffering_means'], yerr=detailed_metrics['reading_rebuffering_stds'], 
-                    fmt='o-', color='#1f77b4', linewidth=3, markersize=8, capsize=5, 
-                    label='Reading Rebuffering ± Std', alpha=0.9)
-        
+    if all_buffer_data and detailed_metrics['listening_rebuffering_means']:
+        # Plot listening rebuffering time
         ax5.errorbar(thresholds, detailed_metrics['listening_rebuffering_means'], yerr=detailed_metrics['listening_rebuffering_stds'], 
                     fmt='s-', color='#ff7f0e', linewidth=3, markersize=8, capsize=5, 
                     label='Listening Rebuffering ± Std', alpha=0.9)
         
         ax5.set_xlabel('Streaming Threshold')
         ax5.set_ylabel('Rebuffering Time (seconds)')
-        ax5.set_title('Reading vs Listening Rebuffering Comparison')
+        ax5.set_title('Listening Rebuffering Time vs Threshold')
         ax5.grid(True, alpha=0.3)
         ax5.legend(fontsize=9)
     else:
         ax5.text(0.5, 0.5, 'No rebuffering data available', ha='center', va='center', transform=ax5.transAxes)
-        ax5.set_title('Reading vs Listening Rebuffering Comparison')
+        ax5.set_title('Listening Rebuffering Time vs Threshold')
     
     # 5.5. VLM PPL vs Response Count (Per Video)
     ax5_5 = axes[1, 2]
@@ -5049,15 +4633,10 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
         
         # 5. Rebuffering time data - will be extracted from buffer_data after processing all results
     
-    # Extract rebuffering data from buffer_data (same as text_buffer_evolution)
+    # Extract rebuffering data from buffer_data (listening mode only)
     if buffer_data:
         for cid, conversation_buffer in buffer_data.items():
-            reading_traj = conversation_buffer.get('reading', {})
             listening_traj = conversation_buffer.get('listening', {})
-            
-            if 'rebuffer_values' in reading_traj and reading_traj['rebuffer_values']:
-                final_reading_rebuffer = reading_traj['rebuffer_values'][-1]
-                reading_rebuffering_times.append(final_reading_rebuffer)
             
             if 'rebuffer_values' in listening_traj and listening_traj['rebuffer_values']:
                 final_listening_rebuffer = listening_traj['rebuffer_values'][-1]
@@ -5068,8 +4647,6 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
     vlm_ppl_std = np.std(vlm_ppls) if vlm_ppls else 0.0
     gt_ppl_mean = np.mean(gt_ppls) if gt_ppls else 0.0
     
-    reading_rebuffer_mean = np.mean(reading_rebuffering_times) if reading_rebuffering_times else 0.0
-    reading_rebuffer_std = np.std(reading_rebuffering_times) if reading_rebuffering_times else 0.0
     listening_rebuffer_mean = np.mean(listening_rebuffering_times) if listening_rebuffering_times else 0.0
     listening_rebuffer_std = np.std(listening_rebuffering_times) if listening_rebuffering_times else 0.0
     
@@ -5122,28 +4699,22 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
     ax1.text(0, vlm_ppl_mean + vlm_ppl_std + 0.2, f'{vlm_ppl_mean:.2f}±{vlm_ppl_std:.2f}', 
              ha='center', va='bottom', fontsize=9, fontweight='bold')
     
-    # 2. Rebuffering Time - Reading vs Listening (top-right)
+    # 2. Rebuffering Time - Listening Mode Only (top-right)
     ax2 = axes[0, 1]
-    x_pos_rebuffer = [0, 1]
-    rebuffer_means = [reading_rebuffer_mean, listening_rebuffer_mean]
-    rebuffer_stds = [reading_rebuffer_std, listening_rebuffer_std]
-    rebuffer_labels = ['Reading', 'Listening']
-    rebuffer_colors = ['#2E86AB', '#A23B72']
-    
-    bars2 = ax2.bar(x_pos_rebuffer, rebuffer_means, yerr=rebuffer_stds,
-                    color=rebuffer_colors, alpha=0.8, capsize=4, width=0.4,
+    bars2 = ax2.bar([0], [listening_rebuffer_mean], yerr=[listening_rebuffer_std],
+                    color=colors[1], alpha=0.8, capsize=4, width=0.4,
                     edgecolor='black', linewidth=0.5)
     ax2.set_ylabel('Time (s)')
-    ax2.set_xticks(x_pos_rebuffer)
-    ax2.set_xticklabels(rebuffer_labels)
+    ax2.set_xticks([0])
+    ax2.set_xticklabels(['Listening'])
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.spines['top'].set_visible(False)
     ax2.spines['right'].set_visible(False)
     
     # Add value labels
-    for i, (mean, std) in enumerate(zip(rebuffer_means, rebuffer_stds)):
-        ax2.text(i, mean + std + 0.1, f'{mean:.2f}±{std:.2f}', 
-                 ha='center', va='bottom', fontsize=9, fontweight='bold')
+    ax2.text(0, listening_rebuffer_mean + listening_rebuffer_std + 0.1, 
+             f'{listening_rebuffer_mean:.2f}±{listening_rebuffer_std:.2f}', 
+             ha='center', va='bottom', fontsize=9, fontweight='bold')
     
     # 3. Fluency (bottom-left)
     ax3 = axes[1, 0]
@@ -5181,7 +4752,6 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
     # Add compact summary statistics
     summary_text = f"""N={len(results)} conversations
 VLM PPL: {vlm_ppl_mean:.2f}±{vlm_ppl_std:.2f} (GT: {gt_ppl_mean:.2f})
-Reading Rebuffering: {reading_rebuffer_mean:.2f}±{reading_rebuffer_std:.2f}s
 Listening Rebuffering: {listening_rebuffer_mean:.2f}±{listening_rebuffer_std:.2f}s
 Fluency: {fluency_mean:.3f}±{fluency_std:.3f}
 Latency: {latency_mean:.3f}±{latency_std:.3f}s"""
@@ -5199,7 +4769,6 @@ Latency: {latency_mean:.3f}±{latency_std:.3f}s"""
     
     print(f"📊 Aggregated metrics visualization saved to: {output_path}")
     print(f"   • VLM PPL: {vlm_ppl_mean:.3f} ± {vlm_ppl_std:.3f} (GT: {gt_ppl_mean:.3f})")
-    print(f"   • Reading Rebuffering: {reading_rebuffer_mean:.3f} ± {reading_rebuffer_std:.3f}s (from {len(reading_rebuffering_times)} conversations)")
     print(f"   • Listening Rebuffering: {listening_rebuffer_mean:.3f} ± {listening_rebuffer_std:.3f}s (from {len(listening_rebuffering_times)} conversations)")
     print(f"   • Fluency: {fluency_mean:.3f} ± {fluency_std:.3f}")
     print(f"   • Latency: {latency_mean:.3f} ± {latency_std:.3f}s")
