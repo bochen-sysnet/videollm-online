@@ -62,7 +62,7 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Processing limits
-    MAX_EVAL_FRAMES = 600            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 60            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
@@ -2732,18 +2732,13 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             active_conversation_id = conversation_id
 
         relative_time = max(0.0, event_time - context.conversation_start_time)
-        print("--------EVENT", event_type, relative_time, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id[:12], "--------")
+        # print("--------EVENT", event_type, relative_time, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id[:12], "--------")
 
         if event_type == 'prompt':
             # Update buffer to current processor_clock before handling prompt
             buffer_state = onthefly_buffer_data[conversation_id]
             update_buffer_to_time(buffer_state, event_time, listening_speed, conversation_id)
-            # if 'goalstep_4c6' in conversation_id:
-            #     print("prompt", "Time", event_time, "unanswered_prompts", buffer_state['unanswered_prompts'], \
-            #         "pending_responses", buffer_state['pending_responses'], buffer_state['total_rebuffer'])
-            # Mark this prompt as pending
-            # Use the current response_generated count from context as the prompt index
-            # This matches how response_idx is used in the event log
+            
             buffer_state['pending_responses'].add(context.response_expected)
             context.response_expected += 1
             buffer_state['unanswered_prompts'] += 1
@@ -2758,10 +2753,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 context.pending_frame_events.append((event_time, priority, payload_data))
                 continue
             start_time = max(processor_clock, event_time)
-            
-            # Update buffer to start_time before handling frame
-            # buffer_state = onthefly_buffer_data[conversation_id]
-            # update_buffer_to_time(buffer_state, start_time, listening_speed, conversation_id)
             
             segment_info = context.handle_frame(shared_liveinfer, relative_time, payload_data, start_time)
             
@@ -2811,30 +2802,20 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     buffer_state['prompt_to_chunks'][response_idx].append(chunk_idx)
                     
                     # Handle prompt completion logic (same as simulate_text_buffer_trajectories)
-                    if data_source == 'narration':
-                        # In narration, each chunk immediately completes the prompt
+                    # if data_source == 'narration':
+                    #     # In narration, each chunk immediately completes the prompt
+                    #     buffer_state['pending_responses'].discard(response_idx)
+                    # else:
+                    is_last_chunk = last_event.get('is_last_chunk', False)
+                    is_first_chunk = last_event.get('is_first_chunk', False)
+                    if is_first_chunk:
+                        buffer_state['unanswered_prompts'] -= 1
+                        if not is_last_chunk and last_event.get('trigger_method') == 'score':
+                            buffer_state['pending_responses'].add(context.response_expected)
+                            context.response_expected += 1
+                    if is_last_chunk:
                         buffer_state['pending_responses'].discard(response_idx)
-                    else:
-                        # For goalstep, only remove prompt when all chunks are completed
-                        # prompt_chunks = buffer_state['prompt_to_chunks'].get(response_idx, [])
-                        # if prompt_chunks and chunk_idx == max(prompt_chunks):
-                        #     buffer_state['pending_responses'].discard(response_idx)
-                        # if prompt_chunks and chunk_idx == min(prompt_chunks):
-                        #     buffer_state['unanswered_prompts'] -= 1
-                        is_last_chunk = last_event.get('is_last_chunk', False)
-                        is_first_chunk = last_event.get('is_first_chunk', False)
-                        if is_first_chunk:
-                            buffer_state['unanswered_prompts'] -= 1
-                            if not is_last_chunk and last_event.get('trigger_method') == 'score':
-                                buffer_state['pending_responses'].add(context.response_expected)
-                                context.response_expected += 1
-                        if is_last_chunk:
-                            buffer_state['pending_responses'].discard(response_idx)
-                        # if 'goalstep_4c6' in context.conversation_id:
-                        #     print("frame", word_count, "Time", processor_clock, "first", is_first_chunk, "last", is_last_chunk, \
-                        #         "Response", response_idx, "total_rebuffer", buffer_state['total_rebuffer'], "unanswered_prompts", \
-                        #             buffer_state['unanswered_prompts'], "pending_responses", buffer_state['pending_responses'])
-                    
+                        
                     # Record buffer state after adding words
                     buffer_state['times'].append(processor_clock)
                     buffer_state['values'].append(buffer_state['buffer'])
@@ -2851,10 +2832,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
 
         if event_type == 'generation':
             start_time = max(processor_clock, event_time)
-            
-            # Update buffer to start_time before handling generation
-            # buffer_state = onthefly_buffer_data[conversation_id]
-            # update_buffer_to_time(buffer_state, start_time, listening_speed, conversation_id)
             
             segment_info = context.handle_generation(shared_liveinfer, relative_time, start_time)
             generation_duration = segment_info.get('generation_time', 0.0)
@@ -2900,29 +2877,21 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     buffer_state['prompt_to_chunks'][response_idx].append(chunk_idx)
                     
                     # Handle prompt completion logic (same as simulate_text_buffer_trajectories)
-                    if data_source == 'narration':
-                        # In narration, each chunk immediately completes the prompt
+                    # if data_source == 'narration':
+                    #     # In narration, each chunk immediately completes the prompt
+                    #     buffer_state['pending_responses'].discard(response_idx)
+                    # else:
+                    is_last_chunk = last_event.get('is_last_chunk', False)
+                    is_first_chunk = last_event.get('is_first_chunk', False)
+                    # pending responses are those with more than one chunk
+                    if is_first_chunk:
+                        buffer_state['unanswered_prompts'] -= 1
+                        if not is_last_chunk and last_event.get('trigger_method') == 'score':
+                            buffer_state['pending_responses'].add(context.response_expected)
+                            context.response_expected += 1
+                    if is_last_chunk:
                         buffer_state['pending_responses'].discard(response_idx)
-                    else:
-                        # For goalstep, only remove prompt when all chunks are completed
-                        # prompt_chunks = buffer_state['prompt_to_chunks'].get(response_idx, [])
-                        # if prompt_chunks and chunk_idx == max(prompt_chunks):
-                        #     buffer_state['pending_responses'].discard(response_idx)
-                        # if prompt_chunks and chunk_idx == min(prompt_chunks):
-                        #     buffer_state['unanswered_prompts'] -= 1
-                        is_last_chunk = last_event.get('is_last_chunk', False)
-                        is_first_chunk = last_event.get('is_first_chunk', False)
-                        # pending responses are those with more than one chunk
-                        if is_first_chunk:
-                            buffer_state['unanswered_prompts'] -= 1
-                            if not is_last_chunk and last_event.get('trigger_method') == 'score':
-                                buffer_state['pending_responses'].add(context.response_expected)
-                                context.response_expected += 1
-                        if is_last_chunk:
-                            buffer_state['pending_responses'].discard(response_idx)
-                        # if 'goalstep_4c6' in context.conversation_id:
-                        #     print("generation", word_count, "Time", processor_clock, "is first chunk", is_first_chunk, "is last chunk", is_last_chunk, "Response", response_idx, "total_rebuffer", buffer_state['total_rebuffer'], "unanswered_prompts", buffer_state['unanswered_prompts'], "pending_prompts", buffer_state['pending_responses'])
-                    
+                        
                     
                     # Record buffer state after adding words
                     buffer_state['times'].append(processor_clock)
