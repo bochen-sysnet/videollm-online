@@ -64,11 +64,11 @@ class Config:
     PLOT_FIGSIZE_SMALL = (15, 4)
     
     # Live visualization settings
-    LIVE_VIZ_UPDATE_INTERVAL = 1  # Update plot every N events
+    LIVE_VIZ_UPDATE_INTERVAL = 10  # Update plot every N events
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 60            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 600            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
@@ -1766,9 +1766,7 @@ class EventDrivenConversationContext:
             heapq.heappush(event_queue, (frame_time, 1, sequence_counter, ('frame', self.conversation_id, frame_idx)))
             sequence_counter += 1
 
-        finalize_time = self.conversation_start_time + self.test_frames / Config.FRAME_FPS
-        heapq.heappush(event_queue, (finalize_time, 2, sequence_counter, ('finalize', self.conversation_id, None)))
-        sequence_counter += 1
+        # Don't schedule finalize event - we'll finalize all conversations at once after event loop
         return sequence_counter
 
     def ensure_liveinfer_loaded(self, liveinfer):
@@ -2721,29 +2719,31 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             # print("----END----EVENT", event_type, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id, "--------")
             continue
 
-        if event_type == 'finalize':
-            end_time = max(processor_clock, event_time)
-            buffer_state = onthefly_buffer_data[conversation_id]
-            update_buffer_to_time(buffer_state, end_time, listening_speed, conversation_id)
-
-            context.finalize(shared_liveinfer)
-            context.liveinfer_state = None
-            active_conversation_id = None
-            shared_liveinfer.reset()
-
-            unique_key = f"{context.video_uid}_{context.conversation_id}"
-            results.append(context.result)
-            all_memory_data[unique_key] = context.memory_data
-            if context.result.get('frame_scores_data'):
-                all_frame_scores_data[unique_key] = context.result['frame_scores_data']
-            conversation_summaries.append({
-                'conversation_id': context.conversation_id,
-                'label': context.conversation_id,
-                'start': context.conversation_start_time,
-                'end': context.actual_end_time,
-                'events': context.event_log
-            })
-
+    # ===== FINALIZE ALL CONVERSATIONS AFTER EVENT LOOP COMPLETES =====
+    print("\n🏁 All events processed. Finalizing all conversations...")
+    
+    # Update all conversations to the final processor_clock time
+    for cid, buffer_state in onthefly_buffer_data.items():
+        update_buffer_to_time(buffer_state, processor_clock, listening_speed, cid)
+    
+    # Finalize each conversation and collect results
+    for cid, context in contexts.items():
+        context.finalize(shared_liveinfer)
+        context.liveinfer_state = None
+        
+        unique_key = f"{context.video_uid}_{context.conversation_id}"
+        results.append(context.result)
+        all_memory_data[unique_key] = context.memory_data
+        if context.result.get('frame_scores_data'):
+            all_frame_scores_data[unique_key] = context.result['frame_scores_data']
+        conversation_summaries.append({
+            'conversation_id': context.conversation_id,
+            'label': context.conversation_id,
+            'start': context.conversation_start_time,
+            'end': context.actual_end_time,
+            'events': context.event_log
+        })
+    
     shared_liveinfer.reset()
 
     if all_memory_data:
@@ -2875,9 +2875,6 @@ def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda',
                         listening_rebuffering_times.append(final_listening_rebuffer)
                 
                 avg_listening_rebuffering = np.mean(listening_rebuffering_times) if listening_rebuffering_times else 0.0
-            
-            # Calculate final frame utilization from results
-            avg_final_utilization = sum(r.get('final_frame_utilization', 0.0) for r in results) / len(results)
             
             print(f"📊 Threshold {threshold:.3f} Summary:")
             print(f"   • Average PPL: {avg_ppl:.3f}")
