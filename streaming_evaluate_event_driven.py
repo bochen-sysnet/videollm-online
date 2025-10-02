@@ -18,6 +18,8 @@ import traceback
 import collections
 import heapq
 from dataclasses import asdict
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for live updates
 import matplotlib.pyplot as plt
 import numpy as np
 from torchvision.io import read_video
@@ -60,6 +62,10 @@ class Config:
     PLOT_FIGSIZE_LARGE = (15, 10)
     PLOT_FIGSIZE_MEDIUM = (15, 6)
     PLOT_FIGSIZE_SMALL = (15, 4)
+    
+    # Live visualization settings
+    LIVE_VIZ_UPDATE_INTERVAL = 1  # Update plot every N events
+    LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
     MAX_EVAL_FRAMES = 60            # Max frames for evaluation (use full video)
@@ -2137,6 +2143,162 @@ def process_conversation(model, tokenizer, conversation_data, video_path, datase
         model_memory_mb=model_memory_mb if model_memory_mb is not None else calculate_model_memory_mb(model)
     )
     return context
+
+class LiveBufferVisualizer:
+    """Real-time visualization of buffer and rebuffering for all conversations"""
+    
+    def __init__(self, conversation_ids, output_dir=Config.OUTPUT_DIR, data_source='goalstep', enabled=True):
+        self.conversation_ids = list(conversation_ids)
+        self.output_dir = output_dir
+        self.data_source = data_source
+        self.enabled = enabled and Config.LIVE_VIZ_ENABLED
+        self.event_count = 0
+        
+        if not self.enabled:
+            return
+            
+        # Create color map for conversations
+        num_conversations = len(self.conversation_ids)
+        self.colors = {}
+        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+        for i, cid in enumerate(self.conversation_ids):
+            self.colors[cid] = base_colors[i % len(base_colors)]
+        
+        # Create figure with 2 subplots: buffer level and cumulative rebuffering
+        self.fig, self.axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+        self.fig.suptitle(f'Live Buffer Evolution - {data_source.title()} (Listening Mode)', 
+                         fontsize=14, fontweight='bold')
+        
+        self.ax_buffer = self.axes[0]
+        self.ax_rebuffer = self.axes[1]
+        
+        # Configure axes
+        self.ax_buffer.set_ylabel('Buffer Size (words)')
+        self.ax_buffer.set_title('Buffer Level')
+        self.ax_buffer.grid(True, alpha=0.3)
+        
+        self.ax_rebuffer.set_xlabel('Processor Time (s)')
+        self.ax_rebuffer.set_ylabel('Cumulative Rebuffer (s)')
+        self.ax_rebuffer.set_title('Cumulative Rebuffering Time')
+        self.ax_rebuffer.grid(True, alpha=0.3)
+        
+        # Store line objects for each conversation
+        self.buffer_lines = {}
+        self.rebuffer_lines = {}
+        
+        for cid in self.conversation_ids:
+            color = self.colors[cid]
+            self.buffer_lines[cid], = self.ax_buffer.plot([], [], color=color, linewidth=2, 
+                                                          label=cid[:12], alpha=0.9)
+            self.rebuffer_lines[cid], = self.ax_rebuffer.plot([], [], color=color, linewidth=2, 
+                                                              alpha=0.9)
+        
+        self.ax_buffer.legend(loc='upper right', fontsize=8, title='Conversation')
+        
+        plt.tight_layout()
+        
+        # Save initial empty plot
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.output_path = os.path.join(self.output_dir, f'live_buffer_evolution_{self.data_source}.png')
+        self.fig.savefig(self.output_path, dpi=150, bbox_inches='tight')
+        print(f"📊 Live visualization initialized: {self.output_path}")
+    
+    def update(self, onthefly_buffer_data):
+        """Update the visualization with current buffer data"""
+        if not self.enabled:
+            return
+        
+        self.event_count += 1
+        
+        # Only update every N events to avoid performance issues
+        if self.event_count % Config.LIVE_VIZ_UPDATE_INTERVAL != 0:
+            return
+        
+        max_time = 0.0
+        max_buffer = 0.0
+        max_rebuffer = 0.0
+        
+        # Update each conversation's line data
+        for cid in self.conversation_ids:
+            if cid not in onthefly_buffer_data:
+                continue
+                
+            state = onthefly_buffer_data[cid]
+            times = state.get('times', [])
+            values = state.get('values', [])
+            rebuffer_times = state.get('rebuffer_times', [])
+            rebuffer_values = state.get('rebuffer_values', [])
+            
+            if times and values:
+                self.buffer_lines[cid].set_data(times, values)
+                max_time = max(max_time, max(times))
+                max_buffer = max(max_buffer, max(values))
+            
+            if rebuffer_times and rebuffer_values:
+                self.rebuffer_lines[cid].set_data(rebuffer_times, rebuffer_values)
+                max_time = max(max_time, max(rebuffer_times))
+                max_rebuffer = max(max_rebuffer, max(rebuffer_values))
+        
+        # Update axis limits
+        if max_time > 0:
+            self.ax_buffer.set_xlim(0, max_time * 1.05)
+            self.ax_rebuffer.set_xlim(0, max_time * 1.05)
+        
+        if max_buffer > 0:
+            self.ax_buffer.set_ylim(0, max_buffer * 1.1)
+        
+        if max_rebuffer > 0:
+            self.ax_rebuffer.set_ylim(0, max_rebuffer * 1.1)
+        
+        # Redraw and save
+        self.fig.canvas.draw()
+        self.fig.savefig(self.output_path, dpi=150, bbox_inches='tight')
+    
+    def finalize(self, onthefly_buffer_data):
+        """Create final high-quality visualization"""
+        if not self.enabled:
+            return
+        
+        # Do one final update with all data
+        max_time = 0.0
+        max_buffer = 0.0
+        max_rebuffer = 0.0
+        
+        for cid in self.conversation_ids:
+            if cid not in onthefly_buffer_data:
+                continue
+                
+            state = onthefly_buffer_data[cid]
+            times = state.get('times', [])
+            values = state.get('values', [])
+            rebuffer_times = state.get('rebuffer_times', [])
+            rebuffer_values = state.get('rebuffer_values', [])
+            
+            if times and values:
+                self.buffer_lines[cid].set_data(times, values)
+                max_time = max(max_time, max(times))
+                max_buffer = max(max_buffer, max(values))
+            
+            if rebuffer_times and rebuffer_values:
+                self.rebuffer_lines[cid].set_data(rebuffer_times, rebuffer_values)
+                max_time = max(max_time, max(rebuffer_times))
+                max_rebuffer = max(max_rebuffer, max(rebuffer_values))
+        
+        # Update axis limits
+        if max_time > 0:
+            self.ax_buffer.set_xlim(0, max_time * 1.05)
+            self.ax_rebuffer.set_xlim(0, max_time * 1.05)
+        
+        if max_buffer > 0:
+            self.ax_buffer.set_ylim(0, max_buffer * 1.1)
+        
+        if max_rebuffer > 0:
+            self.ax_rebuffer.set_ylim(0, max_rebuffer * 1.1)
+        
+        # Save final high-quality version
+        self.fig.savefig(self.output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
+        plt.close(self.fig)
+        print(f"✅ Final live visualization saved: {self.output_path}")
     
 def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', num_conversations=3, random_selection=False, specific_indices=None, data_source='goalstep', custom_threshold=None, conversation_start_times=None):
     """Evaluate multiple conversations using a shared event-driven LiveInfer instance."""
@@ -2230,6 +2392,14 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             'unanswered_prompts': 0,
         }
 
+    # Initialize live visualization
+    live_viz = LiveBufferVisualizer(
+        conversation_ids=[ctx.conversation_id for ctx in contexts.values()],
+        output_dir=Config.OUTPUT_DIR,
+        data_source=data_source,
+        enabled=True
+    )
+    
     active_conversation_id = None
     
     # Helper functions for on-the-fly buffer tracking (following simulate_text_buffer_trajectories logic)
@@ -2251,13 +2421,24 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         #     print("update_buffer_to_time", current_time, target_time, current_buffer, rebuffer_total, pending_responses, \
         #         buffer_state['unanswered_prompts'])
         
+        # handle the case where prompt arrives before the finish of a chunk
         if target_time <= current_time + 1e-9:
             buffer_state['last_update_time'] = max(current_time, target_time)
-            buffer_state['times'].append(target_time)
+            buffer_state['times'].append(current_time)
             buffer_state['values'].append(current_buffer)
-            buffer_state['rebuffer_times'].append(target_time)
+            buffer_state['rebuffer_times'].append(current_time)
+            if buffer_state.get('last_rebuffering_start', None) is not None:
+                if buffer_state['unanswered_prompts'] > 0 and target_time < buffer_state['last_rebuffering_start']:
+                    diff_rebuffering = buffer_state['last_rebuffering_start'] - target_time
+                    rebuffer_total += diff_rebuffering
+                    buffer_state['last_rebuffering_start'] = target_time
             buffer_state['rebuffer_values'].append(rebuffer_total)
             return
+
+        last_rebuffering_start = target_time # means no rebuffering
+        if buffer_state['unanswered_prompts'] > 0:
+            last_rebuffering_start = current_time
+            
         
         while current_time + 1e-9 < target_time:
             remaining = target_time - current_time
@@ -2293,6 +2474,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 buffer_state['rebuffer_values'].append(rebuffer_total)
                 break
             else:
+                if last_rebuffering_start is None:
+                    last_rebuffering_start = current_time
                 # Buffer is empty - accumulate rebuffering if there are pending prompts
                 if pending_responses and current_buffer <= 1e-9:
                     rebuffer_total += remaining
@@ -2306,11 +2489,23 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 buffer_state['rebuffer_values'].append(rebuffer_total)
                 break
         
+        
         buffer_state['last_update_time'] = current_time
         buffer_state['buffer'] = current_buffer
         buffer_state['total_rebuffer'] = rebuffer_total
+        buffer_state['last_rebuffering_start'] = last_rebuffering_start
 
     while event_queue:
+        # ===== UPDATE ALL CONVERSATIONS TO CURRENT TIME BEFORE NEXT EVENT =====
+        
+        # Update all conversations' buffer states to the next event time
+        # This advances the buffer simulation for ALL conversations to the same point in time
+        for cid, buffer_state in onthefly_buffer_data.items():
+            update_buffer_to_time(buffer_state, processor_clock, listening_speed, cid)
+        
+        # Update live visualization with all conversations synchronized at the same time
+        live_viz.update(onthefly_buffer_data)
+        
         # flush out any delayed events to process prompts first
         cached_events = []
         unprocessed_prompt_event = None
@@ -2559,6 +2754,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         print("\n📊 Creating frame score analysis...")
         create_frame_score_analysis(all_frame_scores_data, data_source=data_source)
 
+    # Finalize live visualization with final data
+    live_viz.finalize(onthefly_buffer_data)
+    
     # Convert on-the-fly buffer data to standard format (only listening mode)
     buffer_data = {}
     for cid, state in onthefly_buffer_data.items():
