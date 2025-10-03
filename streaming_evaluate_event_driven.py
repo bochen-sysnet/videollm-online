@@ -99,7 +99,7 @@ class Config:
     EXPECTED_RESPONSE_LENGTH = 20.0
     LENGTH_FACTOR_MIN = 0.5
     LENGTH_FACTOR_MAX = 2.0
-    GENERATION_CHUNK_SIZE = 32
+    GENERATION_CHUNK_SIZE = 8
 
     # Scheduling
     SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer'
@@ -2526,22 +2526,38 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 buffer_state = onthefly_buffer_data[conversation_id]
                 buffer_level = buffer_state['buffer']
                 if Config.SCHEDULING_METHOD == 'earliest_available':
-                    heapq.heappush(cached_events, (event_time, priority, sequence_counter, payload))
+                    heapq.heappush(cached_events, (event_time, priority, sequence_counter, payload, buffer_level))
                 elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                     heapq.heappush(cached_events, (buffer_level, event_time, priority, sequence_counter, payload))
                 else:
                     raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
         
         if unprocessed_prompt_event is not None:
+            if Config.SCHEDULING_METHOD == 'earliest_available':
+                for event_time, priority, sequence_counter, payload, _ in cached_events:
+                    heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
+            elif Config.SCHEDULING_METHOD == 'lowest_buffer':
+                for _, event_time, priority, sequence_counter, payload in cached_events:
+                    heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
+            else:
+                raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
             event_time, priority, _, payload = unprocessed_prompt_event
-            for event in cached_events:
-                heapq.heappush(event_queue, event)
         elif cached_events:
             if Config.SCHEDULING_METHOD == 'earliest_available':
-                event_time, priority, _, payload = heapq.heappop(cached_events)
-                # push back the cached events
-                for event in cached_events:
-                    heapq.heappush(event_queue, event)
+                available_conversation_ids = []
+                for et, pri, seq, pl, bf in cached_events:
+                    heapq.heappush(event_queue, (et, pri, seq, pl))
+                    if event_time == et:
+                        available_conversation_ids.append(pl[1][:12])
+                event_time, priority, sequence_counter, payload, buffer_level = heapq.heappop(cached_events)
+                selected_conversation_id = payload[1][:12]
+                # find lowest buffer conversation id
+                lowest_buffer_conversation_id = None
+                lowest_buffer_level = float('inf')
+                for cid, buffer_state in onthefly_buffer_data.items():
+                    if cid in available_conversation_ids and buffer_state['buffer'] < lowest_buffer_level:
+                        lowest_buffer_level = buffer_state['buffer']
+                        lowest_buffer_conversation_id = cid
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                 buffer_level, event_time, priority, _, payload = heapq.heappop(cached_events)
                 # push back the cached events
@@ -2549,16 +2565,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
             else:
                 raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
-            # find lowest buffer level
-            lowest_buffer_level = float('inf')
-            for cid, buffer_state in onthefly_buffer_data.items():
-                if buffer_state['buffer'] < lowest_buffer_level:
-                    lowest_buffer_level = buffer_state['buffer']
-                    conversation_id = cid
-            # find actual buffer level
-            buffer_state = onthefly_buffer_data[conversation_id]
-            actual_buffer_level = buffer_state['buffer']
-            print(f"lowest: {lowest_buffer_level}, actual: {actual_buffer_level}, conversation_id: {conversation_id[:12]}")
         else:
             event_time, priority, _, payload = heapq.heappop(event_queue)
             
