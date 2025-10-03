@@ -2544,25 +2544,44 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             event_time, priority, _, payload = unprocessed_prompt_event
         elif cached_events:
             if Config.SCHEDULING_METHOD == 'earliest_available':
-                available_conversation_ids = []
+                event_time, priority, sequence_counter, payload, buffer_level = heapq.heappop(cached_events)
+                available_events = []
                 for et, pri, seq, pl, bf in cached_events:
                     heapq.heappush(event_queue, (et, pri, seq, pl))
                     if event_time == et:
-                        available_conversation_ids.append(pl[1][:12])
-                event_time, priority, sequence_counter, payload, buffer_level = heapq.heappop(cached_events)
+                        available_events.append((et, bf, pl[1]))
                 selected_conversation_id = payload[1][:12]
                 # find lowest buffer conversation id
                 lowest_buffer_conversation_id = None
                 lowest_buffer_level = float('inf')
-                for cid, buffer_state in onthefly_buffer_data.items():
-                    if cid in available_conversation_ids and buffer_state['buffer'] < lowest_buffer_level:
-                        lowest_buffer_level = buffer_state['buffer']
-                        lowest_buffer_conversation_id = cid
+                found_lower_buffer = False
+                for (et, bf, cid) in available_events:
+                    # print(f"----Avaialable {cid[:12]}, buffer: {bf}, event time: {et}")
+                    if bf < lowest_buffer_level:
+                        lowest_buffer_level = bf
+                        lowest_buffer_conversation_id = cid[:12]
+                        if lowest_buffer_level < buffer_level:
+                            found_lower_buffer = True
+                # print(f"🔍 Found lowest {found_lower_buffer}: Selected: {selected_conversation_id} ({buffer_level}), Lowest-buffer: {lowest_buffer_conversation_id} ({lowest_buffer_level})")
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                 buffer_level, event_time, priority, _, payload = heapq.heappop(cached_events)
                 # push back the cached events
-                for buffer_level, event_time, priority, sequence_counter, payload in cached_events:
-                    heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
+                available_conversation_ids = []
+                for bf, et, pri, seq, pl in cached_events:
+                    heapq.heappush(event_queue, (et, pri, seq, pl))
+                    if event_time == et:
+                        available_conversation_ids.append(pl[1])
+                lowest_buffer_level = float('inf')
+                found_lower_buffer = False
+                for (et, bf, cid) in available_events:
+                    # print(f"----Avaialable {cid[:12]}, buffer: {bf}, event time: {et}")
+                    if bf < lowest_buffer_level:
+                        lowest_buffer_level = bf
+                        lowest_buffer_conversation_id = cid[:12]
+                        if lowest_buffer_level < buffer_level:
+                            found_lower_buffer = True
+                selected_conversation_id = payload[1][:12]
+                # print(f"🔍 Found lowest {found_lower_buffer}: Selected: {selected_conversation_id} ({buffer_level}), Lowest-buffer: {lowest_buffer_conversation_id} ({lowest_buffer_level})")
             else:
                 raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
         else:
