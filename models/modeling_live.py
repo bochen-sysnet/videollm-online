@@ -180,9 +180,11 @@ def fast_greedy_generate(
     eos_token_id: int,
     inplace_output_ids: torch.Tensor,
     max_new_tokens: int | None = None,
+    track_eos_probs: bool = False,
 ):
     with torch.no_grad():
         collected_tokens = []
+        eos_probabilities = [] if track_eos_probs else None
         steps = 0
         finished = False
         current_inputs = inputs_embeds
@@ -194,6 +196,14 @@ def fast_greedy_generate(
         while steps < token_budget:
             outputs = model(inputs_embeds=current_inputs, past_key_values=past_key_values, use_cache=True)
             past_key_values = outputs.past_key_values
+            
+            # Track EoS probability if requested
+            if track_eos_probs:
+                logits = outputs.logits[:, -1:]  # [1, 1, vocab_size]
+                probs = torch.softmax(logits, dim=-1)
+                eos_prob = probs[0, 0, eos_token_id].item()
+                eos_probabilities.append(eos_prob)
+            
             new_token_id = outputs.logits[:, -1:].argmax(dim=-1)
             collected_tokens.append(new_token_id)
             inplace_output_ids[:, steps] = new_token_id
@@ -210,6 +220,9 @@ def fast_greedy_generate(
                 break
 
         output_ids = torch.cat(collected_tokens, dim=1) if collected_tokens else torch.empty_like(inplace_output_ids[:, :0])
+        
+        if track_eos_probs:
+            return output_ids, past_key_values, next_inputs_embeds, finished, eos_probabilities
         return output_ids, past_key_values, next_inputs_embeds, finished
 
 def build_live(

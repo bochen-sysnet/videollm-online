@@ -68,13 +68,13 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 60            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 300            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 5             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -99,10 +99,11 @@ class Config:
     EXPECTED_RESPONSE_LENGTH = 20.0
     LENGTH_FACTOR_MIN = 0.5
     LENGTH_FACTOR_MAX = 2.0
-    GENERATION_CHUNK_SIZE = 8
+    GENERATION_CHUNK_SIZE = 32
 
     # Scheduling
-    SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer'
+    # SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer'
+    SCHEDULING_METHOD = 'lowest_buffer'
 
 class FilteredEgo4DRefinedNarrationStream:
     """Ego4D Refined Narration Stream that only includes videos with features - now processes per-conversation"""
@@ -2551,6 +2552,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     if event_time == et:
                         available_events.append((et, bf, pl[1]))
                 selected_conversation_id = payload[1][:12]
+                # print("Event time", event_time)
                 # find lowest buffer conversation id
                 lowest_buffer_conversation_id = None
                 lowest_buffer_level = float('inf')
@@ -2560,17 +2562,18 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     if bf < lowest_buffer_level:
                         lowest_buffer_level = bf
                         lowest_buffer_conversation_id = cid[:12]
-                        if lowest_buffer_level < buffer_level:
+                        if lowest_buffer_level <= buffer_level:
                             found_lower_buffer = True
                 # print(f"🔍 Found lowest {found_lower_buffer}: Selected: {selected_conversation_id} ({buffer_level}), Lowest-buffer: {lowest_buffer_conversation_id} ({lowest_buffer_level})")
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                 buffer_level, event_time, priority, _, payload = heapq.heappop(cached_events)
                 # push back the cached events
-                available_conversation_ids = []
+                available_events = []
                 for bf, et, pri, seq, pl in cached_events:
                     heapq.heappush(event_queue, (et, pri, seq, pl))
                     if event_time == et:
-                        available_conversation_ids.append(pl[1])
+                        available_events.append((et, bf, pl[1]))
+                # print("Event time", event_time)
                 lowest_buffer_level = float('inf')
                 found_lower_buffer = False
                 for (et, bf, cid) in available_events:
@@ -2809,6 +2812,18 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
     # Finalize live visualization with final data
     live_viz.finalize(onthefly_buffer_data)
     
+    # Collect EoS probability data from contexts
+    all_eos_data = {}
+    for cid, context in contexts.items():
+        eos_data = shared_liveinfer.get_eos_prob_data()
+        if eos_data:
+            all_eos_data[cid] = eos_data
+    
+    # Create EoS likelihood visualization if we have data
+    if all_eos_data:
+        print("\n📊 Creating EoS likelihood visualization from REAL VLM generation...")
+        create_eos_likelihood_visualization(all_eos_data, data_source=data_source)
+    
     # Convert on-the-fly buffer data to standard format (only listening mode)
     buffer_data = {}
     for cid, state in onthefly_buffer_data.items():
@@ -3001,6 +3016,9 @@ class SimpleLiveInfer:
         self._kv_reload_time = 0.0
         self._kv_offload_time = 0.0
         self.generation_event_pending = False
+        
+        # EoS probability tracking (real data from VLM generation)
+        self.eos_prob_data = []  # List of {response_idx, eos_probs, length, trigger_method}
 
     def capture_state(self):
         state = {
@@ -3345,14 +3363,26 @@ class SimpleLiveInfer:
             past_key_values = self._ensure_kv_on_device(state['past_key_values_cpu'])
 
             buffer = torch.zeros(1, chunk_size, dtype=torch.long, device=self.device)
-            output_ids, past_key_values, next_inputs_embeds, finished = fast_greedy_generate(
+            
+            # Track EoS probabilities during generation
+            result = fast_greedy_generate(
                 model=self.model,
                 inputs_embeds=next_inputs,
                 past_key_values=past_key_values,
                 eos_token_id=self.eos_token_id,
                 inplace_output_ids=buffer,
                 max_new_tokens=chunk_size,
+                track_eos_probs=True,
             )
+            
+            if len(result) == 5:
+                output_ids, past_key_values, next_inputs_embeds, finished, eos_probs = result
+                # Store EoS probabilities for this chunk
+                if 'eos_probs' not in state:
+                    state['eos_probs'] = []
+                state['eos_probs'].extend(eos_probs)
+            else:
+                output_ids, past_key_values, next_inputs_embeds, finished = result
 
             self.timing_data['generation_video_time'] = state['video_time']
 
@@ -3378,6 +3408,18 @@ class SimpleLiveInfer:
             if finished or state['tokens_generated'] >= Config.INPLACE_OUTPUT_SIZE:
                 state['finished'] = True
                 all_tokens = torch.cat(state['tokens'], dim=1) if state['tokens'] else torch.empty((1, 0), dtype=torch.long)
+                
+                # Save EoS probability data for this response
+                if 'eos_probs' in state and state['eos_probs']:
+                    self.eos_prob_data.append({
+                        'response_idx': len(self.eos_prob_data),
+                        'eos_probs': state['eos_probs'].copy(),
+                        'length': len(state['eos_probs']),
+                        'trigger_method': state.get('trigger_method', 'unknown'),
+                        'video_time': state['video_time'],
+                        'query': state.get('query', ''),
+                    })
+                
                 return all_tokens
 
         return None
@@ -3518,6 +3560,10 @@ class SimpleLiveInfer:
             'response_triggers': self.response_triggers.copy(),
             'response_times': self.response_times.copy()
         }
+    
+    def get_eos_prob_data(self):
+        """Get EoS probability data collected during actual VLM generation."""
+        return [entry.copy() for entry in self.eos_prob_data]
 
 
     def get_kv_transfer_metrics(self):
@@ -5019,6 +5065,193 @@ Latency: {latency_mean:.3f}±{latency_std:.3f}s"""
     print(f"   • Listening Rebuffering: {listening_rebuffer_mean:.3f} ± {listening_rebuffer_std:.3f}s (from {len(listening_rebuffering_times)} conversations)")
     print(f"   • Fluency: {fluency_mean:.3f} ± {fluency_std:.3f}")
     print(f"   • Latency: {latency_mean:.3f} ± {latency_std:.3f}s")
+
+def create_eos_likelihood_visualization(all_eos_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
+    """
+    Visualize REAL EoS token likelihood evolution from actual VLM generation.
+    
+    Args:
+        all_eos_data: Dict mapping conversation_id to list of EoS probability entries
+        output_dir: Directory to save plots
+        data_source: 'goalstep' or 'narration'
+    """
+    if not all_eos_data:
+        print("⚠️ No EoS probability data available")
+        return None
+    
+    print(f"📊 Creating EoS likelihood visualization from REAL VLM generation data...")
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Collect all responses with EoS data
+    all_responses = []
+    for conv_id, eos_entries in all_eos_data.items():
+        for entry in eos_entries:
+            all_responses.append(entry)
+    
+    if not all_responses:
+        print("⚠️ No responses with EoS data found")
+        return None
+    
+    print(f"✓ Collected {len(all_responses)} responses with real EoS probability data")
+    
+    # Analyze patterns by normalized position
+    from collections import defaultdict
+    position_bins = defaultdict(list)
+    
+    for response in all_responses:
+        eos_probs = response['eos_probs']
+        length = len(eos_probs)
+        
+        if length == 0:
+            continue
+        
+        # Normalize positions to 0-100%
+        for i, prob in enumerate(eos_probs):
+            normalized_pos = int((i / length) * 100) if length > 0 else 100
+            position_bins[normalized_pos].append(prob)
+    
+    # Calculate statistics
+    stats = {}
+    for pos in range(101):
+        if pos in position_bins and position_bins[pos]:
+            stats[pos] = {
+                'mean': np.mean(position_bins[pos]),
+                'median': np.median(position_bins[pos]),
+                'std': np.std(position_bins[pos]),
+                'p25': np.percentile(position_bins[pos], 25),
+                'p75': np.percentile(position_bins[pos], 75),
+                'count': len(position_bins[pos])
+            }
+    
+    # Create visualization
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f'Real EoS Token Likelihood from VLM Generation - {data_source.title()}', 
+                 fontsize=14, fontweight='bold')
+    
+    # Plot 1: Mean with confidence bands
+    ax = axes[0, 0]
+    if stats:
+        positions = sorted(stats.keys())
+        means = [stats[p]['mean'] for p in positions]
+        p25 = [stats[p]['p25'] for p in positions]
+        p75 = [stats[p]['p75'] for p in positions]
+        
+        ax.plot(positions, means, 'b-', linewidth=2, label='Mean')
+        ax.fill_between(positions, p25, p75, alpha=0.3, color='blue', label='25th-75th percentile')
+        ax.set_xlabel('Generation Progress (%)', fontsize=11)
+        ax.set_ylabel('P(EoS Token)', fontsize=11)
+        ax.set_title('EoS Likelihood vs Progress (Real Data)', fontsize=12)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(-0.05, 1.05)
+        
+        # Find when P(EoS) crosses 0.5
+        crossing_point = None
+        for i, pos in enumerate(positions):
+            if means[i] >= 0.5:
+                crossing_point = pos
+                break
+        
+        if crossing_point:
+            ax.axvline(x=crossing_point, color='red', linestyle='--', alpha=0.5, linewidth=1.5)
+            ax.text(crossing_point + 2, 0.5, f'P=0.5 at {crossing_point}%', 
+                   fontsize=9, bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7))
+    
+    # Plot 2: Example individual trajectories
+    ax = axes[0, 1]
+    num_examples = min(10, len(all_responses))
+    colors_palette = plt.cm.viridis(np.linspace(0, 1, num_examples))
+    
+    for idx, (response, color) in enumerate(zip(all_responses[:num_examples], colors_palette)):
+        eos_probs = response['eos_probs']
+        length = len(eos_probs)
+        if length > 0:
+            positions_norm = np.linspace(0, 100, len(eos_probs))
+            ax.plot(positions_norm, eos_probs, '-o', color=color, linewidth=1.5, 
+                   markersize=3, alpha=0.6, label=f'R{idx+1} ({length} tokens)')
+    
+    ax.set_xlabel('Generation Progress (%)', fontsize=11)
+    ax.set_ylabel('P(EoS Token)', fontsize=11)
+    ax.set_title(f'Example Real Trajectories (First {num_examples})', fontsize=12)
+    ax.legend(fontsize=8, loc='upper left', ncol=2)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(-0.05, 1.05)
+    ax.axhline(y=0.5, color='red', linestyle='--', alpha=0.3, linewidth=1)
+    
+    # Plot 3: Statistics table
+    ax = axes[1, 0]
+    ax.axis('off')
+    
+    checkpoints = [0, 25, 50, 75, 90, 95]
+    table_data = []
+    table_data.append(['Progress', 'Mean P(EoS)', 'Median', 'Std', 'Samples'])
+    
+    for pos in checkpoints:
+        if pos in stats:
+            s = stats[pos]
+            table_data.append([
+                f'{pos}%',
+                f'{s["mean"]:.4f}',
+                f'{s["median"]:.4f}',
+                f'{s["std"]:.4f}',
+                f'{s["count"]}'
+            ])
+        else:
+            table_data.append([f'{pos}%', 'N/A', 'N/A', 'N/A', '0'])
+    
+    table = ax.table(cellText=table_data, cellLoc='center', loc='center',
+                    colWidths=[0.15, 0.2, 0.2, 0.2, 0.15])
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 2)
+    
+    # Style header row
+    for i in range(5):
+        table[(0, i)].set_facecolor('#4CAF50')
+        table[(0, i)].set_text_props(weight='bold', color='white')
+    
+    ax.set_title('EoS Statistics at Key Checkpoints (Real Data)', fontsize=12, pad=20)
+    
+    # Plot 4: Length distribution
+    ax = axes[1, 1]
+    lengths = [len(r['eos_probs']) for r in all_responses if len(r['eos_probs']) > 0]
+    
+    if lengths:
+        ax.hist(lengths, bins=30, color='skyblue', edgecolor='black', alpha=0.7)
+        ax.axvline(x=np.mean(lengths), color='red', linestyle='--', linewidth=2, 
+                  label=f'Mean={np.mean(lengths):.1f}')
+        ax.axvline(x=np.median(lengths), color='orange', linestyle='--', linewidth=2,
+                  label=f'Median={np.median(lengths):.1f}')
+        ax.set_xlabel('Response Length (tokens)', fontsize=11)
+        ax.set_ylabel('Count', fontsize=11)
+        ax.set_title('Distribution of Response Lengths', fontsize=12)
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    
+    output_file = os.path.join(output_dir, f'eos_likelihood_real_data_{data_source}.png')
+    plt.savefig(output_file, dpi=Config.PLOT_DPI, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✅ Real EoS likelihood visualization saved to: {output_file}")
+    print(f"📊 Total responses analyzed: {len(all_responses)}")
+    print(f"📊 Average response length: {np.mean(lengths):.1f} tokens")
+    
+    if stats:
+        crossing_point = None
+        positions = sorted(stats.keys())
+        means = [stats[p]['mean'] for p in positions]
+        for i, pos in enumerate(positions):
+            if means[i] >= 0.5:
+                crossing_point = pos
+                break
+        if crossing_point:
+            print(f"📊 P(EoS) crosses 0.5 at: {crossing_point}% generation progress")
+    
+    return output_file
+
 
 if __name__ == "__main__":
     main()
