@@ -71,13 +71,13 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 300            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -230,30 +230,74 @@ def calculate_frame_diff_features(current_frame, prev_frame):
 
 def create_frame_features_vs_response_length_visualization(frame_features_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """
-    Create comprehensive visualization showing correlation between 10 frame difference features and response length.
+    Create comprehensive visualization showing:
+    1. Correlation between 12 frame features and response length
+    2. Correlation between prior response lengths and current response length
     
     Args:
         frame_features_data: List of dicts with keys:
             - frame_idx, video_time, conversation_id
-            - 10 features: pixel_diff, mse, psnr, ssim, edge_diff, corner_diff, 
-                          histogram_diff, optical_flow_mag, motion_energy, contour_area_diff
+            - 12 features: brightness, contrast, edge_density, corner_count, blur_score, color_variance,
+                          pixel_diff, edge_diff, corner_diff, histogram_diff, optical_flow_mag, motion_energy
             - response_length: int (number of words in response)
     """
     if not frame_features_data:
         print("⚠️ No frame features data to visualize")
         return
     
-    # Filter out frames without features (first frame) and without responses
-    valid_data = [d for d in frame_features_data if d['response_length'] > 0 and d['pixel_diff'] is not None]
+    # Filter out frames without responses
+    all_data_with_responses = [d for d in frame_features_data if d['response_length'] > 0]
+    
+    if not all_data_with_responses:
+        print("⚠️ No frames with responses found")
+        return
+    
+    # Filter for frames with previous frame features (for frame feature analysis)
+    valid_data = [d for d in all_data_with_responses if d['pixel_diff'] is not None]
     
     if not valid_data:
-        print("⚠️ No valid frame features data (no frames with responses)")
+        print("⚠️ No valid frame features data")
         return
     
     print(f"📊 Creating comprehensive frame features visualization with {len(valid_data)} frames")
     
     # Extract response lengths
     response_lengths = [d['response_length'] for d in valid_data]
+    
+    # === ANALYZE PRIOR RESPONSE LENGTH CORRELATIONS ===
+    # Group responses by conversation to analyze temporal patterns
+    conversation_responses = defaultdict(list)
+    for d in all_data_with_responses:
+        conversation_responses[d['conversation_id']].append({
+            'frame_idx': d['frame_idx'],
+            'length': d['response_length']
+        })
+    
+    # Sort by frame index within each conversation
+    for conv_id in conversation_responses:
+        conversation_responses[conv_id].sort(key=lambda x: x['frame_idx'])
+    
+    # Compute prior response features for each response
+    prior_1_lengths = []  # Length of immediately previous response
+    prior_2_lengths = []  # Length of 2 responses ago
+    prior_3_lengths = []  # Length of 3 responses ago
+    prior_avg_lengths = []  # Average of all prior responses
+    current_lengths_for_prior = []  # Current response lengths (for correlation)
+    
+    for conv_id, responses in conversation_responses.items():
+        for idx, resp in enumerate(responses):
+            if idx > 0:  # Has at least 1 prior response
+                current_lengths_for_prior.append(resp['length'])
+                prior_1_lengths.append(responses[idx - 1]['length'])
+                prior_2_lengths.append(responses[idx - 2]['length'] if idx > 1 else None)
+                prior_3_lengths.append(responses[idx - 3]['length'] if idx > 2 else None)
+                prior_avg_lengths.append(np.mean([r['length'] for r in responses[:idx]]))
+    
+    # Remove None values for prior-2 and prior-3
+    prior_2_data = [(prior_2_lengths[i], current_lengths_for_prior[i]) 
+                    for i in range(len(prior_2_lengths)) if prior_2_lengths[i] is not None]
+    prior_3_data = [(prior_3_lengths[i], current_lengths_for_prior[i]) 
+                    for i in range(len(prior_3_lengths)) if prior_3_lengths[i] is not None]
     
     # Define all 12 lightweight features with display names and categories
     feature_specs = [
@@ -273,9 +317,17 @@ def create_frame_features_vs_response_length_visualization(frame_features_data, 
         ('Motion Energy', 'motion_energy', 'Motion'),
     ]
     
-    # Create figure with 4x3 grid (12 features)
-    fig, axes = plt.subplots(3, 4, figsize=(20, 15))
-    fig.suptitle(f'Frame Difference Features vs Response Length ({data_source})\n'
+    # Add prior response length features
+    prior_features = [
+        ('Prior-1 Response', prior_1_lengths, current_lengths_for_prior, 'Temporal'),
+        ('Prior-2 Response', [p[0] for p in prior_2_data], [p[1] for p in prior_2_data], 'Temporal'),
+        ('Prior-3 Response', [p[0] for p in prior_3_data], [p[1] for p in prior_3_data], 'Temporal'),
+        ('Prior Avg Response', prior_avg_lengths, current_lengths_for_prior, 'Temporal'),
+    ]
+    
+    # Create figure with 4x4 grid (12 frame features + 4 temporal features)
+    fig, axes = plt.subplots(4, 4, figsize=(20, 20))
+    fig.suptitle(f'Frame Features & Prior Response Lengths vs Response Length ({data_source})\n'
                  f'{len(valid_data)} frames with responses from {len(set(d["conversation_id"] for d in valid_data))} conversations',
                  fontsize=16, fontweight='bold')
     
@@ -324,6 +376,49 @@ def create_frame_features_vs_response_length_visualization(frame_features_data, 
         ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
         ax.tick_params(labelsize=8)
     
+    # Plot prior response length correlations (last 4 plots)
+    for idx, (display_name, prior_vals, current_vals, category) in enumerate(prior_features):
+        ax = axes_flat[len(feature_specs) + idx]
+        
+        if len(prior_vals) > 1 and len(current_vals) > 1:
+            # Scatter plot
+            ax.scatter(prior_vals, current_vals, alpha=0.4, s=15, c='coral', edgecolors='none')
+            
+            # Calculate correlations
+            if len(set(prior_vals)) > 1 and len(set(current_vals)) > 1:
+                try:
+                    pearson_r = np.corrcoef(prior_vals, current_vals)[0, 1]
+                    spearman_rho, spearman_p = spearmanr(prior_vals, current_vals)
+                    
+                    # Store results
+                    correlation_results.append({
+                        'feature': display_name,
+                        'category': category,
+                        'pearson_r': pearson_r,
+                        'spearman_rho': spearman_rho,
+                        'spearman_p': spearman_p
+                    })
+                    
+                    # Title with correlation values
+                    significance = "**" if spearman_p < 0.01 else ("*" if spearman_p < 0.05 else "")
+                    ax.set_title(f'{display_name} ({category})\n'
+                               f'Pearson r={pearson_r:.3f}, Spearman ρ={spearman_rho:.3f}{significance}',
+                               fontsize=10, fontweight='bold' if abs(spearman_rho) > 0.3 else 'normal')
+                except:
+                    ax.set_title(f'{display_name}\n(Calculation error)', fontsize=10)
+            else:
+                ax.set_title(f'{display_name}\n(Insufficient variance)', fontsize=10)
+            
+            ax.set_xlabel(f'{display_name} Length (words)', fontsize=9)
+            ax.set_ylabel('Current Response Length (words)', fontsize=9)
+            ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+            ax.tick_params(labelsize=8)
+        else:
+            ax.text(0.5, 0.5, f'{display_name}\n(Insufficient data)', 
+                   ha='center', va='center', transform=ax.transAxes, fontsize=10)
+            ax.set_xticks([])
+            ax.set_yticks([])
+    
     plt.tight_layout()
     
     # Save main plot
@@ -335,41 +430,61 @@ def create_frame_features_vs_response_length_visualization(frame_features_data, 
     print(f"✅ Saved comprehensive frame features visualization to {output_path}")
     
     # Print detailed correlation summary
-    print("\n" + "="*80)
-    print("📊 COMPREHENSIVE CORRELATION SUMMARY")
-    print("="*80)
-    print(f"{'Feature':<25} {'Category':<12} {'Pearson r':<12} {'Spearman ρ':<12} {'p-value':<12} {'Sig'}")
-    print("-"*80)
+    print("\n" + "="*88)
+    print("📊 COMPREHENSIVE CORRELATION SUMMARY (Frame Features + Temporal Patterns)")
+    print("="*88)
+    print(f"{'Feature':<28} {'Category':<14} {'Pearson r':<12} {'Spearman ρ':<12} {'p-value':<12} {'Sig'}")
+    print("-"*88)
     
     # Sort by absolute Spearman correlation
     correlation_results.sort(key=lambda x: abs(x['spearman_rho']), reverse=True)
     
     for result in correlation_results:
         sig = "**" if result['spearman_p'] < 0.01 else ("*" if result['spearman_p'] < 0.05 else "")
-        print(f"{result['feature']:<25} {result['category']:<12} "
+        print(f"{result['feature']:<28} {result['category']:<14} "
               f"{result['pearson_r']:>7.3f}      {result['spearman_rho']:>7.3f}      "
               f"{result['spearman_p']:>8.3e}    {sig}")
     
-    print("-"*80)
+    print("-"*88)
     print("Significance: ** p<0.01, * p<0.05")
-    print("="*80)
+    print("Categories: Single-Frame, Difference, Motion, Temporal")
+    print("="*88)
     
-    # Create a summary bar chart of correlations
-    fig_summary, ax_summary = plt.subplots(figsize=(12, 6))
+    # Create a summary bar chart of correlations with category colors
+    fig_summary, ax_summary = plt.subplots(figsize=(14, 8))
     
     features_sorted = [r['feature'] for r in correlation_results]
     correlations_sorted = [r['spearman_rho'] for r in correlation_results]
-    colors = ['green' if c > 0.3 else 'red' if c < -0.3 else 'gray' for c in correlations_sorted]
+    categories_sorted = [r['category'] for r in correlation_results]
+    
+    # Color by category with intensity based on correlation strength
+    category_colors = {
+        'Single-Frame': 'steelblue',
+        'Difference': 'orange',
+        'Motion': 'green',
+        'Temporal': 'purple'
+    }
+    colors = [category_colors.get(cat, 'gray') for cat in categories_sorted]
     
     bars = ax_summary.barh(features_sorted, correlations_sorted, color=colors, alpha=0.7)
     ax_summary.axvline(x=0, color='black', linestyle='-', linewidth=0.8)
-    ax_summary.axvline(x=0.3, color='green', linestyle='--', linewidth=0.8, alpha=0.5, label='Strong positive')
-    ax_summary.axvline(x=-0.3, color='red', linestyle='--', linewidth=0.8, alpha=0.5, label='Strong negative')
+    ax_summary.axvline(x=0.3, color='green', linestyle='--', linewidth=0.8, alpha=0.5, label='Strong threshold (|ρ|=0.3)')
+    ax_summary.axvline(x=-0.3, color='green', linestyle='--', linewidth=0.8, alpha=0.5)
+    
+    # Create legend for categories
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor=category_colors['Single-Frame'], alpha=0.7, label='Single-Frame'),
+        Patch(facecolor=category_colors['Difference'], alpha=0.7, label='Difference'),
+        Patch(facecolor=category_colors['Motion'], alpha=0.7, label='Motion'),
+        Patch(facecolor=category_colors['Temporal'], alpha=0.7, label='Temporal (Prior Responses)'),
+    ]
+    ax_summary.legend(handles=legend_elements, loc='lower right', fontsize=10)
+    
     ax_summary.set_xlabel('Spearman Correlation Coefficient (ρ)', fontsize=12, fontweight='bold')
-    ax_summary.set_title(f'Feature Correlations with Response Length (sorted by |ρ|) - {data_source}',
+    ax_summary.set_title(f'Feature & Temporal Correlations with Response Length (sorted by |ρ|) - {data_source}',
                         fontsize=14, fontweight='bold')
     ax_summary.grid(axis='x', alpha=0.3)
-    ax_summary.legend()
     
     plt.tight_layout()
     summary_path = os.path.join(output_dir, f'frame_features_correlation_summary_{data_source}.png')
