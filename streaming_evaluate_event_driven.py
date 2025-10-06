@@ -113,93 +113,93 @@ class Config:
 
 def calculate_frame_diff_features(current_frame, prev_frame):
     """
-    Calculate comprehensive low-level image difference features between consecutive frames.
-    Implementation follows standard video analysis practices for motion and change detection.
+    Calculate lightweight image features for both frame differences and single-frame properties.
+    All features are computationally efficient for real-time processing.
     
     Args:
         current_frame: torch.Tensor of shape (C, H, W) in range [0, 255]
         prev_frame: torch.Tensor of shape (C, H, W) in range [0, 255] or None
     
     Returns:
-        dict with 10 features characterizing frame changes:
-        - Basic intensity: pixel_diff (MAD), mse, psnr
-        - Structural: ssim, edge_diff, corner_diff, histogram_diff
-        - Motion: optical_flow_mag, motion_energy
-        - Spatial: contour_area_diff
-        Returns None for all values if prev_frame is None
+        dict with 12 lightweight features:
+        - Frame difference (if prev exists): pixel_diff, edge_diff, corner_diff, histogram_diff, 
+                                             optical_flow_mag, motion_energy
+        - Single frame: brightness, contrast, edge_density, corner_count, blur_score, color_variance
+        Returns None for diff features if prev_frame is None
     """
-    if prev_frame is None:
-        return {
-            'pixel_diff': None,      # Mean Absolute Difference (MAD)
-            'mse': None,             # Mean Squared Error
-            'psnr': None,            # Peak Signal-to-Noise Ratio
-            'ssim': None,            # Structural Similarity Index
-            'edge_diff': None,       # Edge difference (Canny)
-            'corner_diff': None,     # Corner difference (Harris)
-            'histogram_diff': None,  # Histogram correlation distance
-            'optical_flow_mag': None,  # Optical flow magnitude
-            'motion_energy': None,   # Frame difference energy
-            'contour_area_diff': None,  # Contour area difference
-        }
-    
     # Convert from torch tensor (C, H, W) to numpy (H, W, C) and ensure uint8
     curr_np = current_frame.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
-    prev_np = prev_frame.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
-    
-    # Convert to grayscale for most feature detection
     curr_gray = cv2.cvtColor(curr_np, cv2.COLOR_RGB2GRAY)
+    
+    # === SINGLE-FRAME FEATURES (always computed) ===
+    
+    # 1. Brightness (mean intensity)
+    brightness = float(curr_gray.mean())
+    
+    # 2. Contrast (standard deviation of intensity)
+    contrast = float(curr_gray.std())
+    
+    # 3. Edge Density (proportion of edge pixels)
+    curr_edges = cv2.Canny(curr_gray, threshold1=50, threshold2=150)
+    edge_density = float(curr_edges.sum() / (curr_edges.size * 255.0))  # Normalize to [0, 1]
+    
+    # 4. Corner Count (number of detected corners)
+    curr_corners = cv2.cornerHarris(curr_gray, blockSize=2, ksize=3, k=0.04)
+    corner_threshold = curr_corners.max() * 0.01 if curr_corners.max() > 0 else 0
+    corner_count = float(np.sum(curr_corners > corner_threshold))
+    
+    # 5. Blur Score (Laplacian variance - higher = sharper)
+    laplacian = cv2.Laplacian(curr_gray, cv2.CV_64F)
+    blur_score = float(laplacian.var())
+    
+    # 6. Color Variance (variance across RGB channels)
+    # Measures color diversity in the frame
+    color_variance = float(np.mean([curr_np[:, :, i].std() for i in range(3)]))
+    
+    # === FRAME DIFFERENCE FEATURES (only if prev_frame exists) ===
+    
+    if prev_frame is None:
+        return {
+            # Single-frame features
+            'brightness': brightness,
+            'contrast': contrast,
+            'edge_density': edge_density,
+            'corner_count': corner_count,
+            'blur_score': blur_score,
+            'color_variance': color_variance,
+            # Difference features (None for first frame)
+            'pixel_diff': None,
+            'edge_diff': None,
+            'corner_diff': None,
+            'histogram_diff': None,
+            'optical_flow_mag': None,
+            'motion_energy': None,
+        }
+    
+    # Convert previous frame
+    prev_np = prev_frame.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
     prev_gray = cv2.cvtColor(prev_np, cv2.COLOR_RGB2GRAY)
     
-    # Normalize to [0, 1] for some calculations
-    curr_norm = curr_gray.astype(np.float32) / 255.0
-    prev_norm = prev_gray.astype(np.float32) / 255.0
-    
-    # === BASIC INTENSITY FEATURES ===
-    
-    # 1. Mean Absolute Difference (MAD) - most common baseline
+    # 7. Pixel Difference (mean absolute difference)
     pixel_diff = float(np.abs(curr_gray.astype(float) - prev_gray.astype(float)).mean())
     
-    # 2. Mean Squared Error (MSE)
-    mse = float(np.mean((curr_norm - prev_norm) ** 2))
-    
-    # 3. Peak Signal-to-Noise Ratio (PSNR)
-    # PSNR = 20 * log10(MAX) - 10 * log10(MSE)
-    if mse > 1e-10:
-        psnr = float(20 * np.log10(1.0) - 10 * np.log10(mse))
-    else:
-        psnr = 100.0  # Very high PSNR when frames are nearly identical
-    
-    # === STRUCTURAL FEATURES ===
-    
-    # 4. Structural Similarity Index (SSIM)
-    # Compares luminance, contrast, and structure
-    from skimage.metrics import structural_similarity
-    ssim_value = structural_similarity(curr_gray, prev_gray, data_range=255)
-    ssim = float(1.0 - ssim_value)  # Convert to dissimilarity (0 = same, 1 = different)
-    
-    # 5. Edge difference (Canny edge detector)
-    curr_edges = cv2.Canny(curr_gray, threshold1=50, threshold2=150)
+    # 8. Edge Difference (change in edge maps)
     prev_edges = cv2.Canny(prev_gray, threshold1=50, threshold2=150)
     edge_diff = float(np.abs(curr_edges.astype(float) - prev_edges.astype(float)).mean())
     
-    # 6. Corner difference (Harris corner detector)
-    curr_corners = cv2.cornerHarris(curr_gray, blockSize=2, ksize=3, k=0.04)
+    # 9. Corner Difference (change in corner response)
     prev_corners = cv2.cornerHarris(prev_gray, blockSize=2, ksize=3, k=0.04)
     corner_diff = float(np.abs(curr_corners - prev_corners).mean())
     
-    # 7. Histogram difference (color distribution)
-    # Compare histogram correlation for grayscale
+    # 10. Histogram Difference (intensity distribution change)
     curr_hist = cv2.calcHist([curr_gray], [0], None, [256], [0, 256])
     prev_hist = cv2.calcHist([prev_gray], [0], None, [256], [0, 256])
     curr_hist = cv2.normalize(curr_hist, curr_hist).flatten()
     prev_hist = cv2.normalize(prev_hist, prev_hist).flatten()
     hist_corr = cv2.compareHist(curr_hist, prev_hist, cv2.HISTCMP_CORREL)
-    histogram_diff = float(1.0 - hist_corr)  # Convert correlation to distance
+    histogram_diff = float(1.0 - hist_corr)
     
-    # === MOTION FEATURES ===
-    
-    # 8. Optical flow magnitude (Farneback dense optical flow)
-    # Estimates pixel-level motion between frames
+    # 11. Optical Flow Magnitude (pixel-level motion)
     flow = cv2.calcOpticalFlowFarneback(
         prev_gray, curr_gray, None,
         pyr_scale=0.5, levels=3, winsize=15,
@@ -208,31 +208,24 @@ def calculate_frame_diff_features(current_frame, prev_frame):
     flow_mag = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
     optical_flow_mag = float(flow_mag.mean())
     
-    # 9. Motion energy (sum of squared differences)
-    # Measures overall intensity of change
+    # 12. Motion Energy (total change magnitude)
     motion_energy = float(np.sum((curr_gray.astype(float) - prev_gray.astype(float)) ** 2))
     
-    # === SPATIAL FEATURES ===
-    
-    # 10. Contour area difference
-    # Find contours from edges and compare total areas
-    curr_contours, _ = cv2.findContours(curr_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    prev_contours, _ = cv2.findContours(prev_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    curr_area = sum(cv2.contourArea(c) for c in curr_contours)
-    prev_area = sum(cv2.contourArea(c) for c in prev_contours)
-    contour_area_diff = float(abs(curr_area - prev_area))
-    
     return {
+        # Single-frame features
+        'brightness': brightness,
+        'contrast': contrast,
+        'edge_density': edge_density,
+        'corner_count': corner_count,
+        'blur_score': blur_score,
+        'color_variance': color_variance,
+        # Difference features
         'pixel_diff': pixel_diff,
-        'mse': mse,
-        'psnr': psnr,
-        'ssim': ssim,
         'edge_diff': edge_diff,
         'corner_diff': corner_diff,
         'histogram_diff': histogram_diff,
         'optical_flow_mag': optical_flow_mag,
         'motion_energy': motion_energy,
-        'contour_area_diff': contour_area_diff,
     }
 
 def create_frame_features_vs_response_length_visualization(frame_features_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
@@ -262,25 +255,25 @@ def create_frame_features_vs_response_length_visualization(frame_features_data, 
     # Extract response lengths
     response_lengths = [d['response_length'] for d in valid_data]
     
-    # Define all 10 features with their display names and categories
+    # Define all 12 lightweight features with display names and categories
     feature_specs = [
-        # Basic Intensity Features
-        ('MAD (Pixel Diff)', 'pixel_diff', 'Intensity'),
-        ('MSE', 'mse', 'Intensity'),
-        ('PSNR', 'psnr', 'Intensity'),
-        # Structural Features
-        ('SSIM Dissimilarity', 'ssim', 'Structural'),
-        ('Edge Difference', 'edge_diff', 'Structural'),
-        ('Corner Difference', 'corner_diff', 'Structural'),
-        ('Histogram Difference', 'histogram_diff', 'Structural'),
-        # Motion Features
+        # Single-Frame Features (always available)
+        ('Brightness', 'brightness', 'Single-Frame'),
+        ('Contrast', 'contrast', 'Single-Frame'),
+        ('Edge Density', 'edge_density', 'Single-Frame'),
+        ('Corner Count', 'corner_count', 'Single-Frame'),
+        ('Blur Score', 'blur_score', 'Single-Frame'),
+        ('Color Variance', 'color_variance', 'Single-Frame'),
+        # Frame Difference Features (when prev frame exists)
+        ('Pixel Diff', 'pixel_diff', 'Difference'),
+        ('Edge Diff', 'edge_diff', 'Difference'),
+        ('Corner Diff', 'corner_diff', 'Difference'),
+        ('Histogram Diff', 'histogram_diff', 'Difference'),
         ('Optical Flow Mag', 'optical_flow_mag', 'Motion'),
         ('Motion Energy', 'motion_energy', 'Motion'),
-        # Spatial Features
-        ('Contour Area Diff', 'contour_area_diff', 'Spatial'),
     ]
     
-    # Create figure with 4x3 grid (10 features + 2 empty)
+    # Create figure with 4x3 grid (12 features)
     fig, axes = plt.subplots(3, 4, figsize=(20, 15))
     fig.suptitle(f'Frame Difference Features vs Response Length ({data_source})\n'
                  f'{len(valid_data)} frames with responses from {len(set(d["conversation_id"] for d in valid_data))} conversations',
@@ -330,10 +323,6 @@ def create_frame_features_vs_response_length_visualization(frame_features_data, 
         ax.set_ylabel('Response Length (words)', fontsize=9)
         ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
         ax.tick_params(labelsize=8)
-    
-    # Hide unused subplots
-    for idx in range(len(feature_specs), len(axes_flat)):
-        axes_flat[idx].axis('off')
     
     plt.tight_layout()
     
@@ -3444,27 +3433,26 @@ class SimpleLiveInfer:
                             prev_frame = self.prev_frame_per_conversation.get(self.current_conversation_id, None)
                             frame_features = calculate_frame_diff_features(current_frame, prev_frame)
                             
-                            # Store features with placeholder response length (will be updated when response is generated)
-                            # Store all 10 features
+                            # Store all 12 lightweight features
                             self.frame_features_data[self.current_conversation_id].append({
                                 'frame_idx': single_frame_idx,
                                 'video_time': single_frame_idx / self.frame_fps,
                                 'conversation_id': self.current_conversation_id,
                                 'response_length': 0,  # Will be updated when response is generated
-                                # Basic intensity features
+                                # Single-frame features (always available)
+                                'brightness': frame_features['brightness'],
+                                'contrast': frame_features['contrast'],
+                                'edge_density': frame_features['edge_density'],
+                                'corner_count': frame_features['corner_count'],
+                                'blur_score': frame_features['blur_score'],
+                                'color_variance': frame_features['color_variance'],
+                                # Difference features (None for first frame)
                                 'pixel_diff': frame_features['pixel_diff'],
-                                'mse': frame_features['mse'],
-                                'psnr': frame_features['psnr'],
-                                # Structural features
-                                'ssim': frame_features['ssim'],
                                 'edge_diff': frame_features['edge_diff'],
                                 'corner_diff': frame_features['corner_diff'],
                                 'histogram_diff': frame_features['histogram_diff'],
-                                # Motion features
                                 'optical_flow_mag': frame_features['optical_flow_mag'],
                                 'motion_energy': frame_features['motion_energy'],
-                                # Spatial features
-                                'contour_area_diff': frame_features['contour_area_diff'],
                             })
                             
                             # Update prev_frame for this conversation
