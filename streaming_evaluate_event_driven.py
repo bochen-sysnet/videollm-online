@@ -26,6 +26,7 @@ from torchvision.io import read_video
 import transformers
 from scipy.stats import spearmanr
 from collections import defaultdict
+import cv2
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -105,7 +106,288 @@ class Config:
 
     # Scheduling
     SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer'
-    # SCHEDULING_METHOD = 'lowest_buffer'
+
+# =============================================================================
+# IMAGE DIFFERENCE FEATURE CALCULATION
+# =============================================================================
+
+def calculate_frame_diff_features(current_frame, prev_frame):
+    """
+    Calculate comprehensive low-level image difference features between consecutive frames.
+    Implementation follows standard video analysis practices for motion and change detection.
+    
+    Args:
+        current_frame: torch.Tensor of shape (C, H, W) in range [0, 255]
+        prev_frame: torch.Tensor of shape (C, H, W) in range [0, 255] or None
+    
+    Returns:
+        dict with 10 features characterizing frame changes:
+        - Basic intensity: pixel_diff (MAD), mse, psnr
+        - Structural: ssim, edge_diff, corner_diff, histogram_diff
+        - Motion: optical_flow_mag, motion_energy
+        - Spatial: contour_area_diff
+        Returns None for all values if prev_frame is None
+    """
+    if prev_frame is None:
+        return {
+            'pixel_diff': None,      # Mean Absolute Difference (MAD)
+            'mse': None,             # Mean Squared Error
+            'psnr': None,            # Peak Signal-to-Noise Ratio
+            'ssim': None,            # Structural Similarity Index
+            'edge_diff': None,       # Edge difference (Canny)
+            'corner_diff': None,     # Corner difference (Harris)
+            'histogram_diff': None,  # Histogram correlation distance
+            'optical_flow_mag': None,  # Optical flow magnitude
+            'motion_energy': None,   # Frame difference energy
+            'contour_area_diff': None,  # Contour area difference
+        }
+    
+    # Convert from torch tensor (C, H, W) to numpy (H, W, C) and ensure uint8
+    curr_np = current_frame.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
+    prev_np = prev_frame.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
+    
+    # Convert to grayscale for most feature detection
+    curr_gray = cv2.cvtColor(curr_np, cv2.COLOR_RGB2GRAY)
+    prev_gray = cv2.cvtColor(prev_np, cv2.COLOR_RGB2GRAY)
+    
+    # Normalize to [0, 1] for some calculations
+    curr_norm = curr_gray.astype(np.float32) / 255.0
+    prev_norm = prev_gray.astype(np.float32) / 255.0
+    
+    # === BASIC INTENSITY FEATURES ===
+    
+    # 1. Mean Absolute Difference (MAD) - most common baseline
+    pixel_diff = float(np.abs(curr_gray.astype(float) - prev_gray.astype(float)).mean())
+    
+    # 2. Mean Squared Error (MSE)
+    mse = float(np.mean((curr_norm - prev_norm) ** 2))
+    
+    # 3. Peak Signal-to-Noise Ratio (PSNR)
+    # PSNR = 20 * log10(MAX) - 10 * log10(MSE)
+    if mse > 1e-10:
+        psnr = float(20 * np.log10(1.0) - 10 * np.log10(mse))
+    else:
+        psnr = 100.0  # Very high PSNR when frames are nearly identical
+    
+    # === STRUCTURAL FEATURES ===
+    
+    # 4. Structural Similarity Index (SSIM)
+    # Compares luminance, contrast, and structure
+    from skimage.metrics import structural_similarity
+    ssim_value = structural_similarity(curr_gray, prev_gray, data_range=255)
+    ssim = float(1.0 - ssim_value)  # Convert to dissimilarity (0 = same, 1 = different)
+    
+    # 5. Edge difference (Canny edge detector)
+    curr_edges = cv2.Canny(curr_gray, threshold1=50, threshold2=150)
+    prev_edges = cv2.Canny(prev_gray, threshold1=50, threshold2=150)
+    edge_diff = float(np.abs(curr_edges.astype(float) - prev_edges.astype(float)).mean())
+    
+    # 6. Corner difference (Harris corner detector)
+    curr_corners = cv2.cornerHarris(curr_gray, blockSize=2, ksize=3, k=0.04)
+    prev_corners = cv2.cornerHarris(prev_gray, blockSize=2, ksize=3, k=0.04)
+    corner_diff = float(np.abs(curr_corners - prev_corners).mean())
+    
+    # 7. Histogram difference (color distribution)
+    # Compare histogram correlation for grayscale
+    curr_hist = cv2.calcHist([curr_gray], [0], None, [256], [0, 256])
+    prev_hist = cv2.calcHist([prev_gray], [0], None, [256], [0, 256])
+    curr_hist = cv2.normalize(curr_hist, curr_hist).flatten()
+    prev_hist = cv2.normalize(prev_hist, prev_hist).flatten()
+    hist_corr = cv2.compareHist(curr_hist, prev_hist, cv2.HISTCMP_CORREL)
+    histogram_diff = float(1.0 - hist_corr)  # Convert correlation to distance
+    
+    # === MOTION FEATURES ===
+    
+    # 8. Optical flow magnitude (Farneback dense optical flow)
+    # Estimates pixel-level motion between frames
+    flow = cv2.calcOpticalFlowFarneback(
+        prev_gray, curr_gray, None,
+        pyr_scale=0.5, levels=3, winsize=15,
+        iterations=3, poly_n=5, poly_sigma=1.2, flags=0
+    )
+    flow_mag = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+    optical_flow_mag = float(flow_mag.mean())
+    
+    # 9. Motion energy (sum of squared differences)
+    # Measures overall intensity of change
+    motion_energy = float(np.sum((curr_gray.astype(float) - prev_gray.astype(float)) ** 2))
+    
+    # === SPATIAL FEATURES ===
+    
+    # 10. Contour area difference
+    # Find contours from edges and compare total areas
+    curr_contours, _ = cv2.findContours(curr_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    prev_contours, _ = cv2.findContours(prev_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    curr_area = sum(cv2.contourArea(c) for c in curr_contours)
+    prev_area = sum(cv2.contourArea(c) for c in prev_contours)
+    contour_area_diff = float(abs(curr_area - prev_area))
+    
+    return {
+        'pixel_diff': pixel_diff,
+        'mse': mse,
+        'psnr': psnr,
+        'ssim': ssim,
+        'edge_diff': edge_diff,
+        'corner_diff': corner_diff,
+        'histogram_diff': histogram_diff,
+        'optical_flow_mag': optical_flow_mag,
+        'motion_energy': motion_energy,
+        'contour_area_diff': contour_area_diff,
+    }
+
+def create_frame_features_vs_response_length_visualization(frame_features_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
+    """
+    Create comprehensive visualization showing correlation between 10 frame difference features and response length.
+    
+    Args:
+        frame_features_data: List of dicts with keys:
+            - frame_idx, video_time, conversation_id
+            - 10 features: pixel_diff, mse, psnr, ssim, edge_diff, corner_diff, 
+                          histogram_diff, optical_flow_mag, motion_energy, contour_area_diff
+            - response_length: int (number of words in response)
+    """
+    if not frame_features_data:
+        print("⚠️ No frame features data to visualize")
+        return
+    
+    # Filter out frames without features (first frame) and without responses
+    valid_data = [d for d in frame_features_data if d['response_length'] > 0 and d['pixel_diff'] is not None]
+    
+    if not valid_data:
+        print("⚠️ No valid frame features data (no frames with responses)")
+        return
+    
+    print(f"📊 Creating comprehensive frame features visualization with {len(valid_data)} frames")
+    
+    # Extract response lengths
+    response_lengths = [d['response_length'] for d in valid_data]
+    
+    # Define all 10 features with their display names and categories
+    feature_specs = [
+        # Basic Intensity Features
+        ('MAD (Pixel Diff)', 'pixel_diff', 'Intensity'),
+        ('MSE', 'mse', 'Intensity'),
+        ('PSNR', 'psnr', 'Intensity'),
+        # Structural Features
+        ('SSIM Dissimilarity', 'ssim', 'Structural'),
+        ('Edge Difference', 'edge_diff', 'Structural'),
+        ('Corner Difference', 'corner_diff', 'Structural'),
+        ('Histogram Difference', 'histogram_diff', 'Structural'),
+        # Motion Features
+        ('Optical Flow Mag', 'optical_flow_mag', 'Motion'),
+        ('Motion Energy', 'motion_energy', 'Motion'),
+        # Spatial Features
+        ('Contour Area Diff', 'contour_area_diff', 'Spatial'),
+    ]
+    
+    # Create figure with 4x3 grid (10 features + 2 empty)
+    fig, axes = plt.subplots(3, 4, figsize=(20, 15))
+    fig.suptitle(f'Frame Difference Features vs Response Length ({data_source})\n'
+                 f'{len(valid_data)} frames with responses from {len(set(d["conversation_id"] for d in valid_data))} conversations',
+                 fontsize=16, fontweight='bold')
+    
+    # Flatten axes for easier indexing
+    axes_flat = axes.flatten()
+    
+    # Calculate and plot correlations for each feature
+    correlation_results = []
+    
+    for idx, (display_name, feature_key, category) in enumerate(feature_specs):
+        ax = axes_flat[idx]
+        
+        # Extract feature values
+        feature_vals = [d[feature_key] for d in valid_data]
+        
+        # Scatter plot
+        ax.scatter(feature_vals, response_lengths, alpha=0.4, s=15, c='steelblue', edgecolors='none')
+        
+        # Calculate correlations
+        if len(feature_vals) > 1 and len(set(feature_vals)) > 1 and len(set(response_lengths)) > 1:
+            try:
+                pearson_r = np.corrcoef(feature_vals, response_lengths)[0, 1]
+                spearman_rho, spearman_p = spearmanr(feature_vals, response_lengths)
+                
+                # Store results
+                correlation_results.append({
+                    'feature': display_name,
+                    'category': category,
+                    'pearson_r': pearson_r,
+                    'spearman_rho': spearman_rho,
+                    'spearman_p': spearman_p
+                })
+                
+                # Title with correlation values
+                significance = "**" if spearman_p < 0.01 else ("*" if spearman_p < 0.05 else "")
+                ax.set_title(f'{display_name} ({category})\n'
+                           f'Pearson r={pearson_r:.3f}, Spearman ρ={spearman_rho:.3f}{significance}',
+                           fontsize=10, fontweight='bold' if abs(spearman_rho) > 0.3 else 'normal')
+            except:
+                ax.set_title(f'{display_name}\n(Calculation error)', fontsize=10)
+        else:
+            ax.set_title(f'{display_name}\n(Insufficient variance)', fontsize=10)
+        
+        ax.set_xlabel(f'{display_name}', fontsize=9)
+        ax.set_ylabel('Response Length (words)', fontsize=9)
+        ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+        ax.tick_params(labelsize=8)
+    
+    # Hide unused subplots
+    for idx in range(len(feature_specs), len(axes_flat)):
+        axes_flat[idx].axis('off')
+    
+    plt.tight_layout()
+    
+    # Save main plot
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f'frame_features_vs_response_length_{data_source}.png')
+    plt.savefig(output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✅ Saved comprehensive frame features visualization to {output_path}")
+    
+    # Print detailed correlation summary
+    print("\n" + "="*80)
+    print("📊 COMPREHENSIVE CORRELATION SUMMARY")
+    print("="*80)
+    print(f"{'Feature':<25} {'Category':<12} {'Pearson r':<12} {'Spearman ρ':<12} {'p-value':<12} {'Sig'}")
+    print("-"*80)
+    
+    # Sort by absolute Spearman correlation
+    correlation_results.sort(key=lambda x: abs(x['spearman_rho']), reverse=True)
+    
+    for result in correlation_results:
+        sig = "**" if result['spearman_p'] < 0.01 else ("*" if result['spearman_p'] < 0.05 else "")
+        print(f"{result['feature']:<25} {result['category']:<12} "
+              f"{result['pearson_r']:>7.3f}      {result['spearman_rho']:>7.3f}      "
+              f"{result['spearman_p']:>8.3e}    {sig}")
+    
+    print("-"*80)
+    print("Significance: ** p<0.01, * p<0.05")
+    print("="*80)
+    
+    # Create a summary bar chart of correlations
+    fig_summary, ax_summary = plt.subplots(figsize=(12, 6))
+    
+    features_sorted = [r['feature'] for r in correlation_results]
+    correlations_sorted = [r['spearman_rho'] for r in correlation_results]
+    colors = ['green' if c > 0.3 else 'red' if c < -0.3 else 'gray' for c in correlations_sorted]
+    
+    bars = ax_summary.barh(features_sorted, correlations_sorted, color=colors, alpha=0.7)
+    ax_summary.axvline(x=0, color='black', linestyle='-', linewidth=0.8)
+    ax_summary.axvline(x=0.3, color='green', linestyle='--', linewidth=0.8, alpha=0.5, label='Strong positive')
+    ax_summary.axvline(x=-0.3, color='red', linestyle='--', linewidth=0.8, alpha=0.5, label='Strong negative')
+    ax_summary.set_xlabel('Spearman Correlation Coefficient (ρ)', fontsize=12, fontweight='bold')
+    ax_summary.set_title(f'Feature Correlations with Response Length (sorted by |ρ|) - {data_source}',
+                        fontsize=14, fontweight='bold')
+    ax_summary.grid(axis='x', alpha=0.3)
+    ax_summary.legend()
+    
+    plt.tight_layout()
+    summary_path = os.path.join(output_dir, f'frame_features_correlation_summary_{data_source}.png')
+    plt.savefig(summary_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✅ Saved correlation summary bar chart to {summary_path}\n")
 
 class FilteredEgo4DRefinedNarrationStream:
     """Ego4D Refined Narration Stream that only includes videos with features - now processes per-conversation"""
@@ -1780,12 +2062,14 @@ class EventDrivenConversationContext:
     def ensure_liveinfer_loaded(self, liveinfer):
         if self.liveinfer_state is None:
             liveinfer.reset()
+            liveinfer.set_conversation_context(self.conversation_id)  # Set conversation context for feature tracking
             liveinfer.load_video(self.video_path)
             if isinstance(self.video_frames, torch.Tensor):
                 liveinfer.video_tensor = self.video_frames
             self.initial_memory = get_gpu_memory()
         else:
             liveinfer.restore_state(self.liveinfer_state)
+            liveinfer.set_conversation_context(self.conversation_id)  # Ensure context is set after restore
         self.generation_event_pending = getattr(liveinfer, 'generation_event_pending', False)
         self.pending_frame_events = collections.deque()
 
@@ -1900,6 +2184,10 @@ class EventDrivenConversationContext:
                 'is_first_chunk': True,
                 'trigger_method': liveinfer.trigger_method,
             })
+            if len(texts_generated_previous) > 0:
+                # Update frame features with response length
+                word_count = len(re.findall(r"\b\w+\b", texts_generated_previous))
+                liveinfer.update_frame_response_length(frame_idx, word_count, self.conversation_id)
             if response:
                 self.response_generated += 1
             #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Response: {response}")
@@ -1962,7 +2250,9 @@ class EventDrivenConversationContext:
                 'is_first_chunk': False,
                 'trigger_method': liveinfer.trigger_method,
             })
-            
+            if len(texts_generated_previous) > 0:
+                word_count = len(re.findall(r"\b\w+\b", texts_generated_previous))
+                liveinfer.update_frame_response_length(pseudo_frame_idx, word_count, self.conversation_id)
             if response:
                 self.response_generated += 1
             #     print(f"[t={video_time:.2f}s] Response: {response}")
@@ -2554,7 +2844,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     if event_time == et:
                         available_events.append((et, bf, pl[1]))
                 selected_conversation_id = payload[1][:12]
-                # print("Event time", event_time)
                 # find lowest buffer conversation id
                 lowest_buffer_conversation_id = None
                 lowest_buffer_level = float('inf')
@@ -2564,18 +2853,17 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     if bf < lowest_buffer_level:
                         lowest_buffer_level = bf
                         lowest_buffer_conversation_id = cid[:12]
-                        if lowest_buffer_level <= buffer_level:
+                        if lowest_buffer_level < buffer_level:
                             found_lower_buffer = True
                 # print(f"🔍 Found lowest {found_lower_buffer}: Selected: {selected_conversation_id} ({buffer_level}), Lowest-buffer: {lowest_buffer_conversation_id} ({lowest_buffer_level})")
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                 buffer_level, event_time, priority, _, payload = heapq.heappop(cached_events)
                 # push back the cached events
-                available_events = []
+                available_conversation_ids = []
                 for bf, et, pri, seq, pl in cached_events:
                     heapq.heappush(event_queue, (et, pri, seq, pl))
                     if event_time == et:
-                        available_events.append((et, bf, pl[1]))
-                # print("Event time", event_time)
+                        available_conversation_ids.append(pl[1])
                 lowest_buffer_level = float('inf')
                 found_lower_buffer = False
                 for (et, bf, cid) in available_events:
@@ -2814,17 +3102,11 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
     # Finalize live visualization with final data
     live_viz.finalize(onthefly_buffer_data)
     
-    # Collect EoS probability data from contexts
-    all_eos_data = {}
-    for cid, context in contexts.items():
-        eos_data = shared_liveinfer.get_eos_prob_data()
-        if eos_data:
-            all_eos_data[cid] = eos_data
-    
-    # Create EoS likelihood visualization if we have data
-    if all_eos_data:
-        print("\n📊 Creating EoS likelihood visualization from REAL VLM generation...")
-        create_eos_likelihood_visualization(all_eos_data, data_source=data_source)
+    # Collect frame features data from liveinfer
+    all_frame_features_data = shared_liveinfer.get_frame_features_data()
+    if all_frame_features_data:
+        print(f"\n📊 Creating frame features vs response length visualization with {len(all_frame_features_data)} frames...")
+        create_frame_features_vs_response_length_visualization(all_frame_features_data, data_source=data_source)
     
     # Convert on-the-fly buffer data to standard format (only listening mode)
     buffer_data = {}
@@ -3019,8 +3301,10 @@ class SimpleLiveInfer:
         self._kv_offload_time = 0.0
         self.generation_event_pending = False
         
-        # EoS probability tracking (real data from VLM generation)
-        self.eos_prob_data = []  # List of {response_idx, eos_probs, length, trigger_method}
+        # Frame difference features tracking (per conversation)
+        self.frame_features_data = {}  # Dict: conversation_id -> List of {frame_idx, video_time, corner_diff, ...}
+        self.prev_frame_per_conversation = {}  # Dict: conversation_id -> previous frame tensor
+        self.current_conversation_id = None  # Track which conversation is currently being processed
 
     def capture_state(self):
         state = {
@@ -3115,6 +3399,15 @@ class SimpleLiveInfer:
         self.generation_state = None
         self.kv_cache_location = 'cpu'
         self._kv_reload_time = 0.0
+    
+    def set_conversation_context(self, conversation_id):
+        """Set the current conversation context for feature tracking."""
+        self.current_conversation_id = conversation_id
+        # Initialize storage for this conversation if not exists
+        if conversation_id not in self.frame_features_data:
+            self.frame_features_data[conversation_id] = []
+        if conversation_id not in self.prev_frame_per_conversation:
+            self.prev_frame_per_conversation[conversation_id] = None
         self._kv_offload_time = 0.0
         self.generation_event_pending = False
         self.pending_frame_events = collections.deque()
@@ -3144,6 +3437,38 @@ class SimpleLiveInfer:
                         # Get single frame from CPU memory and move to GPU
                         cpu_frame = self.video_tensor[single_frame_idx:single_frame_idx+1]  # Keep batch dimension
                         gpu_frame = cpu_frame.to(self.device)
+                        
+                        # Calculate frame difference features (per conversation)
+                        if self.current_conversation_id is not None:
+                            current_frame = cpu_frame[0]  # Remove batch dimension for feature calculation
+                            prev_frame = self.prev_frame_per_conversation.get(self.current_conversation_id, None)
+                            frame_features = calculate_frame_diff_features(current_frame, prev_frame)
+                            
+                            # Store features with placeholder response length (will be updated when response is generated)
+                            # Store all 10 features
+                            self.frame_features_data[self.current_conversation_id].append({
+                                'frame_idx': single_frame_idx,
+                                'video_time': single_frame_idx / self.frame_fps,
+                                'conversation_id': self.current_conversation_id,
+                                'response_length': 0,  # Will be updated when response is generated
+                                # Basic intensity features
+                                'pixel_diff': frame_features['pixel_diff'],
+                                'mse': frame_features['mse'],
+                                'psnr': frame_features['psnr'],
+                                # Structural features
+                                'ssim': frame_features['ssim'],
+                                'edge_diff': frame_features['edge_diff'],
+                                'corner_diff': frame_features['corner_diff'],
+                                'histogram_diff': frame_features['histogram_diff'],
+                                # Motion features
+                                'optical_flow_mag': frame_features['optical_flow_mag'],
+                                'motion_energy': frame_features['motion_energy'],
+                                # Spatial features
+                                'contour_area_diff': frame_features['contour_area_diff'],
+                            })
+                            
+                            # Update prev_frame for this conversation
+                            self.prev_frame_per_conversation[self.current_conversation_id] = current_frame.clone()
                         
                         # Process single frame on GPU
                         frame_embeds = self.model.visual_embed(gpu_frame).split(self.frame_num_tokens)
@@ -3365,29 +3690,14 @@ class SimpleLiveInfer:
             past_key_values = self._ensure_kv_on_device(state['past_key_values_cpu'])
 
             buffer = torch.zeros(1, chunk_size, dtype=torch.long, device=self.device)
-            
-            # Track EoS probabilities during generation
-            result = fast_greedy_generate(
+            output_ids, past_key_values, next_inputs_embeds, finished = fast_greedy_generate(
                 model=self.model,
                 inputs_embeds=next_inputs,
                 past_key_values=past_key_values,
                 eos_token_id=self.eos_token_id,
                 inplace_output_ids=buffer,
                 max_new_tokens=chunk_size,
-                track_eos_probs=True,
             )
-            
-            if len(result) == 6:
-                output_ids, past_key_values, next_inputs_embeds, finished, eos_probs, probs_list = result
-                # Store EoS probabilities for this chunk
-                if 'eos_probs' not in state:
-                    state['eos_probs'] = []
-                state['eos_probs'].extend(eos_probs)
-                if 'probs_list' not in state:
-                    state['probs_list'] = []
-                state['probs_list'].extend(probs_list)
-            else:
-                output_ids, past_key_values, next_inputs_embeds, finished = result
 
             self.timing_data['generation_video_time'] = state['video_time']
 
@@ -3401,10 +3711,6 @@ class SimpleLiveInfer:
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=True,
                 )
-                # print("Texts generated previous", self.texts_generated_previous)
-                # if 'eos_probs' in state and state['eos_probs']:
-                #     print("Length", len(state['eos_probs']), "Finished", finished)
-                #     print("EoS probability data", state['eos_probs'])
 
             if next_inputs_embeds is not None:
                 state['next_inputs_embeds_cpu'] = next_inputs_embeds.detach().cpu()
@@ -3417,19 +3723,6 @@ class SimpleLiveInfer:
             if finished or state['tokens_generated'] >= Config.INPLACE_OUTPUT_SIZE:
                 state['finished'] = True
                 all_tokens = torch.cat(state['tokens'], dim=1) if state['tokens'] else torch.empty((1, 0), dtype=torch.long)
-                
-                # Save EoS probability data for this response
-                if 'eos_probs' in state and state['eos_probs']:
-                    self.eos_prob_data.append({
-                        'response_idx': len(self.eos_prob_data),
-                        'eos_probs': state['eos_probs'].copy(),
-                        'length': len(state['eos_probs']),
-                        'trigger_method': state.get('trigger_method', 'unknown'),
-                        'video_time': state['video_time'],
-                        'query': state.get('query', ''),
-                        'probs_list': state['probs_list'].copy(),
-                    })
-                
                 return all_tokens
 
         return None
@@ -3571,9 +3864,22 @@ class SimpleLiveInfer:
             'response_times': self.response_times.copy()
         }
     
-    def get_eos_prob_data(self):
-        """Get EoS probability data collected during actual VLM generation."""
-        return [entry.copy() for entry in self.eos_prob_data]
+    def get_frame_features_data(self):
+        """Get frame difference features data from all conversations."""
+        all_features = []
+        for conversation_id, features_list in self.frame_features_data.items():
+            all_features.extend([entry.copy() for entry in features_list])
+        return all_features
+    
+    def update_frame_response_length(self, frame_idx, response_length, conversation_id):
+        """Update the response length for a specific frame in a specific conversation."""
+        if conversation_id not in self.frame_features_data:
+            return  # Conversation not found
+        
+        for entry in self.frame_features_data[conversation_id]:
+            if entry['frame_idx'] == frame_idx:
+                entry['response_length'] += response_length
+                break
 
 
     def get_kv_transfer_metrics(self):
@@ -5075,177 +5381,6 @@ Latency: {latency_mean:.3f}±{latency_std:.3f}s"""
     print(f"   • Listening Rebuffering: {listening_rebuffer_mean:.3f} ± {listening_rebuffer_std:.3f}s (from {len(listening_rebuffering_times)} conversations)")
     print(f"   • Fluency: {fluency_mean:.3f} ± {fluency_std:.3f}")
     print(f"   • Latency: {latency_mean:.3f} ± {latency_std:.3f}s")
-
-def create_eos_likelihood_visualization(all_eos_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
-    """
-    Visualize REAL EoS token likelihood evolution from actual VLM generation.
-
-    Args:
-        all_eos_data: Dict mapping conversation_id to list of entries, each entry has:
-            - 'eos_probs': list[float]  (per-step P(EOS))
-            - 'probs_list': list[torch.Tensor] (each tensor shape [vocab], probs or logits)
-        output_dir: Directory to save plots
-        data_source: 'goalstep' or 'narration'
-    """
-    if not all_eos_data:
-        print("⚠️ No EoS probability data available")
-        return None
-
-    print(f"📊 Creating EoS likelihood visualization from REAL VLM generation data...")
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Flatten all responses
-    all_responses = [entry for _, entries in all_eos_data.items() for entry in entries]
-    if not all_responses:
-        print("⚠️ No responses with EoS data found")
-        return None
-
-    print(f"✓ Collected {len(all_responses)} responses with real EoS probability data")
-
-    # ---------- Part 1: P(EOS) vs normalized progress ----------
-    position_bins = defaultdict(list)
-    lengths = []
-
-    for response in all_responses:
-        eos_probs = response.get('eos_probs', [])
-        if not eos_probs:
-            continue
-        L = len(eos_probs)
-        lengths.append(L)
-        # normalized position: 0..100 (% of generation completed at that step)
-        denom = max(L - 1, 1)
-        for i, p in enumerate(eos_probs):
-            pos = int((i / denom) * 100)
-            if np.isfinite(p):
-                position_bins[pos].append(float(p))
-
-    stats = {}
-    for pos, vals in position_bins.items():
-        if not vals:
-            continue
-        arr = np.asarray(vals, dtype=float)
-        stats[pos] = {
-            'mean': np.mean(arr),
-            'p25': np.percentile(arr, 25),
-            'p75': np.percentile(arr, 75),
-            'count': len(arr),
-        }
-
-    # ---------- Part 2: Correlation of logit-derived features vs distance-to-EOS ----------
-    # We do NOT need eos_token_id; P(EOS) already provided in 'eos_probs'.
-    # Here we compute entropy/top2_gap from probs_list.
-    records = []
-    for response in all_responses:
-        probs_list = response.get('probs_list', [])
-        if not probs_list:
-            continue
-        num_tokens = len(probs_list)
-        remain = np.arange(num_tokens, 0, -1)  # tokens remaining until EOS (if EOS at end)
-        for i, probs in enumerate(probs_list):
-            if probs is None:
-                continue
-            if not torch.is_tensor(probs):
-                probs = torch.tensor(probs)
-            probs = probs.to(torch.float32)
-            # If this is logits, softmax; if already probs, this is still safe
-            if probs.dim() != 1:
-                probs = probs.view(-1)
-            probs = torch.softmax(probs, dim=-1)
-            # entropy
-            ent = -(probs * torch.log(probs.clamp_min(1e-12))).sum().item()
-            # top-2 gap (confidence margin)
-            topv, _ = torch.topk(probs, 2)
-            gap = (topv[0] - topv[1]).item()
-
-            records.append({
-                "entropy": float(ent),
-                "top2_gap": float(gap),
-                "remain": int(remain[i]),
-            })
-
-    if not records:
-        print("⚠️ No logit-based feature data found.")
-        return None
-
-    entropy = np.array([r["entropy"] for r in records], dtype=float)
-    top2_gap = np.array([r["top2_gap"] for r in records], dtype=float)
-    remain = np.array([r["remain"] for r in records], dtype=float)
-
-    # Helper: binned mean curve
-    def smooth_bin(x, y, nbins=20):
-        x = np.asarray(x, dtype=float)
-        y = np.asarray(y, dtype=float)
-        mask = np.isfinite(x) & np.isfinite(y)
-        x, y = x[mask], y[mask]
-        if x.size == 0:
-            return np.array([]), np.array([])
-        bins = np.linspace(x.min(), x.max(), nbins + 1)
-        centers = 0.5 * (bins[:-1] + bins[1:])
-        means = []
-        for i in range(nbins):
-            sel = (x >= bins[i]) & (x < bins[i + 1])
-            means.append(y[sel].mean() if np.any(sel) else np.nan)
-        return centers, np.array(means)
-
-    # -------------- Plotting --------------
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle(f'Real EoS Token Likelihood from VLM Generation - {data_source.title()}',
-                 fontsize=14, fontweight='bold')
-
-    # Left: P(EOS) vs progress with IQR band
-    ax = axes[0]
-    if stats:
-        positions = sorted(stats.keys())
-        means = [stats[p]['mean'] for p in positions]
-        p25 = [stats[p]['p25'] for p in positions]
-        p75 = [stats[p]['p75'] for p in positions]
-        ax.plot(positions, means, color='tab:blue', lw=2, label='Mean P(EOS)')
-        ax.fill_between(positions, p25, p75, color='tab:blue', alpha=0.25, label='IQR (25–75%)')
-        ax.set_xlabel('Generation Progress (%)', fontsize=11)
-        ax.set_ylabel('P(EOS Token)', fontsize=11)
-        ax.set_ylim(-0.02, 1.02)
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-        ax.set_title('EoS Likelihood vs Progress (Aggregated)', fontsize=12)
-    else:
-        ax.text(0.5, 0.5, "No eos_probs available", ha='center', va='center', transform=ax.transAxes)
-
-    # Right: entropy / top2_gap vs distance-to-EOS (smoothed curves) + Spearman ρ
-    ax = axes[1]
-    rho_h, _ = spearmanr(entropy, remain)
-    rho_g, _ = spearmanr(top2_gap, remain)
-
-    xc_h, yc_h = smooth_bin(remain, entropy, nbins=20)
-    xc_g, yc_g = smooth_bin(remain, top2_gap, nbins=20)
-
-    if xc_h.size:
-        ax.plot(xc_h, yc_h, marker='o', ms=4, lw=1.8, color='tab:orange',
-                label=f"entropy (ρ={rho_h:+.2f})")
-    if xc_g.size:
-        ax.plot(xc_g, yc_g, marker='o', ms=4, lw=1.8, color='tab:green',
-                label=f"top2_gap (ρ={rho_g:+.2f})")
-
-    ax.invert_xaxis()  # so EOS (remain→0) is on the right
-    ax.set_xlabel("Distance to EOS (tokens remaining)")
-    ax.set_ylabel("Feature value")
-    ax.set_title("Logit-derived Features vs Distance to EOS", fontsize=12)
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-
-    output_file = os.path.join(output_dir, f'eos_likelihood_real_data_{data_source}.png')
-    plt.savefig(output_file, dpi=Config.PLOT_DPI, bbox_inches='tight')
-    plt.close()
-
-    avg_len = float(np.mean(lengths)) if lengths else 0.0
-    print(f"✅ Real EoS likelihood visualization saved to: {output_file}")
-    print(f"📊 Total responses analyzed: {len(all_responses)}")
-    print(f"📊 Average response length: {avg_len:.1f} tokens")
-    print(f"ρ(entropy,remain)={rho_h:+.3f}, ρ(top2_gap,remain)={rho_g:+.3f}")
-
-    return output_file
 
 if __name__ == "__main__":
     main()
