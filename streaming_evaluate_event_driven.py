@@ -24,6 +24,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from torchvision.io import read_video
 import transformers
+from scipy.stats import spearmanr
+from collections import defaultdict
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -102,8 +104,8 @@ class Config:
     GENERATION_CHUNK_SIZE = 32
 
     # Scheduling
-    # SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer'
-    SCHEDULING_METHOD = 'lowest_buffer'
+    SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer'
+    # SCHEDULING_METHOD = 'lowest_buffer'
 
 class FilteredEgo4DRefinedNarrationStream:
     """Ego4D Refined Narration Stream that only includes videos with features - now processes per-conversation"""
@@ -3375,12 +3377,15 @@ class SimpleLiveInfer:
                 track_eos_probs=True,
             )
             
-            if len(result) == 5:
-                output_ids, past_key_values, next_inputs_embeds, finished, eos_probs = result
+            if len(result) == 6:
+                output_ids, past_key_values, next_inputs_embeds, finished, eos_probs, probs_list = result
                 # Store EoS probabilities for this chunk
                 if 'eos_probs' not in state:
                     state['eos_probs'] = []
                 state['eos_probs'].extend(eos_probs)
+                if 'probs_list' not in state:
+                    state['probs_list'] = []
+                state['probs_list'].extend(probs_list)
             else:
                 output_ids, past_key_values, next_inputs_embeds, finished = result
 
@@ -3396,6 +3401,10 @@ class SimpleLiveInfer:
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=True,
                 )
+                # print("Texts generated previous", self.texts_generated_previous)
+                # if 'eos_probs' in state and state['eos_probs']:
+                #     print("Length", len(state['eos_probs']), "Finished", finished)
+                #     print("EoS probability data", state['eos_probs'])
 
             if next_inputs_embeds is not None:
                 state['next_inputs_embeds_cpu'] = next_inputs_embeds.detach().cpu()
@@ -3418,6 +3427,7 @@ class SimpleLiveInfer:
                         'trigger_method': state.get('trigger_method', 'unknown'),
                         'video_time': state['video_time'],
                         'query': state.get('query', ''),
+                        'probs_list': state['probs_list'].copy(),
                     })
                 
                 return all_tokens
@@ -5069,189 +5079,173 @@ Latency: {latency_mean:.3f}±{latency_std:.3f}s"""
 def create_eos_likelihood_visualization(all_eos_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """
     Visualize REAL EoS token likelihood evolution from actual VLM generation.
-    
+
     Args:
-        all_eos_data: Dict mapping conversation_id to list of EoS probability entries
+        all_eos_data: Dict mapping conversation_id to list of entries, each entry has:
+            - 'eos_probs': list[float]  (per-step P(EOS))
+            - 'probs_list': list[torch.Tensor] (each tensor shape [vocab], probs or logits)
         output_dir: Directory to save plots
         data_source: 'goalstep' or 'narration'
     """
     if not all_eos_data:
         print("⚠️ No EoS probability data available")
         return None
-    
+
     print(f"📊 Creating EoS likelihood visualization from REAL VLM generation data...")
-    
+
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Collect all responses with EoS data
-    all_responses = []
-    for conv_id, eos_entries in all_eos_data.items():
-        for entry in eos_entries:
-            all_responses.append(entry)
-    
+
+    # Flatten all responses
+    all_responses = [entry for _, entries in all_eos_data.items() for entry in entries]
     if not all_responses:
         print("⚠️ No responses with EoS data found")
         return None
-    
+
     print(f"✓ Collected {len(all_responses)} responses with real EoS probability data")
-    
-    # Analyze patterns by normalized position
-    from collections import defaultdict
+
+    # ---------- Part 1: P(EOS) vs normalized progress ----------
     position_bins = defaultdict(list)
-    
+    lengths = []
+
     for response in all_responses:
-        eos_probs = response['eos_probs']
-        length = len(eos_probs)
-        
-        if length == 0:
+        eos_probs = response.get('eos_probs', [])
+        if not eos_probs:
             continue
-        
-        # Normalize positions to 0-100%
-        for i, prob in enumerate(eos_probs):
-            normalized_pos = int((i / length) * 100) if length > 0 else 100
-            position_bins[normalized_pos].append(prob)
-    
-    # Calculate statistics
+        L = len(eos_probs)
+        lengths.append(L)
+        # normalized position: 0..100 (% of generation completed at that step)
+        denom = max(L - 1, 1)
+        for i, p in enumerate(eos_probs):
+            pos = int((i / denom) * 100)
+            if np.isfinite(p):
+                position_bins[pos].append(float(p))
+
     stats = {}
-    for pos in range(101):
-        if pos in position_bins and position_bins[pos]:
-            stats[pos] = {
-                'mean': np.mean(position_bins[pos]),
-                'median': np.median(position_bins[pos]),
-                'std': np.std(position_bins[pos]),
-                'p25': np.percentile(position_bins[pos], 25),
-                'p75': np.percentile(position_bins[pos], 75),
-                'count': len(position_bins[pos])
-            }
-    
-    # Create visualization
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle(f'Real EoS Token Likelihood from VLM Generation - {data_source.title()}', 
+    for pos, vals in position_bins.items():
+        if not vals:
+            continue
+        arr = np.asarray(vals, dtype=float)
+        stats[pos] = {
+            'mean': np.mean(arr),
+            'p25': np.percentile(arr, 25),
+            'p75': np.percentile(arr, 75),
+            'count': len(arr),
+        }
+
+    # ---------- Part 2: Correlation of logit-derived features vs distance-to-EOS ----------
+    # We do NOT need eos_token_id; P(EOS) already provided in 'eos_probs'.
+    # Here we compute entropy/top2_gap from probs_list.
+    records = []
+    for response in all_responses:
+        probs_list = response.get('probs_list', [])
+        if not probs_list:
+            continue
+        num_tokens = len(probs_list)
+        remain = np.arange(num_tokens, 0, -1)  # tokens remaining until EOS (if EOS at end)
+        for i, probs in enumerate(probs_list):
+            if probs is None:
+                continue
+            if not torch.is_tensor(probs):
+                probs = torch.tensor(probs)
+            probs = probs.to(torch.float32)
+            # If this is logits, softmax; if already probs, this is still safe
+            if probs.dim() != 1:
+                probs = probs.view(-1)
+            probs = torch.softmax(probs, dim=-1)
+            # entropy
+            ent = -(probs * torch.log(probs.clamp_min(1e-12))).sum().item()
+            # top-2 gap (confidence margin)
+            topv, _ = torch.topk(probs, 2)
+            gap = (topv[0] - topv[1]).item()
+
+            records.append({
+                "entropy": float(ent),
+                "top2_gap": float(gap),
+                "remain": int(remain[i]),
+            })
+
+    if not records:
+        print("⚠️ No logit-based feature data found.")
+        return None
+
+    entropy = np.array([r["entropy"] for r in records], dtype=float)
+    top2_gap = np.array([r["top2_gap"] for r in records], dtype=float)
+    remain = np.array([r["remain"] for r in records], dtype=float)
+
+    # Helper: binned mean curve
+    def smooth_bin(x, y, nbins=20):
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mask = np.isfinite(x) & np.isfinite(y)
+        x, y = x[mask], y[mask]
+        if x.size == 0:
+            return np.array([]), np.array([])
+        bins = np.linspace(x.min(), x.max(), nbins + 1)
+        centers = 0.5 * (bins[:-1] + bins[1:])
+        means = []
+        for i in range(nbins):
+            sel = (x >= bins[i]) & (x < bins[i + 1])
+            means.append(y[sel].mean() if np.any(sel) else np.nan)
+        return centers, np.array(means)
+
+    # -------------- Plotting --------------
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig.suptitle(f'Real EoS Token Likelihood from VLM Generation - {data_source.title()}',
                  fontsize=14, fontweight='bold')
-    
-    # Plot 1: Mean with confidence bands
-    ax = axes[0, 0]
+
+    # Left: P(EOS) vs progress with IQR band
+    ax = axes[0]
     if stats:
         positions = sorted(stats.keys())
         means = [stats[p]['mean'] for p in positions]
         p25 = [stats[p]['p25'] for p in positions]
         p75 = [stats[p]['p75'] for p in positions]
-        
-        ax.plot(positions, means, 'b-', linewidth=2, label='Mean')
-        ax.fill_between(positions, p25, p75, alpha=0.3, color='blue', label='25th-75th percentile')
+        ax.plot(positions, means, color='tab:blue', lw=2, label='Mean P(EOS)')
+        ax.fill_between(positions, p25, p75, color='tab:blue', alpha=0.25, label='IQR (25–75%)')
         ax.set_xlabel('Generation Progress (%)', fontsize=11)
-        ax.set_ylabel('P(EoS Token)', fontsize=11)
-        ax.set_title('EoS Likelihood vs Progress (Real Data)', fontsize=12)
-        ax.legend()
+        ax.set_ylabel('P(EOS Token)', fontsize=11)
+        ax.set_ylim(-0.02, 1.02)
         ax.grid(True, alpha=0.3)
-        ax.set_ylim(-0.05, 1.05)
-        
-        # Find when P(EoS) crosses 0.5
-        crossing_point = None
-        for i, pos in enumerate(positions):
-            if means[i] >= 0.5:
-                crossing_point = pos
-                break
-        
-        if crossing_point:
-            ax.axvline(x=crossing_point, color='red', linestyle='--', alpha=0.5, linewidth=1.5)
-            ax.text(crossing_point + 2, 0.5, f'P=0.5 at {crossing_point}%', 
-                   fontsize=9, bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7))
-    
-    # Plot 2: Example individual trajectories
-    ax = axes[0, 1]
-    num_examples = min(10, len(all_responses))
-    colors_palette = plt.cm.viridis(np.linspace(0, 1, num_examples))
-    
-    for idx, (response, color) in enumerate(zip(all_responses[:num_examples], colors_palette)):
-        eos_probs = response['eos_probs']
-        length = len(eos_probs)
-        if length > 0:
-            positions_norm = np.linspace(0, 100, len(eos_probs))
-            ax.plot(positions_norm, eos_probs, '-o', color=color, linewidth=1.5, 
-                   markersize=3, alpha=0.6, label=f'R{idx+1} ({length} tokens)')
-    
-    ax.set_xlabel('Generation Progress (%)', fontsize=11)
-    ax.set_ylabel('P(EoS Token)', fontsize=11)
-    ax.set_title(f'Example Real Trajectories (First {num_examples})', fontsize=12)
-    ax.legend(fontsize=8, loc='upper left', ncol=2)
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(-0.05, 1.05)
-    ax.axhline(y=0.5, color='red', linestyle='--', alpha=0.3, linewidth=1)
-    
-    # Plot 3: Statistics table
-    ax = axes[1, 0]
-    ax.axis('off')
-    
-    checkpoints = [0, 25, 50, 75, 90, 95]
-    table_data = []
-    table_data.append(['Progress', 'Mean P(EoS)', 'Median', 'Std', 'Samples'])
-    
-    for pos in checkpoints:
-        if pos in stats:
-            s = stats[pos]
-            table_data.append([
-                f'{pos}%',
-                f'{s["mean"]:.4f}',
-                f'{s["median"]:.4f}',
-                f'{s["std"]:.4f}',
-                f'{s["count"]}'
-            ])
-        else:
-            table_data.append([f'{pos}%', 'N/A', 'N/A', 'N/A', '0'])
-    
-    table = ax.table(cellText=table_data, cellLoc='center', loc='center',
-                    colWidths=[0.15, 0.2, 0.2, 0.2, 0.15])
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1, 2)
-    
-    # Style header row
-    for i in range(5):
-        table[(0, i)].set_facecolor('#4CAF50')
-        table[(0, i)].set_text_props(weight='bold', color='white')
-    
-    ax.set_title('EoS Statistics at Key Checkpoints (Real Data)', fontsize=12, pad=20)
-    
-    # Plot 4: Length distribution
-    ax = axes[1, 1]
-    lengths = [len(r['eos_probs']) for r in all_responses if len(r['eos_probs']) > 0]
-    
-    if lengths:
-        ax.hist(lengths, bins=30, color='skyblue', edgecolor='black', alpha=0.7)
-        ax.axvline(x=np.mean(lengths), color='red', linestyle='--', linewidth=2, 
-                  label=f'Mean={np.mean(lengths):.1f}')
-        ax.axvline(x=np.median(lengths), color='orange', linestyle='--', linewidth=2,
-                  label=f'Median={np.median(lengths):.1f}')
-        ax.set_xlabel('Response Length (tokens)', fontsize=11)
-        ax.set_ylabel('Count', fontsize=11)
-        ax.set_title('Distribution of Response Lengths', fontsize=12)
         ax.legend()
-        ax.grid(True, alpha=0.3, axis='y')
-    
-    plt.tight_layout()
-    
+        ax.set_title('EoS Likelihood vs Progress (Aggregated)', fontsize=12)
+    else:
+        ax.text(0.5, 0.5, "No eos_probs available", ha='center', va='center', transform=ax.transAxes)
+
+    # Right: entropy / top2_gap vs distance-to-EOS (smoothed curves) + Spearman ρ
+    ax = axes[1]
+    rho_h, _ = spearmanr(entropy, remain)
+    rho_g, _ = spearmanr(top2_gap, remain)
+
+    xc_h, yc_h = smooth_bin(remain, entropy, nbins=20)
+    xc_g, yc_g = smooth_bin(remain, top2_gap, nbins=20)
+
+    if xc_h.size:
+        ax.plot(xc_h, yc_h, marker='o', ms=4, lw=1.8, color='tab:orange',
+                label=f"entropy (ρ={rho_h:+.2f})")
+    if xc_g.size:
+        ax.plot(xc_g, yc_g, marker='o', ms=4, lw=1.8, color='tab:green',
+                label=f"top2_gap (ρ={rho_g:+.2f})")
+
+    ax.invert_xaxis()  # so EOS (remain→0) is on the right
+    ax.set_xlabel("Distance to EOS (tokens remaining)")
+    ax.set_ylabel("Feature value")
+    ax.set_title("Logit-derived Features vs Distance to EOS", fontsize=12)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
     output_file = os.path.join(output_dir, f'eos_likelihood_real_data_{data_source}.png')
     plt.savefig(output_file, dpi=Config.PLOT_DPI, bbox_inches='tight')
     plt.close()
-    
+
+    avg_len = float(np.mean(lengths)) if lengths else 0.0
     print(f"✅ Real EoS likelihood visualization saved to: {output_file}")
     print(f"📊 Total responses analyzed: {len(all_responses)}")
-    print(f"📊 Average response length: {np.mean(lengths):.1f} tokens")
-    
-    if stats:
-        crossing_point = None
-        positions = sorted(stats.keys())
-        means = [stats[p]['mean'] for p in positions]
-        for i, pos in enumerate(positions):
-            if means[i] >= 0.5:
-                crossing_point = pos
-                break
-        if crossing_point:
-            print(f"📊 P(EoS) crosses 0.5 at: {crossing_point}% generation progress")
-    
-    return output_file
+    print(f"📊 Average response length: {avg_len:.1f} tokens")
+    print(f"ρ(entropy,remain)={rho_h:+.3f}, ρ(top2_gap,remain)={rho_g:+.3f}")
 
+    return output_file
 
 if __name__ == "__main__":
     main()
