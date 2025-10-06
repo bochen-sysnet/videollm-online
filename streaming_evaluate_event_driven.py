@@ -430,25 +430,25 @@ def create_frame_features_vs_response_length_visualization(frame_features_data, 
     print(f"✅ Saved comprehensive frame features visualization to {output_path}")
     
     # Print detailed correlation summary
-    print("\n" + "="*88)
-    print("📊 COMPREHENSIVE CORRELATION SUMMARY (Frame Features + Temporal Patterns)")
-    print("="*88)
-    print(f"{'Feature':<28} {'Category':<14} {'Pearson r':<12} {'Spearman ρ':<12} {'p-value':<12} {'Sig'}")
-    print("-"*88)
+    # print("\n" + "="*88)
+    # print("📊 COMPREHENSIVE CORRELATION SUMMARY (Frame Features + Temporal Patterns)")
+    # print("="*88)
+    # print(f"{'Feature':<28} {'Category':<14} {'Pearson r':<12} {'Spearman ρ':<12} {'p-value':<12} {'Sig'}")
+    # print("-"*88)
     
     # Sort by absolute Spearman correlation
     correlation_results.sort(key=lambda x: abs(x['spearman_rho']), reverse=True)
     
-    for result in correlation_results:
-        sig = "**" if result['spearman_p'] < 0.01 else ("*" if result['spearman_p'] < 0.05 else "")
-        print(f"{result['feature']:<28} {result['category']:<14} "
-              f"{result['pearson_r']:>7.3f}      {result['spearman_rho']:>7.3f}      "
-              f"{result['spearman_p']:>8.3e}    {sig}")
+    # for result in correlation_results:
+    #     sig = "**" if result['spearman_p'] < 0.01 else ("*" if result['spearman_p'] < 0.05 else "")
+    #     print(f"{result['feature']:<28} {result['category']:<14} "
+    #           f"{result['pearson_r']:>7.3f}      {result['spearman_rho']:>7.3f}      "
+    #           f"{result['spearman_p']:>8.3e}    {sig}")
     
-    print("-"*88)
-    print("Significance: ** p<0.01, * p<0.05")
-    print("Categories: Single-Frame, Difference, Motion, Temporal")
-    print("="*88)
+    # print("-"*88)
+    # print("Significance: ** p<0.01, * p<0.05")
+    # print("Categories: Single-Frame, Difference, Motion, Temporal")
+    # print("="*88)
     
     # Create a summary bar chart of correlations with category colors
     fig_summary, ax_summary = plt.subplots(figsize=(14, 8))
@@ -755,6 +755,16 @@ def get_gpu_memory():
             text=True,
         )
         return int(result.stdout.strip())
+    except Exception:
+        return 0
+
+def get_cpu_memory():
+    """Get current process CPU memory usage in MB"""
+    try:
+        import psutil
+        process = psutil.Process()
+        # RSS (Resident Set Size) - actual physical memory used
+        return process.memory_info().rss / (1024 * 1024)  # Convert bytes to MB
     except Exception:
         return 0
 
@@ -1373,8 +1383,8 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
 
     num_conversations = max(1, len(all_memory_data))
     figure_height = Config.PLOT_FIGSIZE_SMALL[1] * max(1, num_conversations)
-    fig, axes = plt.subplots(num_conversations, 4, figsize=(Config.PLOT_FIGSIZE_LARGE[0], figure_height))
-    fig.suptitle('GPU Memory Usage Analysis - CPU-First Conversation Processing', fontsize=16, fontweight='bold')
+    fig, axes = plt.subplots(num_conversations, 5, figsize=(Config.PLOT_FIGSIZE_LARGE[0] * 1.25, figure_height))
+    fig.suptitle('Memory Usage Analysis - CPU-First Conversation Processing (GPU + CPU)', fontsize=16, fontweight='bold')
 
     # Normalise axes shape for single conversation runs
     if num_conversations == 1:
@@ -1383,7 +1393,7 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
     component_colors = ['#1f77b4', '#ff7f0e', '#8c564b', '#7f7f7f']  # Blue, Orange, Brown, Gray
 
     for row_idx, (conversation_key, data) in enumerate(all_memory_data.items() or {"conversation": {}}.items()):
-        ax_breakdown, ax_components, ax_kv_transfer, ax_peak = axes[row_idx]
+        ax_breakdown, ax_components, ax_kv_transfer, ax_peak, ax_cpu = axes[row_idx]
 
         frames = data.get('frames', [])
         if not frames:
@@ -1391,6 +1401,7 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
             ax_components.axis('off')
             ax_kv_transfer.axis('off')
             ax_peak.axis('off')
+            ax_cpu.axis('off')
             continue
 
         totals = data.get('memory_usage', [])
@@ -1412,6 +1423,7 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
             ax_components.axis('off')
             ax_kv_transfer.axis('off')
             ax_peak.axis('off')
+            ax_cpu.axis('off')
             continue
 
         frames = np.array(frames[:min_length])
@@ -1527,6 +1539,54 @@ def create_memory_visualization(all_memory_data, output_dir=Config.OUTPUT_DIR, d
         ax_peak.set_ylabel('Memory (MB)')
         ax_peak.grid(True, alpha=0.3, axis='y')
         ax_peak.tick_params(axis='x', labelsize=9)
+
+        # 5. CPU Memory Usage Over Time
+        cpu_memory = data.get('cpu_memory', [])
+        cpu_memory_growth = data.get('cpu_memory_growth', [])
+        
+        if cpu_memory and len(cpu_memory) >= min_length:
+            cpu_memory = np.array(cpu_memory[:min_length])
+            cpu_memory_growth = np.array(cpu_memory_growth[:min_length]) if cpu_memory_growth else np.zeros(min_length)
+            
+            # Plot absolute CPU memory and growth
+            ax_cpu_twin = ax_cpu.twinx()
+            
+            line1 = ax_cpu.plot(frames, cpu_memory, color='#2ca02c', linewidth=2.0, label='CPU Memory (MB)', alpha=0.9)
+            line2 = ax_cpu_twin.plot(frames, cpu_memory_growth, color='#d62728', linewidth=2.0, label='Growth (MB)', alpha=0.9, linestyle='--')
+            
+            ax_cpu.set_title('CPU Memory Usage (Process RSS)', fontsize=10)
+            ax_cpu.set_xlabel('Frame Number')
+            ax_cpu.set_ylabel('Total CPU Memory (MB)', color='#2ca02c')
+            ax_cpu_twin.set_ylabel('Growth (MB)', color='#d62728')
+            ax_cpu.grid(True, alpha=0.3)
+            ax_cpu.tick_params(axis='y', labelcolor='#2ca02c')
+            ax_cpu_twin.tick_params(axis='y', labelcolor='#d62728')
+            
+            # Combined legend
+            lines = line1 + line2
+            labels = [l.get_label() for l in lines]
+            ax_cpu.legend(lines, labels, fontsize=8, loc='upper left')
+            
+            # Add summary stats
+            if cpu_memory.size > 0 and cpu_memory_growth.size > 0:
+                cpu_initial = cpu_memory[0]
+                cpu_final = cpu_memory[-1]
+                cpu_max_growth = cpu_memory_growth.max() if len(cpu_memory_growth) > 0 else 0
+                ax_cpu.text(
+                    0.98,
+                    0.02,
+                    f'Initial: {cpu_initial:.0f}MB\nFinal: {cpu_final:.0f}MB\nMax Growth: {cpu_max_growth:.0f}MB',
+                    transform=ax_cpu.transAxes,
+                    ha='right',
+                    va='bottom',
+                    fontsize=8,
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.6),
+                )
+        else:
+            ax_cpu.text(0.5, 0.5, 'No CPU memory data', ha='center', va='center', transform=ax_cpu.transAxes)
+            ax_cpu.set_xlabel('Frame Number')
+            ax_cpu.set_ylabel('CPU Memory (MB)')
+            ax_cpu.grid(True, alpha=0.3)
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
 
@@ -2049,6 +2109,9 @@ class EventDrivenConversationContext:
             'kv_transfer_size': [],
             'kv_offload_time': [],
             'kv_reload_time': [],
+            # CPU memory tracking
+            'cpu_memory': [],
+            'cpu_memory_growth': [],
         }
 
         self.frame_scores_data = {
@@ -2069,11 +2132,18 @@ class EventDrivenConversationContext:
     
     def track_memory_snapshot(self, liveinfer, frame_idx):
         """Track memory usage snapshot at a given frame index."""
+        # GPU memory tracking
         current_memory = get_gpu_memory()
         if self.initial_memory is None:
             self.initial_memory = current_memory
         memory_growth = current_memory - self.initial_memory
         memory_per_frame = memory_growth / max(1, frame_idx) if frame_idx > 0 else 0
+
+        # CPU memory tracking
+        current_cpu_memory = get_cpu_memory()
+        if not hasattr(self, 'initial_cpu_memory') or self.initial_cpu_memory is None:
+            self.initial_cpu_memory = current_cpu_memory
+        cpu_memory_growth = current_cpu_memory - self.initial_cpu_memory
 
         torch_allocated_mb = 0.0
         torch_reserved_mb = 0.0
@@ -2116,6 +2186,10 @@ class EventDrivenConversationContext:
         self.memory_data['other_memory'].append(other_memory_mb)
         self.memory_data['torch_allocated'].append(torch_allocated_mb)
         self.memory_data['torch_reserved'].append(torch_reserved_mb)
+        
+        # CPU memory tracking
+        self.memory_data['cpu_memory'].append(current_cpu_memory)
+        self.memory_data['cpu_memory_growth'].append(cpu_memory_growth)
         
         # Additional detailed breakdown
         self.memory_data.setdefault('other_allocated', []).append(other_allocated_mb)
@@ -2566,27 +2640,49 @@ class LiveBufferVisualizer:
         for i, cid in enumerate(self.conversation_ids):
             self.colors[cid] = base_colors[i % len(base_colors)]
         
-        # Create figure with 2 subplots: buffer level and cumulative rebuffering
-        self.fig, self.axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-        self.fig.suptitle(f'Live Buffer Evolution - {data_source.title()} (Listening Mode)', 
+        # Create figure with 4 subplots: buffer, rebuffering, GPU memory, CPU memory
+        self.fig, self.axes = plt.subplots(2, 2, figsize=(16, 10))
+        self.fig.suptitle(f'Live System Monitoring - {data_source.title()} (Listening Mode)', 
                          fontsize=14, fontweight='bold')
         
-        self.ax_buffer = self.axes[0]
-        self.ax_rebuffer = self.axes[1]
+        self.ax_buffer = self.axes[0, 0]
+        self.ax_rebuffer = self.axes[0, 1]
+        self.ax_gpu = self.axes[1, 0]
+        self.ax_cpu = self.axes[1, 1]
         
-        # Configure axes
+        # Configure buffer axes
         self.ax_buffer.set_ylabel('Buffer Size (words)')
         self.ax_buffer.set_title('Buffer Level')
+        self.ax_buffer.set_xlabel('Processor Time (s)')
         self.ax_buffer.grid(True, alpha=0.3)
         
+        # Configure rebuffer axes
         self.ax_rebuffer.set_xlabel('Processor Time (s)')
         self.ax_rebuffer.set_ylabel('Cumulative Rebuffer (s)')
         self.ax_rebuffer.set_title('Cumulative Rebuffering Time')
         self.ax_rebuffer.grid(True, alpha=0.3)
         
+        # Configure GPU memory axes
+        self.ax_gpu.set_xlabel('Processor Time (s)')
+        self.ax_gpu.set_ylabel('GPU Memory (MB)')
+        self.ax_gpu.set_title('GPU Memory Usage (nvidia-smi)')
+        self.ax_gpu.grid(True, alpha=0.3)
+        
+        # Configure CPU memory axes
+        self.ax_cpu.set_xlabel('Processor Time (s)')
+        self.ax_cpu.set_ylabel('CPU Memory (MB)')
+        self.ax_cpu.set_title('CPU Memory Usage (Process RSS)')
+        self.ax_cpu.grid(True, alpha=0.3)
+        
         # Store line objects for each conversation
         self.buffer_lines = {}
         self.rebuffer_lines = {}
+        
+        # Single line for GPU and CPU (system-wide)
+        self.gpu_line, = self.ax_gpu.plot([], [], color='#1f77b4', linewidth=2.5, 
+                                          label='GPU Memory', alpha=0.9)
+        self.cpu_line, = self.ax_cpu.plot([], [], color='#2ca02c', linewidth=2.5, 
+                                          label='CPU Memory', alpha=0.9)
         
         for cid in self.conversation_ids:
             color = self.colors[cid]
@@ -2596,6 +2692,14 @@ class LiveBufferVisualizer:
                                                               alpha=0.9)
         
         self.ax_buffer.legend(loc='upper right', fontsize=8, title='Conversation')
+        self.ax_gpu.legend(loc='upper left', fontsize=8)
+        self.ax_cpu.legend(loc='upper left', fontsize=8)
+        
+        # Initialize memory tracking lists
+        self.gpu_memory_times = []
+        self.gpu_memory_values = []
+        self.cpu_memory_times = []
+        self.cpu_memory_values = []
         
         plt.tight_layout()
         
@@ -2605,8 +2709,8 @@ class LiveBufferVisualizer:
         self.fig.savefig(self.output_path, dpi=150, bbox_inches='tight')
         print(f"📊 Live visualization initialized: {self.output_path}")
     
-    def update(self, onthefly_buffer_data):
-        """Update the visualization with current buffer data"""
+    def update(self, onthefly_buffer_data, current_time=None):
+        """Update the visualization with current buffer data and memory usage"""
         if not self.enabled:
             return
         
@@ -2641,16 +2745,41 @@ class LiveBufferVisualizer:
                 max_time = max(max_time, max(rebuffer_times))
                 max_rebuffer = max(max_rebuffer, max(rebuffer_values))
         
+        # Sample current memory usage
+        if current_time is not None:
+            gpu_mem = get_gpu_memory()
+            cpu_mem = get_cpu_memory()
+            
+            self.gpu_memory_times.append(current_time)
+            self.gpu_memory_values.append(gpu_mem)
+            self.cpu_memory_times.append(current_time)
+            self.cpu_memory_values.append(cpu_mem)
+            
+            # Update memory plots
+            self.gpu_line.set_data(self.gpu_memory_times, self.gpu_memory_values)
+            self.cpu_line.set_data(self.cpu_memory_times, self.cpu_memory_values)
+        
         # Update axis limits
         if max_time > 0:
             self.ax_buffer.set_xlim(0, max_time * 1.05)
             self.ax_rebuffer.set_xlim(0, max_time * 1.05)
+            self.ax_gpu.set_xlim(0, max_time * 1.05)
+            self.ax_cpu.set_xlim(0, max_time * 1.05)
         
         if max_buffer > 0:
             self.ax_buffer.set_ylim(0, max_buffer * 1.1)
         
         if max_rebuffer > 0:
             self.ax_rebuffer.set_ylim(0, max_rebuffer * 1.1)
+        
+        # Update memory axis limits
+        if self.gpu_memory_values:
+            max_gpu = max(self.gpu_memory_values)
+            self.ax_gpu.set_ylim(0, max_gpu * 1.1)
+        
+        if self.cpu_memory_values:
+            max_cpu = max(self.cpu_memory_values)
+            self.ax_cpu.set_ylim(0, max_cpu * 1.1)
         
         # Redraw and save
         self.fig.canvas.draw()
@@ -2686,16 +2815,50 @@ class LiveBufferVisualizer:
                 max_time = max(max_time, max(rebuffer_times))
                 max_rebuffer = max(max_rebuffer, max(rebuffer_values))
         
+        # Update memory plots (already set during live updates)
+        # Just ensure they're using the data we collected
+        if self.gpu_memory_times and self.gpu_memory_values:
+            self.gpu_line.set_data(self.gpu_memory_times, self.gpu_memory_values)
+        if self.cpu_memory_times and self.cpu_memory_values:
+            self.cpu_line.set_data(self.cpu_memory_times, self.cpu_memory_values)
+        
         # Update axis limits
         if max_time > 0:
             self.ax_buffer.set_xlim(0, max_time * 1.05)
             self.ax_rebuffer.set_xlim(0, max_time * 1.05)
+            self.ax_gpu.set_xlim(0, max_time * 1.05)
+            self.ax_cpu.set_xlim(0, max_time * 1.05)
         
         if max_buffer > 0:
             self.ax_buffer.set_ylim(0, max_buffer * 1.1)
         
         if max_rebuffer > 0:
             self.ax_rebuffer.set_ylim(0, max_rebuffer * 1.1)
+        
+        # Update memory axis limits
+        if self.gpu_memory_values:
+            max_gpu = max(self.gpu_memory_values)
+            min_gpu = min(self.gpu_memory_values)
+            self.ax_gpu.set_ylim(min_gpu * 0.95, max_gpu * 1.05)
+            
+            # Add stats text
+            avg_gpu = sum(self.gpu_memory_values) / len(self.gpu_memory_values)
+            self.ax_gpu.text(0.02, 0.98, 
+                f'Min: {min_gpu:.0f} MB\nAvg: {avg_gpu:.0f} MB\nMax: {max_gpu:.0f} MB',
+                transform=self.ax_gpu.transAxes, va='top', ha='left',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.7), fontsize=9)
+        
+        if self.cpu_memory_values:
+            max_cpu = max(self.cpu_memory_values)
+            min_cpu = min(self.cpu_memory_values)
+            self.ax_cpu.set_ylim(min_cpu * 0.95, max_cpu * 1.05)
+            
+            # Add stats text
+            avg_cpu = sum(self.cpu_memory_values) / len(self.cpu_memory_values)
+            self.ax_cpu.text(0.02, 0.98,
+                f'Min: {min_cpu:.0f} MB\nAvg: {avg_cpu:.0f} MB\nMax: {max_cpu:.0f} MB',
+                transform=self.ax_cpu.transAxes, va='top', ha='left',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.7), fontsize=9)
         
         # Save final high-quality version
         self.fig.savefig(self.output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
@@ -2904,7 +3067,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             update_buffer_to_time(buffer_state, processor_clock, listening_speed, cid)
         
         # Update live visualization with all conversations synchronized at the same time
-        live_viz.update(onthefly_buffer_data)
+        live_viz.update(onthefly_buffer_data, current_time=processor_clock)
         
         # flush out any delayed events to process prompts first
         cached_events = []
