@@ -1828,220 +1828,133 @@ def create_frame_score_analysis(all_frame_scores_data, output_dir=Config.OUTPUT_
     return output_path
 
 def create_individual_conversation_timing_plots(conversation_timings, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
-    """Create individual timing plots for each conversation with enhanced 4-plot layout"""
+    """Create unified timing plot grid: rows=conversations, columns=metric types"""
     os.makedirs(output_dir, exist_ok=True)
     
+    num_conversations = len(conversation_timings)
+    if num_conversations == 0:
+        print("⚠️ No conversation timing data available")
+        return
+    
+    # Create figure with grid: rows=conversations, columns=3 metric types
+    fig, axes = plt.subplots(num_conversations, 3, figsize=(21, 6 * num_conversations))
+    fig.suptitle(f'Conversation Timing Analysis - {data_source.upper()} Dataset', 
+                 fontsize=16, fontweight='bold')
+    
+    # Ensure axes is always 2D
+    if num_conversations == 1:
+        axes = axes.reshape(1, -1)
+    
     for i, conversation_timing in enumerate(conversation_timings):
-        conversation_number = i + 1  # Always use sequential numbering 1, 2, 3, ...
+        conversation_number = i + 1
         conversation_id = conversation_timing.get('conversation_id', f'conversation_{i+1}')
-        fig, axes = plt.subplots(1, 7, figsize=(21, 6))
-        fig.suptitle(f'Conversation {conversation_number} ({conversation_id}) - Timing Analysis', fontsize=14, fontweight='bold')
         
-        # 1. Timing components breakdown
-        ax1 = axes[0]
-        components = ['Visual Embedding', 'Model Forward', 'Generation']
+        # Get axes for this conversation (row i)
+        ax1 = axes[i, 0]  # Timing components breakdown
+        ax2 = axes[i, 1]  # Component efficiency
+        ax3 = axes[i, 2]  # Timing over time
+        
+        # Add row label
+        row_label = f"Conv {conversation_number}\n{conversation_id[:15]}"
+        ax1.text(-0.15, 0.5, row_label, transform=ax1.transAxes, 
+                fontsize=10, fontweight='bold', va='center', ha='right', rotation=0)
+        
+        # === Column 1: Timing Components Breakdown ===
+        components = ['Visual\nEmbedding', 'Model\nForward', 'Generation']
         times = [conversation_timing['visual_embedding_time'], 
                 conversation_timing['model_forward_time'], 
                 conversation_timing['generation_time']]
         colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
         
-        bars = ax1.bar(components, times, color=colors, alpha=0.8)
+        bars = ax1.bar(components, times, color=colors, alpha=0.8, edgecolor='black', linewidth=0.5)
         ax1.set_ylabel('Time (seconds)', fontsize=9)
-        ax1.set_title('Timing Components Breakdown', fontsize=10)
-        ax1.grid(True, alpha=0.3)
+        if i == 0:
+            ax1.set_title('Timing Components Breakdown', fontsize=11, fontweight='bold')
+        ax1.grid(True, alpha=0.3, axis='y')
+        ax1.tick_params(axis='x', labelsize=8)
         
         # Add value labels on bars
         for bar, time in zip(bars, times):
             height = bar.get_height()
-            ax1.text(bar.get_x() + bar.get_width()/2., height + 0.01,
-                    f'{time:.2f}s', ha='center', va='bottom')
+            ax1.text(bar.get_x() + bar.get_width()/2., height + max(times)*0.02,
+                    f'{time:.2f}s', ha='center', va='bottom', fontsize=8, fontweight='bold')
         
-        # 2. Component efficiency per frame
-        ax2 = axes[1]
+        # === Column 2: Component Efficiency per Frame ===
         if conversation_timing['frame_processing_times']:
             frame_count = len(conversation_timing['frame_processing_times'])
             
             visual_per_frame = conversation_timing['visual_embedding_time'] / frame_count
             model_per_frame = conversation_timing['model_forward_time'] / frame_count
-            generation_per_response = conversation_timing['generation_time'] / frame_count  # Per response, not per frame
+            generation_per_response = conversation_timing['generation_time'] / frame_count
             
-            components = ['Visual', 'Model', 'Generation']
+            components_short = ['Visual', 'Model', 'Gen']
             per_frame_times = [visual_per_frame, model_per_frame, generation_per_response]
-            colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
             
-            bars = ax2.bar(components, per_frame_times, color=colors, alpha=0.8)
-            ax2.set_ylabel('Time per Frame (s)')
-            ax2.set_title('Component Efficiency')
-            ax2.grid(True, alpha=0.3)
+            bars = ax2.bar(components_short, per_frame_times, color=colors, alpha=0.8, 
+                          edgecolor='black', linewidth=0.5)
+            ax2.set_ylabel('Time per Frame (s)', fontsize=9)
+            if i == 0:
+                ax2.set_title('Component Efficiency', fontsize=11, fontweight='bold')
+            ax2.grid(True, alpha=0.3, axis='y')
+            ax2.tick_params(axis='x', labelsize=8)
             
-            # Add value labels with appropriate units
-            labels = [f'{visual_per_frame*1000:.1f}ms/frame', f'{model_per_frame*1000:.1f}ms/frame', f'{generation_per_response*1000:.1f}ms/response']
+            # Add value labels with units
+            labels = [f'{visual_per_frame*1000:.1f}ms', 
+                     f'{model_per_frame*1000:.1f}ms', 
+                     f'{generation_per_response*1000:.1f}ms']
             for bar, time, label in zip(bars, per_frame_times, labels):
                 height = bar.get_height()
-                ax2.text(bar.get_x() + bar.get_width()/2., height + 0.0001,
-                        label, ha='center', va='bottom', fontsize=9)
+                ax2.text(bar.get_x() + bar.get_width()/2., height + max(per_frame_times)*0.02,
+                        label, ha='center', va='bottom', fontsize=8, fontweight='bold')
         
-        # 3. Timing components over time
-        ax3 = axes[2]
+        # === Column 3: Timing Components Over Time ===
         frame_timing_data = conversation_timing.get('frame_timing_data', [])
         
         if frame_timing_data:
             # Extract timing data
             video_times = [data['video_time'] for data in frame_timing_data]
-            visual_times = [data['visual_embedding_time'] * 1000 for data in frame_timing_data]  # Convert to ms
-            model_times = [data['model_forward_time'] * 1000 for data in frame_timing_data]  # Convert to ms
-            generation_times = [data['generation_time'] * 1000 for data in frame_timing_data]  # Convert to ms
+            visual_times = [data['visual_embedding_time'] * 1000 for data in frame_timing_data]
+            model_times = [data['model_forward_time'] * 1000 for data in frame_timing_data]
+            generation_times = [data['generation_time'] * 1000 for data in frame_timing_data]
             
             # Plot timing components over time
-            ax3.plot(video_times, visual_times, 'b-', linewidth=1.5, alpha=0.8, label='Visual Embedding (ms)')
-            ax3.plot(video_times, model_times, 'orange', linewidth=1.5, alpha=0.8, label='Model Forward (ms)')
-            ax3.plot(video_times, generation_times, 'g-', linewidth=1.5, alpha=0.8, label='Generation (ms)')
+            ax3.plot(video_times, visual_times, color='#1f77b4', linewidth=1.5, 
+                    alpha=0.8, label='Visual Emb')
+            ax3.plot(video_times, model_times, color='#ff7f0e', linewidth=1.5, 
+                    alpha=0.8, label='Model Fwd')
+            ax3.plot(video_times, generation_times, color='#2ca02c', linewidth=1.5, 
+                    alpha=0.8, label='Generation')
             
-            ax3.set_xlabel('Video Time (seconds)')
-            ax3.set_ylabel('Time per Frame (ms)')
-            ax3.set_title('Timing Components Over Time', fontsize=10)
+            ax3.set_xlabel('Video Time (seconds)', fontsize=9)
+            ax3.set_ylabel('Time per Frame (ms)', fontsize=9)
+            if i == 0:
+                ax3.set_title('Timing Components Over Time', fontsize=11, fontweight='bold')
             ax3.grid(True, alpha=0.3)
-            ax3.legend(fontsize=7)
+            ax3.legend(fontsize=7, loc='upper right')
             
-            # Add some statistics
+            # Add statistics in a compact format
             avg_visual = np.mean(visual_times)
             avg_model = np.mean(model_times)
             avg_generation = np.mean(generation_times)
             
-            stats_text = f'Avg Visual: {avg_visual:.1f}ms\nAvg Model: {avg_model:.1f}ms\nAvg Gen: {avg_generation:.1f}ms'
+            stats_text = f'Avg: V={avg_visual:.1f} M={avg_model:.1f} G={avg_generation:.1f}ms'
             ax3.text(0.02, 0.98, stats_text, transform=ax3.transAxes, 
-                    verticalalignment='top', fontsize=8,
-                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+                    verticalalignment='top', fontsize=7,
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
         else:
-            print(f"No frame processing times available for conversation {conversation_number}")
-            exit(0)
-        
-        # 4. Rebuffering time over time
-        ax4 = axes[3]
-        rebuffering_times = conversation_timing.get('rebuffering_times', [])
-        
-        if rebuffering_times:
-            frame_indices = range(len(rebuffering_times))
-            video_times = [i / Config.FRAME_FPS for i in frame_indices]  # Convert frame index to time
-            
-            # Plot rebuffering time over time
-            ax4.plot(video_times, rebuffering_times, 'r-', linewidth=2, alpha=0.8, label='Rebuffering Time')
-            ax4.fill_between(video_times, rebuffering_times, alpha=0.3, color='red')
-            
-            ax4.set_xlabel('Video Time (seconds)')
-            ax4.set_ylabel('Rebuffering Time (seconds)')
-            ax4.set_title('Rebuffering Time Over Time', fontsize=10)
-            ax4.grid(True, alpha=0.3)
-            ax4.legend(fontsize=7)
-            
-            # Add statistics
-            total_rebuffering = sum(rebuffering_times)
-            avg_rebuffering = np.mean(rebuffering_times)
-            max_rebuffering = max(rebuffering_times)
-            
-            stats_text = f'Total: {total_rebuffering:.3f}s\nAvg: {avg_rebuffering:.3f}s\nMax: {max_rebuffering:.3f}s'
-            ax4.text(0.02, 0.98, stats_text, transform=ax4.transAxes, 
-                    verticalalignment='top', fontsize=8,
-                    bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.8))
-        else:
-            ax4.text(0.5, 0.5, 'No rebuffering data available', ha='center', va='center', transform=ax4.transAxes)
-            ax4.set_title('Rebuffering Time Over Time', fontsize=10)
-        
-        # 5. Reading rebuffering time over time
-        ax5 = axes[4]
-        reading_rebuffering_times = conversation_timing.get('reading_rebuffering_times', [])
-        
-        if reading_rebuffering_times:
-            frame_indices = range(len(reading_rebuffering_times))
-            video_times = [i / Config.FRAME_FPS for i in frame_indices]
-            
-            ax5.plot(video_times, reading_rebuffering_times, 'b-', linewidth=2, alpha=0.8, label='Reading Rebuffering')
-            ax5.fill_between(video_times, reading_rebuffering_times, alpha=0.3, color='blue')
-            
-            ax5.set_xlabel('Video Time (seconds)')
-            ax5.set_ylabel('Reading Rebuffering (seconds)')
-            ax5.set_title('Reading Rebuffering Over Time', fontsize=10)
-            ax5.grid(True, alpha=0.3)
-            ax5.legend(fontsize=7)
-            
-            total_reading = sum(reading_rebuffering_times)
-            avg_reading = np.mean(reading_rebuffering_times)
-            max_reading = max(reading_rebuffering_times)
-            
-            stats_text = f'Total: {total_reading:.3f}s\nAvg: {avg_reading:.3f}s\nMax: {max_reading:.3f}s'
-            ax5.text(0.02, 0.98, stats_text, transform=ax5.transAxes, 
-                    verticalalignment='top', fontsize=8,
-                    bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
-        else:
-            ax5.text(0.5, 0.5, 'No reading rebuffering data', ha='center', va='center', transform=ax5.transAxes)
-            ax5.set_title('Reading Rebuffering Over Time', fontsize=10)
-        
-        # 6. Listening rebuffering time over time
-        ax6 = axes[5]
-        listening_rebuffering_times = conversation_timing.get('listening_rebuffering_times', [])
-        
-        if listening_rebuffering_times:
-            frame_indices = range(len(listening_rebuffering_times))
-            video_times = [i / Config.FRAME_FPS for i in frame_indices]
-            
-            ax6.plot(video_times, listening_rebuffering_times, 'g-', linewidth=2, alpha=0.8, label='Listening Rebuffering')
-            ax6.fill_between(video_times, listening_rebuffering_times, alpha=0.3, color='green')
-            
-            ax6.set_xlabel('Video Time (seconds)')
-            ax6.set_ylabel('Listening Rebuffering (seconds)')
-            ax6.set_title('Listening Rebuffering Over Time', fontsize=10)
-            ax6.grid(True, alpha=0.3)
-            ax6.legend(fontsize=7)
-            
-            total_listening = sum(listening_rebuffering_times)
-            avg_listening = np.mean(listening_rebuffering_times)
-            max_listening = max(listening_rebuffering_times)
-            
-            stats_text = f'Total: {total_listening:.3f}s\nAvg: {avg_listening:.3f}s\nMax: {max_listening:.3f}s'
-            ax6.text(0.02, 0.98, stats_text, transform=ax6.transAxes, 
-                    verticalalignment='top', fontsize=8,
-                    bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
-        else:
-            ax6.text(0.5, 0.5, 'No listening rebuffering data', ha='center', va='center', transform=ax6.transAxes)
-            ax6.set_title('Listening Rebuffering Over Time', fontsize=10)
-        
-        # 7. Resource utilization over time
-        ax7 = axes[6]
-        resource_utilization_times = conversation_timing.get('resource_utilization_times', [])
-        
-        if resource_utilization_times:
-            frame_indices = range(len(resource_utilization_times))
-            video_times = [i / Config.FRAME_FPS for i in frame_indices]
-            
-            ax7.plot(video_times, resource_utilization_times, 'm-', linewidth=2, alpha=0.8, label='Resource Utilization')
-            ax7.fill_between(video_times, resource_utilization_times, alpha=0.3, color='magenta')
-            
-            ax7.set_xlabel('Video Time (seconds)')
-            ax7.set_ylabel('Resource Utilization')
-            ax7.set_title('Resource Utilization Over Time', fontsize=10)
-            ax7.grid(True, alpha=0.3)
-            ax7.legend(fontsize=7)
-            
-            # Add horizontal line at 1.0 (100% utilization)
-            ax7.axhline(y=1.0, color='red', linestyle='--', alpha=0.7, label='100% Utilization')
-            
-            final_utilization = resource_utilization_times[-1] if resource_utilization_times else 0.0
-            avg_utilization = np.mean(resource_utilization_times)
-            max_utilization = max(resource_utilization_times)
-            
-            stats_text = f'Final: {final_utilization:.3f}\nAvg: {avg_utilization:.3f}\nMax: {max_utilization:.3f}'
-            ax7.text(0.02, 0.98, stats_text, transform=ax7.transAxes, 
-                    verticalalignment='top', fontsize=8,
-                    bbox=dict(boxstyle='round', facecolor='lightpink', alpha=0.8))
-        else:
-            ax7.text(0.5, 0.5, 'No resource utilization data', ha='center', va='center', transform=ax7.transAxes)
-            ax7.set_title('Resource Utilization Over Time', fontsize=10)
-        
-        plt.tight_layout(pad=2.0)
-        plt.savefig(os.path.join(output_dir, f'conversation_{conversation_number}_timing_{data_source}.png'), dpi=300, bbox_inches='tight')
-        plt.close()
+            ax3.text(0.5, 0.5, 'No timing data', ha='center', va='center', 
+                    transform=ax3.transAxes, fontsize=10)
+            if i == 0:
+                ax3.set_title('Timing Components Over Time', fontsize=11, fontweight='bold')
     
-    print(f"📊 Individual conversation timing plots saved to {output_dir}/")
+    plt.tight_layout(rect=[0.02, 0, 1, 0.98])
+    
+    # Save unified plot
+    output_path = os.path.join(output_dir, f'all_conversations_timing_{data_source}.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"📊 Unified conversation timing plot saved to: {output_path}")
 
 class EventDrivenConversationContext:
     def __init__(self, conversation_idx, conversation_data, video_path, dataset, device, data_source, custom_threshold, conversation_start_time, model, tokenizer, model_memory_mb):
