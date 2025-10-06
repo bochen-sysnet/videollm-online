@@ -71,13 +71,13 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 300            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -562,33 +562,20 @@ class FilteredEgo4DRefinedNarrationStream:
                         })
                     
                     # Normalize timestamps: find first user prompt time and subtract it from all times
-                    user_times = [turn['time'] for turn in conversation if turn['role'] == 'user']
-                    if user_times:
-                        first_user_time = min(user_times)
-                        normalized_conversation = []
-                        for turn in conversation:
-                            normalized_turn = {
-                                'role': turn['role'],
-                                'content': turn['content'],
-                                'time': max(0.0, turn['time'] - first_user_time),  # Ensure no negative times
-                                'original_time': turn['time']  # Keep original time for visualization
-                            }
-                            normalized_conversation.append(normalized_turn)
-                        
-                        # Store the offset for converting back to original timestamps
-                        self.goalstep_timestamp_offsets[video_uid] = first_user_time
-                    else:
-                        # If no user prompts, keep original times
-                        normalized_conversation = []
-                        for turn in conversation:
-                            normalized_turn = {
-                                'role': turn['role'],
-                                'content': turn['content'],
-                                'time': turn['time'],
-                                'original_time': turn['time']
-                            }
-                            normalized_conversation.append(normalized_turn)
-                        self.goalstep_timestamp_offsets[video_uid] = 0.0
+                    user_times = [turn['time'] for turn in conversation]
+                    first_user_time = min(user_times)
+                    normalized_conversation = []
+                    for turn in conversation:
+                        normalized_turn = {
+                            'role': turn['role'],
+                            'content': turn['content'],
+                            'time': max(0.0, turn['time'] - first_user_time),  # Ensure no negative times
+                            'original_time': turn['time']  # Keep original time for visualization
+                        }
+                        normalized_conversation.append(normalized_turn)
+                    
+                    # Store the offset for converting back to original timestamps
+                    self.goalstep_timestamp_offsets[conversation_id] = first_user_time
                     
                     if video_uid not in self.data:
                         self.data[video_uid] = {}
@@ -682,7 +669,7 @@ class FilteredEgo4DRefinedNarrationStream:
                                 'end_time': end_time,
                                 'duration': duration,
                                 'original_conversation': self.goalstep_conversations[video_uid][conversation_id],  # Keep original for metrics
-                                'timestamp_offset': self.goalstep_timestamp_offsets.get(video_uid, 0.0)
+                                'timestamp_offset': self.goalstep_timestamp_offsets.get(conversation_id, 0.0)
                             })
         
         # Calculate statistics
@@ -898,31 +885,6 @@ def canonical_device(device):
         return device
     return torch.device(device)
 
-
-
-def calculate_max_frames_for_memory():
-    """Calculate maximum frames that can be processed based on available GPU memory"""
-    memory_info = get_gpu_memory_info()
-    if not memory_info:
-        return Config.MIN_FRAMES_LIMIT  # Default fallback
-    
-    # With CPU-loaded videos, memory growth comes from:
-    # 1. Model weights (~8GB) - fixed
-    # 2. KV cache (attention cache) - grows with sequence length
-    # 3. Visual tokens - grows with number of frames processed
-    # 4. Temporary frame processing - small and constant
-    
-    # Reserve memory for model and operations
-    available_memory = max(0, memory_info['free_mb'] - Config.DEFAULT_GPU_MEMORY_RESERVE_MB)
-    
-    # Calculate max frames with safety margin
-    max_frames = int(available_memory * Config.MEMORY_SAFETY_MARGIN / Config.MEMORY_GROWTH_PER_FRAME_MB)
-    
-    # Apply limits
-    max_frames = min(max_frames, Config.MAX_FRAMES_LIMIT)
-    max_frames = max(max_frames, Config.MIN_FRAMES_LIMIT)
-    
-    return max_frames
 
 def print_memory_status(prefix="💾", context="GPU Memory"):
     """Print current GPU memory status with consistent formatting"""
@@ -1992,14 +1954,21 @@ class EventDrivenConversationContext:
                 user_prompt = "Please concisely narrate the video in real time."
             self.user_prompts = [(0.0, user_prompt)]
 
-        video_frames, _, _ = read_video(video_path, pts_unit='sec', output_format='TCHW')
+        # Calculate how many frames we actually need for testing
+        conversation_based_limit = int(self.duration * Config.FRAME_FPS)
+        self.test_frames = min(conversation_based_limit, Config.MAX_EVAL_FRAMES-1)
+        test_duration = self.test_frames / Config.FRAME_FPS
+        self.num_frames = int(self.duration * Config.FRAME_FPS)
+        
+        # Read only the frames we need to save CPU memory
+        start_time = conversation_data['start_time']
+        end_time = test_duration + start_time
+        video_frames, _, _ = read_video(video_path, pts_unit='sec', output_format='TCHW', start_pts=start_time, end_pts=end_time)
+        self.test_frames = video_frames.size(0)
+        
+        # Only keep the frames we need for testing
         self.video_frames = video_frames
-        self.num_frames = self.video_frames.size(0)
-        self.video_duration = self.num_frames / Config.FRAME_FPS
-
-        conversation_based_limit = int(self.duration * Config.FRAME_FPS) + 50
-        memory_based_limit = calculate_max_frames_for_memory()
-        self.test_frames = min(self.num_frames, conversation_based_limit, memory_based_limit, Config.MAX_EVAL_FRAMES)
+        print(f"📹 Loaded all {self.test_frames} frames for {self.conversation_id[0:12]} to CPU: {self.video_frames.shape} ({self.video_frames.device})")
 
         self.total_visual_embedding_time = 0.0
         self.total_model_forward_time = 0.0
@@ -2155,8 +2124,8 @@ class EventDrivenConversationContext:
             liveinfer.reset()
             liveinfer.set_conversation_context(self.conversation_id)  # Set conversation context for feature tracking
             liveinfer.load_video(self.video_path)
-            if isinstance(self.video_frames, torch.Tensor):
-                liveinfer.video_tensor = self.video_frames
+            assert isinstance(self.video_frames, torch.Tensor), f"video_frames is not a torch.Tensor: {type(self.video_frames)}"
+            liveinfer.video_tensor = self.video_frames
             self.initial_memory = get_gpu_memory()
         else:
             liveinfer.restore_state(self.liveinfer_state)
@@ -3679,13 +3648,13 @@ class SimpleLiveInfer:
         
         # Load video to CPU memory first to avoid GPU OOM
         # print(f"📹 Loading video to CPU memory: {video_path}")
-        video_reader = read_video(video_path, pts_unit='sec', output_format='TCHW')
-        self.num_video_frames = video_reader[0].size(0)
-        self.video_duration = self.num_video_frames / self.frame_fps
+        # video_reader = read_video(video_path, pts_unit='sec', output_format='TCHW')
+        # self.num_video_frames = video_reader[0].size(0)
+        # self.video_duration = self.num_video_frames / self.frame_fps
         
         # Store video tensor on CPU to avoid GPU memory issues
-        self.video_tensor = video_reader[0]  # Keep on CPU
-        print(f"📹 Video loaded to CPU: {self.video_tensor.shape} ({self.video_tensor.device})")
+        # self.video_tensor = video_reader[0]  # Keep on CPU
+        # print(f"📹 Video loaded to CPU: {self.video_tensor.shape} ({self.video_tensor.device})")
         
         # logger = transformers.logging.get_logger('liveinfer')
         # logger.warning(f'{video_path} -> {self.video_tensor.shape}, {self.frame_fps} FPS (CPU streaming mode)')
