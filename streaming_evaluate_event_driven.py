@@ -71,13 +71,13 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 300            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -2881,16 +2881,19 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
     active_conversation_id = None
     
     # Helper functions for on-the-fly buffer tracking (following simulate_text_buffer_trajectories logic)
-    def update_buffer_to_time(buffer_state, target_time, speed, conversation_id):
+    def update_buffer_to_time(buffer_state, target_time, speed, conversation_id, oom_occurred=False):
         """Advance buffer simulation to target_time, consuming buffer at speed and accumulating rebuffering
         
         Args:
             buffer_state: Current buffer state dictionary
             target_time: Time to advance to
             speed: Consumption speed (words/second)
-            data_source_type: 'narration' or 'goalstep'
-            event_type: Type of event we're advancing to ('chunk', 'prompt', 'frame', etc.)
+            conversation_id: ID of the conversation
+            oom_occurred: Whether OOM has occurred for this conversation
         """
+        # Skip buffer updates if OOM has occurred
+        if oom_occurred:
+            return
         current_time = buffer_state['last_update_time']
         current_buffer = buffer_state['buffer']
         rebuffer_total = buffer_state['total_rebuffer']
@@ -2979,7 +2982,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         # Update all conversations' buffer states to the next event time
         # This advances the buffer simulation for ALL conversations to the same point in time
         for cid, buffer_state in onthefly_buffer_data.items():
-            update_buffer_to_time(buffer_state, processor_clock, listening_speed, cid)
+            context = contexts.get(cid)
+            oom_occurred = context.oom_occurred if context else False
+            update_buffer_to_time(buffer_state, processor_clock, listening_speed, cid, oom_occurred)
         
         # Update live visualization with all conversations synchronized at the same time
         live_viz.update(onthefly_buffer_data, current_time=processor_clock)
@@ -3079,19 +3084,25 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             processor_clock = max(processor_clock, event_time)
             # Update buffer to current processor_clock before handling prompt
             buffer_state = onthefly_buffer_data[conversation_id]
-            update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id)
+            update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred)
             
-            buffer_state['pending_responses'].add(context.response_expected)
-            context.response_expected += 1
-            buffer_state['unanswered_prompts'] += 1
-            context.received_prompt_cnt += 1
+            # Skip buffer updates if OOM has occurred
+            if not context.oom_occurred:
+                buffer_state['pending_responses'].add(context.response_expected)
+                context.response_expected += 1
+                buffer_state['unanswered_prompts'] += 1
+                context.received_prompt_cnt += 1
 
-            # Record buffer state after adding words
-            buffer_state['buffer'] = 0.0
-            buffer_state['times'].append(processor_clock)
-            buffer_state['values'].append(0.0)
-            buffer_state['rebuffer_times'].append(processor_clock)
-            buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+                # Record buffer state after adding words
+                buffer_state['buffer'] = 0.0
+                buffer_state['times'].append(processor_clock)
+                buffer_state['values'].append(0.0)
+                buffer_state['rebuffer_times'].append(processor_clock)
+                buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+            else:
+                # Still update conversation counters even if OOM occurred
+                context.response_expected += 1
+                context.received_prompt_cnt += 1
             
             context.handle_prompt(shared_liveinfer, relative_time, payload_data)
             shared_liveinfer.generation_event_pending = context.generation_event_pending
@@ -3132,6 +3143,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 })
                 # print(f"🔍 DEBUG: Created processor segment for {segment_label}: start={start_time:.2f}s, end={segment_end:.2f}s")
             processor_clock = start_time + total_duration
+
+            if context.oom_occurred:
+                continue
             
             # Check if text was generated and update buffer
             if context.event_log:
@@ -3147,7 +3161,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     response_idx = last_event.get('response_idx', 0)
                     
                     # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
-                    update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id)
+                    update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred)
                     
                     is_last_chunk = last_event.get('is_last_chunk', False)
                     is_first_chunk = last_event.get('is_first_chunk', False)
@@ -3158,21 +3172,27 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                         context.processed_prompt_cnt += 1
                                         
                     # Add words to buffer (happens at chunk completion time)
-                    if context.processed_prompt_cnt == context.received_prompt_cnt:
-                        buffer_state['buffer'] += word_count
-                    if is_first_chunk:
-                        buffer_state['unanswered_prompts'] -= 1
-                        if not is_last_chunk and last_event.get('trigger_method') == 'score':
-                            buffer_state['pending_responses'].add(context.response_expected)
-                            context.response_expected += 1
-                    if is_last_chunk:
-                        buffer_state['pending_responses'].discard(response_idx)
-                        
-                    # Record buffer state after adding words
-                    buffer_state['times'].append(processor_clock)
-                    buffer_state['values'].append(buffer_state['buffer'])
-                    buffer_state['rebuffer_times'].append(processor_clock)
-                    buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+                    if not context.oom_occurred:
+                        if context.processed_prompt_cnt == context.received_prompt_cnt:
+                            buffer_state['buffer'] += word_count
+                        if is_first_chunk:
+                            buffer_state['unanswered_prompts'] -= 1
+                            if not is_last_chunk and last_event.get('trigger_method') == 'score':
+                                buffer_state['pending_responses'].add(context.response_expected)
+                                context.response_expected += 1
+                        if is_last_chunk:
+                            buffer_state['pending_responses'].discard(response_idx)
+                            
+                        # Record buffer state after adding words
+                        buffer_state['times'].append(processor_clock)
+                        buffer_state['values'].append(buffer_state['buffer'])
+                        buffer_state['rebuffer_times'].append(processor_clock)
+                        buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+                    else:
+                        # Still update conversation counters even if OOM occurred
+                        if is_first_chunk:
+                            if not is_last_chunk and last_event.get('trigger_method') == 'score':
+                                context.response_expected += 1
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
@@ -3207,6 +3227,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                 })
                 # print(f"🔍 DEBUG: Created generation segment for {segment_label}: start={start_time:.2f}s, end={segment_end:.2f}s")
             processor_clock = start_time + max(0.0, generation_duration)
+
+            if context.oom_occurred:
+                continue
             
             # Check if text was generated and update buffer
             if context.event_log:
@@ -3222,27 +3245,35 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
                     response_idx = last_event.get('response_idx', 0)
                     
                     # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
-                    update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id)
+                    update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred)
 
                     # Add words to buffer (happens at chunk completion time)
-                    if context.processed_prompt_cnt == context.received_prompt_cnt:
-                        buffer_state['buffer'] += word_count
-                    
-                    is_last_chunk = last_event.get('is_last_chunk', False)
-                    is_first_chunk = last_event.get('is_first_chunk', False)
-                    if is_first_chunk:
-                        buffer_state['unanswered_prompts'] -= 1
-                        if not is_last_chunk and last_event.get('trigger_method') == 'score':
-                            buffer_state['pending_responses'].add(context.response_expected)
-                            context.response_expected += 1
-                    if is_last_chunk:
-                        buffer_state['pending_responses'].discard(response_idx)
+                    if not context.oom_occurred:
+                        if context.processed_prompt_cnt == context.received_prompt_cnt:
+                            buffer_state['buffer'] += word_count
+                        
+                        is_last_chunk = last_event.get('is_last_chunk', False)
+                        is_first_chunk = last_event.get('is_first_chunk', False)
+                        if is_first_chunk:
+                            buffer_state['unanswered_prompts'] -= 1
+                            if not is_last_chunk and last_event.get('trigger_method') == 'score':
+                                buffer_state['pending_responses'].add(context.response_expected)
+                                context.response_expected += 1
+                        if is_last_chunk:
+                            buffer_state['pending_responses'].discard(response_idx)
 
-                    # Record buffer state after adding words
-                    buffer_state['times'].append(processor_clock)
-                    buffer_state['values'].append(buffer_state['buffer'])
-                    buffer_state['rebuffer_times'].append(processor_clock)
-                    buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+                        # Record buffer state after adding words
+                        buffer_state['times'].append(processor_clock)
+                        buffer_state['values'].append(buffer_state['buffer'])
+                        buffer_state['rebuffer_times'].append(processor_clock)
+                        buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+                    else:
+                        # Still update conversation counters even if OOM occurred
+                        is_last_chunk = last_event.get('is_last_chunk', False)
+                        is_first_chunk = last_event.get('is_first_chunk', False)
+                        if is_first_chunk:
+                            if not is_last_chunk and last_event.get('trigger_method') == 'score':
+                                context.response_expected += 1
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
@@ -3263,7 +3294,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
     
     # Update all conversations to the final processor_clock time
     for cid, buffer_state in onthefly_buffer_data.items():
-        update_buffer_to_time(buffer_state, processor_clock, listening_speed, cid)
+        context = contexts.get(cid)
+        oom_occurred = context.oom_occurred if context else False
+        update_buffer_to_time(buffer_state, processor_clock, listening_speed, cid, oom_occurred)
     
     # Finalize each conversation and collect results
     for cid, context in contexts.items():
