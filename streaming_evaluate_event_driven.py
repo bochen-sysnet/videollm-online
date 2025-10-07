@@ -77,7 +77,7 @@ class Config:
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -2388,18 +2388,6 @@ class EventDrivenConversationContext:
             'type': 'conversation_end',
             'conversation_id': self.conversation_id
         })
-
-        # Create buffer simulation data for this conversation
-        # conversation_summary = {
-        #     'conversation_id': self.conversation_id,
-        #     'label': self.conversation_id,
-        #     'start': self.conversation_start_time,
-        #     'events': self.event_log
-        # }
-        # print("Event log:")
-        # for event in self.event_log:
-        #     if event.get('type') == 'response':
-        #         print(event)
         
         # Create processor segments for this conversation
         processor_segments = []
@@ -2411,15 +2399,6 @@ class EventDrivenConversationContext:
                     'end': event.get('time', 0.0),
                     'generation_duration': event.get('generation_duration', 0.0)
                 })
-        
-        # Simulate buffer trajectories
-        # buffer_data = simulate_text_buffer_trajectories(
-        #     processor_segments,
-        #     [conversation_summary],
-        #     Config.USER_READING_SPEED_MAX,
-        #     Config.USER_LISTENING_SPEED_MAX,
-        #     self.data_source
-        # )
 
         self.result = {
             'conversation_id': self.conversation_id,
@@ -3256,6 +3235,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
     if all_frame_features_data:
         print(f"\n📊 Creating frame features vs response length visualization with {len(all_frame_features_data)} frames...")
         create_frame_features_vs_response_length_visualization(all_frame_features_data, data_source=data_source)
+    
+    # Create response length distribution analysis
+    print(f"\n📊 Creating response length distribution analysis...")
+    create_response_length_distribution_analysis(results, data_source=data_source)
     
     # Convert on-the-fly buffer data to standard format (only listening mode)
     buffer_data = {}
@@ -5529,6 +5512,221 @@ Latency: {latency_mean:.3f}±{latency_std:.3f}s"""
     print(f"   • Listening Rebuffering: {listening_rebuffer_mean:.3f} ± {listening_rebuffer_std:.3f}s (from {len(listening_rebuffering_times)} conversations)")
     print(f"   • Fluency: {fluency_mean:.3f} ± {fluency_std:.3f}")
     print(f"   • Latency: {latency_mean:.3f} ± {latency_std:.3f}s")
+
+
+def create_response_length_distribution_analysis(results, output_dir="timing_plots", data_source="goalstep"):
+    """Create analysis and visualization of response length distribution from generated_turns."""
+    if not results:
+        print("⚠️ No results data available for response length analysis")
+        return
+    
+    # Extract all response lengths from generated_turns across all conversations
+    all_response_lengths = []
+    conversation_response_lengths = {}
+    
+    for result in results:
+        conversation_id = result['conversation_id']
+        generated_turns = result.get('generated_turns', [])
+        
+        conv_lengths = []
+        for turn in generated_turns:
+            if turn.get('text'):
+                # Count words in the response text
+                word_count = len(re.findall(r"\b\w+\b", turn['text']))
+                all_response_lengths.append(word_count)
+                conv_lengths.append(word_count)
+        
+        if conv_lengths:
+            conversation_response_lengths[conversation_id] = conv_lengths
+    
+    if not all_response_lengths:
+        print("⚠️ No response text found in generated_turns")
+        return
+    
+    # Create comprehensive analysis figure
+    fig = plt.figure(figsize=(20, 12))
+    
+    # 1. Overall response length distribution (histogram)
+    ax1 = plt.subplot(2, 4, 1)
+    plt.hist(all_response_lengths, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+    plt.xlabel('Response Length (words)')
+    plt.ylabel('Frequency')
+    plt.title('Distribution of Response Lengths')
+    plt.grid(True, alpha=0.3)
+    
+    # Add statistics
+    mean_length = np.mean(all_response_lengths)
+    median_length = np.median(all_response_lengths)
+    std_length = np.std(all_response_lengths)
+    plt.axvline(mean_length, color='red', linestyle='--', label=f'Mean: {mean_length:.1f}')
+    plt.axvline(median_length, color='orange', linestyle='--', label=f'Median: {median_length:.1f}')
+    plt.legend()
+    
+    # 2. Box plot of response lengths by conversation
+    ax2 = plt.subplot(2, 4, 2)
+    conversation_ids = list(conversation_response_lengths.keys())
+    conversation_ids.sort()
+    
+    lengths_by_conversation = []
+    for conv_id in conversation_ids:
+        lengths_by_conversation.append(conversation_response_lengths[conv_id])
+    
+    plt.boxplot(lengths_by_conversation, labels=[f'Conv {i+1}' for i in range(len(conversation_ids))])
+    plt.xlabel('Conversation')
+    plt.ylabel('Response Length (words)')
+    plt.title('Response Length Distribution by Conversation')
+    plt.xticks(rotation=45)
+    plt.grid(True, alpha=0.3)
+    
+    # 3. Cumulative distribution
+    ax3 = plt.subplot(2, 4, 3)
+    sorted_lengths = np.sort(all_response_lengths)
+    cumulative = np.arange(1, len(sorted_lengths) + 1) / len(sorted_lengths)
+    plt.plot(sorted_lengths, cumulative, 'b-', linewidth=2)
+    plt.xlabel('Response Length (words)')
+    plt.ylabel('Cumulative Probability')
+    plt.title('Cumulative Distribution of Response Lengths')
+    plt.grid(True, alpha=0.3)
+    
+    # Add percentiles
+    p50 = np.percentile(all_response_lengths, 50)
+    p90 = np.percentile(all_response_lengths, 90)
+    p95 = np.percentile(all_response_lengths, 95)
+    plt.axvline(p50, color='red', linestyle='--', alpha=0.7, label=f'50th: {p50:.1f}')
+    plt.axvline(p90, color='orange', linestyle='--', alpha=0.7, label=f'90th: {p90:.1f}')
+    plt.axvline(p95, color='purple', linestyle='--', alpha=0.7, label=f'95th: {p95:.1f}')
+    plt.legend()
+    
+    # 4. Response length vs time (scatter plot)
+    ax4 = plt.subplot(2, 4, 4)
+    response_times = []
+    response_lengths_time = []
+    
+    for result in results:
+        generated_turns = result.get('generated_turns', [])
+        for turn in generated_turns:
+            if turn.get('text'):
+                word_count = len(re.findall(r"\b\w+\b", turn['text']))
+                response_times.append(turn.get('time', 0))
+                response_lengths_time.append(word_count)
+    
+    if response_times and response_lengths_time:
+        plt.scatter(response_times, response_lengths_time, alpha=0.6, color='green')
+        plt.xlabel('Time (seconds)')
+        plt.ylabel('Response Length (words)')
+        plt.title('Response Length Over Time')
+        plt.grid(True, alpha=0.3)
+        
+        # Add trend line
+        if len(response_times) > 1:
+            z = np.polyfit(response_times, response_lengths_time, 1)
+            p = np.poly1d(z)
+            plt.plot(response_times, p(response_times), "r--", alpha=0.8, label=f'Trend: {z[0]:.3f}x + {z[1]:.1f}')
+            plt.legend()
+    
+    # 5. Log-scale histogram (for better visualization if there's wide range)
+    ax5 = plt.subplot(2, 4, 5)
+    plt.hist(all_response_lengths, bins=30, alpha=0.7, color='lightcoral', edgecolor='black')
+    plt.xlabel('Response Length (words)')
+    plt.ylabel('Frequency')
+    plt.title('Response Length Distribution (Log Scale)')
+    plt.yscale('log')
+    plt.grid(True, alpha=0.3)
+    
+    # 6. Response length vs generation time
+    ax6 = plt.subplot(2, 4, 6)
+    generation_times = []
+    response_lengths_gen = []
+    
+    for result in results:
+        generated_turns = result.get('generated_turns', [])
+        for turn in generated_turns:
+            if turn.get('text'):
+                word_count = len(re.findall(r"\b\w+\b", turn['text']))
+                gen_time = turn.get('generation_time', 0)
+                generation_times.append(gen_time)
+                response_lengths_gen.append(word_count)
+    
+    if generation_times and response_lengths_gen:
+        plt.scatter(generation_times, response_lengths_gen, alpha=0.6, color='purple')
+        plt.xlabel('Generation Time (seconds)')
+        plt.ylabel('Response Length (words)')
+        plt.title('Response Length vs Generation Time')
+        plt.grid(True, alpha=0.3)
+        
+        # Add correlation
+        if len(generation_times) > 1:
+            correlation = np.corrcoef(generation_times, response_lengths_gen)[0, 1]
+            plt.text(0.05, 0.95, f'Correlation: {correlation:.3f}', 
+                    transform=ax6.transAxes, bbox=dict(boxstyle="round", facecolor='wheat'))
+    
+    # 7. Violin plot for better distribution visualization
+    ax7 = plt.subplot(2, 4, 7)
+    if len(conversation_ids) > 1:
+        data_for_violin = [conversation_response_lengths[conv_id] for conv_id in conversation_ids]
+        parts = plt.violinplot(data_for_violin, positions=range(1, len(conversation_ids) + 1), 
+                              showmeans=True, showmedians=True)
+        plt.xlabel('Conversation')
+        plt.ylabel('Response Length (words)')
+        plt.title('Response Length Distribution (Violin Plot)')
+        plt.xticks(range(1, len(conversation_ids) + 1), [f'Conv {i+1}' for i in range(len(conversation_ids))], rotation=45)
+        plt.grid(True, alpha=0.3)
+    else:
+        plt.text(0.5, 0.5, 'Need multiple\nconversations\nfor violin plot', 
+                ha='center', va='center', transform=ax7.transAxes)
+        plt.title('Response Length Distribution (Violin Plot)')
+    
+    # 8. Summary statistics table
+    ax8 = plt.subplot(2, 4, 8)
+    ax8.axis('off')
+    
+    # Calculate comprehensive statistics
+    stats_text = f"""
+    Response Length Analysis Summary
+    
+    Total Responses: {len(all_response_lengths)}
+    Total Conversations: {len(conversation_ids)}
+    
+    Length Statistics (words):
+    • Mean: {mean_length:.1f}
+    • Median: {median_length:.1f}
+    • Std Dev: {std_length:.1f}
+    • Min: {min(all_response_lengths)}
+    • Max: {max(all_response_lengths)}
+    
+    Percentiles (words):
+    • 25th: {np.percentile(all_response_lengths, 25):.1f}
+    • 50th: {p50:.1f}
+    • 75th: {np.percentile(all_response_lengths, 75):.1f}
+    • 90th: {p90:.1f}
+    • 95th: {p95:.1f}
+    • 99th: {np.percentile(all_response_lengths, 99):.1f}
+    
+    Responses per Conversation:
+    • Mean: {np.mean([len(conv_lengths) for conv_lengths in conversation_response_lengths.values()]):.1f}
+    • Range: {min([len(conv_lengths) for conv_lengths in conversation_response_lengths.values()])} - {max([len(conv_lengths) for conv_lengths in conversation_response_lengths.values()])}
+    """
+    
+    plt.text(0.05, 0.95, stats_text, transform=ax8.transAxes, 
+            fontsize=10, verticalalignment='top', fontfamily='monospace',
+            bbox=dict(boxstyle="round,pad=0.5", facecolor='lightgray', alpha=0.8))
+    
+    plt.suptitle(f'Response Length Distribution Analysis - {data_source.upper()}', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'response_length_distribution_{data_source}.png'), 
+                dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Print summary to console
+    print(f"\n📊 Response Length Distribution Analysis Summary ({data_source}):")
+    print(f"   Total Responses: {len(all_response_lengths)}")
+    print(f"   Total Conversations: {len(conversation_ids)}")
+    print(f"   Mean Response Length: {mean_length:.1f} words")
+    print(f"   Median Response Length: {median_length:.1f} words")
+    print(f"   Length Range: {min(all_response_lengths)} - {max(all_response_lengths)} words")
+    print(f"   Standard Deviation: {std_length:.1f} words")
+    print(f"   90th Percentile: {p90:.1f} words")
+    print(f"   95th Percentile: {p95:.1f} words")
 
 if __name__ == "__main__":
     main()
