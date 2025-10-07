@@ -71,7 +71,7 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 300            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
@@ -429,26 +429,8 @@ def create_frame_features_vs_response_length_visualization(frame_features_data, 
     
     print(f"✅ Saved comprehensive frame features visualization to {output_path}")
     
-    # Print detailed correlation summary
-    # print("\n" + "="*88)
-    # print("📊 COMPREHENSIVE CORRELATION SUMMARY (Frame Features + Temporal Patterns)")
-    # print("="*88)
-    # print(f"{'Feature':<28} {'Category':<14} {'Pearson r':<12} {'Spearman ρ':<12} {'p-value':<12} {'Sig'}")
-    # print("-"*88)
-    
     # Sort by absolute Spearman correlation
     correlation_results.sort(key=lambda x: abs(x['spearman_rho']), reverse=True)
-    
-    # for result in correlation_results:
-    #     sig = "**" if result['spearman_p'] < 0.01 else ("*" if result['spearman_p'] < 0.05 else "")
-    #     print(f"{result['feature']:<28} {result['category']:<14} "
-    #           f"{result['pearson_r']:>7.3f}      {result['spearman_rho']:>7.3f}      "
-    #           f"{result['spearman_p']:>8.3e}    {sig}")
-    
-    # print("-"*88)
-    # print("Significance: ** p<0.01, * p<0.05")
-    # print("Categories: Single-Frame, Difference, Motion, Temporal")
-    # print("="*88)
     
     # Create a summary bar chart of correlations with category colors
     fig_summary, ax_summary = plt.subplots(figsize=(14, 8))
@@ -1922,7 +1904,6 @@ class EventDrivenConversationContext:
     def __init__(self, conversation_idx, conversation_data, video_path, dataset, device, data_source, custom_threshold, conversation_start_time, model, tokenizer, model_memory_mb):
         self.conversation_idx = conversation_idx
         self.conversation_data = conversation_data
-        self.video_path = video_path
         self.dataset = dataset
         self.device = device
         self.device_obj = torch.device(device)
@@ -2011,6 +1992,27 @@ class EventDrivenConversationContext:
         self.response_expected = 0
         self.received_prompt_cnt = 0
         self.processed_prompt_cnt = 0
+        
+        # OOM handling
+        self.oom_occurred = False
+        self.oom_frame_idx = None
+        self.oom_time = None
+    
+    def handle_oom(self, frame_idx, current_time):
+        """Handle OOM event by marking conversation as truncated."""
+        self.oom_occurred = True
+        self.oom_frame_idx = frame_idx
+        self.oom_time = current_time
+        
+        # Log the OOM event
+        self.event_log.append({
+            'time': current_time,
+            'type': 'oom_event',
+            'detail': {'frame_idx': frame_idx, 'reason': 'out_of_memory'},
+            'conversation_id': self.conversation_id
+        })
+        
+        print(f"🚨 OOM occurred for conversation {self.conversation_id} at frame {frame_idx}, truncating conversation")
     
     def track_memory_snapshot(self, liveinfer, frame_idx):
         """Track memory usage snapshot at a given frame index."""
@@ -2123,7 +2125,6 @@ class EventDrivenConversationContext:
         if self.liveinfer_state is None:
             liveinfer.reset()
             liveinfer.set_conversation_context(self.conversation_id)  # Set conversation context for feature tracking
-            liveinfer.load_video(self.video_path)
             assert isinstance(self.video_frames, torch.Tensor), f"video_frames is not a torch.Tensor: {type(self.video_frames)}"
             liveinfer.video_tensor = self.video_frames
             self.initial_memory = get_gpu_memory()
@@ -2155,6 +2156,17 @@ class EventDrivenConversationContext:
 
     def handle_frame(self, liveinfer, relative_time, frame_idx, start_time):
         # print("handle_frame", frame_idx, "conversation_id", self.conversation_id)
+        
+        # Skip processing if OOM has already occurred
+        if self.oom_occurred:
+            print(f"⏭️ Skipping frame {frame_idx} for conversation {self.conversation_id} due to previous OOM")
+            return {
+                'frame_compute_time': 0.0,
+                'frame_processing_time': 0.0,
+                'generation_time': 0.0,
+                'prompt_count': 0,
+            }
+        
         if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
             self.track_memory_snapshot(liveinfer, frame_idx)
 
@@ -2165,6 +2177,17 @@ class EventDrivenConversationContext:
         global_time = self.conversation_start_time + relative_time
         
         liveinfer.input_video_stream(relative_time)
+        
+        # Check for OOM after input_video_stream call
+        if liveinfer.oom_occurred:
+            self.handle_oom(frame_idx, global_time)
+            return {
+                'frame_compute_time': 0.0,
+                'frame_processing_time': time.time() - frame_start_time,
+                'generation_time': 0.0,
+                'prompt_count': 0,
+            }
+        
         self.event_log.append({
             'time': global_time,
             'type': 'frame',
@@ -2173,6 +2196,16 @@ class EventDrivenConversationContext:
         })
         liveinfer.texts_generated_previous = ""
         query, response = liveinfer()
+        
+        # Check for OOM after liveinfer call
+        if liveinfer.oom_occurred:
+            self.handle_oom(frame_idx, global_time)
+            return {
+                'frame_compute_time': 0.0,
+                'frame_processing_time': time.time() - frame_start_time,
+                'generation_time': 0.0,
+                'prompt_count': 1 if query else 0,
+            }
 
         frame_processing_time = time.time() - frame_start_time
         timing_data = liveinfer.get_timing_data()
@@ -2265,11 +2298,29 @@ class EventDrivenConversationContext:
         }
 
     def handle_generation(self, liveinfer, relative_time, start_time):
+        # Skip processing if OOM has already occurred
+        if self.oom_occurred:
+            print(f"⏭️ Skipping generation for conversation {self.conversation_id} due to previous OOM")
+            return {
+                'frame_compute_time': 0.0,
+                'frame_processing_time': 0.0,
+                'generation_time': 0.0,
+            }
+        
         chunk_start = time.time()
         liveinfer.texts_generated_previous = ""
         query, response = liveinfer()
         # query, response = None, None
         chunk_duration = time.time() - chunk_start
+        
+        # Check for OOM after liveinfer call
+        if liveinfer.oom_occurred:
+            self.handle_oom(-1, start_time + chunk_duration)  # Use -1 for generation events
+            return {
+                'frame_compute_time': 0.0,
+                'frame_processing_time': 0.0,
+                'generation_time': chunk_duration,
+            }
 
         # Reset pending flag so the scheduler can decide whether to queue another chunk
         self.generation_event_pending = False
@@ -2425,7 +2476,10 @@ class EventDrivenConversationContext:
             'generated_turns': self.generated_turns,
             'video_duration': self.duration,
             'frame_scores_data': self.frame_scores_data,
-            'frame_timing_data': self.frame_timing_data
+            'frame_timing_data': self.frame_timing_data,
+            'oom_occurred': self.oom_occurred,
+            'oom_frame_idx': self.oom_frame_idx,
+            'oom_time': self.oom_time
         }
 
         self.result['event_log'] = self.event_log
@@ -3045,6 +3099,11 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             continue
 
         if event_type == 'frame':
+            # Skip frame processing if OOM has occurred for this conversation
+            if context.oom_occurred:
+                print(f"⏭️ Skipping frame event for conversation {conversation_id} due to OOM")
+                continue
+                
             if shared_liveinfer.generation_state is not None or getattr(shared_liveinfer, 'generation_event_pending', False):
                 context.pending_frame_events.append((event_time, priority, payload_data))
                 continue
@@ -3052,7 +3111,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             
             segment_info = context.handle_frame(shared_liveinfer, relative_time, payload_data, start_time)
             
-            assert segment_info.get('frame_compute_time', 0.0) > 0.0, f"frame_compute_time: {segment_info.get('frame_compute_time', 0.0)}, frame_processing_time: {segment_info.get('frame_processing_time', 0.0)}"
+            # Skip assertion if OOM occurred (frame_compute_time will be 0.0)
+            if not context.oom_occurred:
+                assert segment_info.get('frame_compute_time', 0.0) > 0.0, f"frame_compute_time: {segment_info.get('frame_compute_time', 0.0)}, frame_processing_time: {segment_info.get('frame_processing_time', 0.0)}"
             generation_duration = segment_info.get('generation_time', 0.0)
             segment_label = context.conversation_id
             frame_idx = payload_data
@@ -3122,6 +3183,11 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             continue
 
         if event_type == 'generation':
+            # Skip generation processing if OOM has occurred for this conversation
+            if context.oom_occurred:
+                print(f"⏭️ Skipping generation event for conversation {conversation_id} due to OOM")
+                continue
+                
             start_time = max(processor_clock, event_time)
             
             segment_info = context.handle_generation(shared_liveinfer, relative_time, start_time)
@@ -3209,6 +3275,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         all_memory_data[unique_key] = context.memory_data
         if context.result.get('frame_scores_data'):
             all_frame_scores_data[unique_key] = context.result['frame_scores_data']
+        
+        # Log OOM occurrence
+        if context.result.get('oom_occurred', False):
+            print(f"🚨 Conversation {context.conversation_id} experienced OOM at frame {context.result.get('oom_frame_idx', 'unknown')}")
         conversation_summaries.append({
             'conversation_id': context.conversation_id,
             'label': context.conversation_id,
@@ -3258,6 +3328,15 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
     if processor_segments:
         print("\n📊 Creating processor timeline...")
         create_processor_timeline(processor_segments, onthefly_buffer_data, conversation_summaries, data_source=data_source)
+
+    # Print OOM summary
+    oom_conversations = [r for r in results if r.get('oom_occurred', False)]
+    if oom_conversations:
+        print(f"\n🚨 OOM Summary: {len(oom_conversations)}/{len(results)} conversations experienced OOM")
+        for result in oom_conversations:
+            print(f"   • {result['conversation_id']}: OOM at frame {result.get('oom_frame_idx', 'unknown')}")
+    else:
+        print(f"\n✅ No OOM occurrences in {len(results)} conversations")
 
     return results, buffer_data, all_memory_data
 
@@ -3436,7 +3515,8 @@ class SimpleLiveInfer:
         # Frame difference features tracking (per conversation)
         self.frame_features_data = {}  # Dict: conversation_id -> List of {frame_idx, video_time, corner_diff, ...}
         self.prev_frame_per_conversation = {}  # Dict: conversation_id -> previous frame tensor
-        self.current_conversation_id = None  # Track which conversation is currently being processed
+        self.current_conversation_id = None
+        self.oom_occurred = False  # Track which conversation is currently being processed
 
     def capture_state(self):
         state = {
@@ -3446,7 +3526,6 @@ class SimpleLiveInfer:
             'frame_embeds_queue': [(timestamp, embed.detach().cpu() if torch.is_tensor(embed) else embed) for timestamp, embed in list(self.frame_embeds_queue)],
             'video_time': self.video_time,
             'last_frame_idx': self.last_frame_idx,
-            'video_path': self.video_path,
             'video_tensor': self.video_tensor.detach().cpu() if isinstance(self.video_tensor, torch.Tensor) else self.video_tensor,
             'frame_scores': self.frame_scores.copy(),
             'frame_times': self.frame_times.copy(),
@@ -3482,7 +3561,6 @@ class SimpleLiveInfer:
         self.past_key_values = move_kv_cache_to_device(state['past_key_values'], self.device) if state['past_key_values'] is not None else None
         self.video_time = state['video_time']
         self.last_frame_idx = state['last_frame_idx']
-        self.video_path = state['video_path']
         self.video_tensor = state['video_tensor']
         if isinstance(self.video_tensor, torch.Tensor) and self.video_tensor.device != torch.device('cpu'):
             self.video_tensor = self.video_tensor.cpu()
@@ -3514,7 +3592,6 @@ class SimpleLiveInfer:
         self.video_time = 0
         self.last_frame_idx = -1
         self.video_tensor = None
-        self.video_path = None  # Reset video path
         self.query_queue = collections.deque()
         self.frame_embeds_queue = collections.deque()
         self.last_ids = torch.tensor([[]], device=self.device, dtype=torch.long)
@@ -3601,12 +3678,22 @@ class SimpleLiveInfer:
                             # Update prev_frame for this conversation
                             self.prev_frame_per_conversation[self.current_conversation_id] = current_frame.clone()
                         
-                        # Process single frame on GPU
-                        frame_embeds = self.model.visual_embed(gpu_frame).split(self.frame_num_tokens)
-                        self.frame_embeds_queue.extend([
-                            (single_frame_idx / self.frame_fps, embed.cpu())
-                            for embed in frame_embeds
-                        ])
+                        # Process single frame on GPU with OOM handling
+                        try:
+                            frame_embeds = self.model.visual_embed(gpu_frame).split(self.frame_num_tokens)
+                            self.frame_embeds_queue.extend([
+                                (single_frame_idx / self.frame_fps, embed.cpu())
+                                for embed in frame_embeds
+                            ])
+                        except RuntimeError as e:
+                            if 'out of memory' in str(e).lower():
+                                print("Out of memory in visual_embed")
+                                torch.cuda.empty_cache()
+                                self.oom_occurred = True
+                                # Free GPU frame and break out of frame processing loop
+                                del gpu_frame
+                                break
+                            raise e
                         
                         # Immediately release GPU frame to free memory
                         del gpu_frame
@@ -3625,23 +3712,6 @@ class SimpleLiveInfer:
 
         # print("input_video_stream", len(self.frame_embeds_queue), video_time, frame_idx, self.last_frame_idx)
     
-    def load_video(self, video_path):
-        # Store video path for on-demand loading instead of loading entire video
-        self.video_path = video_path
-        
-        # Load video to CPU memory first to avoid GPU OOM
-        # print(f"📹 Loading video to CPU memory: {video_path}")
-        # video_reader = read_video(video_path, pts_unit='sec', output_format='TCHW')
-        # self.num_video_frames = video_reader[0].size(0)
-        # self.video_duration = self.num_video_frames / self.frame_fps
-        
-        # Store video tensor on CPU to avoid GPU memory issues
-        # self.video_tensor = video_reader[0]  # Keep on CPU
-        # print(f"📹 Video loaded to CPU: {self.video_tensor.shape} ({self.video_tensor.device})")
-        
-        # logger = transformers.logging.get_logger('liveinfer')
-        # logger.warning(f'{video_path} -> {self.video_tensor.shape}, {self.frame_fps} FPS (CPU streaming mode)')
-    
     def _call_for_response(self, video_time, query):
         # Lazily initialise generation state on first invocation
         if self.generation_state is None:
@@ -3651,8 +3721,18 @@ class SimpleLiveInfer:
         state['chunk_invocations'] += 1
 
         generation_start = time.time()
-        response_tokens = self._execute_generation_chunk(state)
+        result = self._execute_generation_chunk(state)
         chunk_duration = time.time() - generation_start
+        
+        # Handle OOM case
+        if isinstance(result, tuple) and len(result) == 2:
+            response_tokens, oom_occurred = result
+            if oom_occurred:
+                self.oom_occurred = True
+                print(f"🚨 OOM detected in SimpleLiveInfer for conversation {self.current_conversation_id}")
+        else:
+            # Fallback for old format
+            response_tokens = result
         state['total_generation_time'] += chunk_duration
 
         self.timing_data['generation_time'] = state['total_generation_time']
@@ -3821,14 +3901,26 @@ class SimpleLiveInfer:
             past_key_values = self._ensure_kv_on_device(state['past_key_values_cpu'])
 
             buffer = torch.zeros(1, chunk_size, dtype=torch.long, device=self.device)
-            output_ids, past_key_values, next_inputs_embeds, finished = fast_greedy_generate(
-                model=self.model,
-                inputs_embeds=next_inputs,
-                past_key_values=past_key_values,
-                eos_token_id=self.eos_token_id,
-                inplace_output_ids=buffer,
-                max_new_tokens=chunk_size,
-            )
+            # handle OOM with try and except
+            try:
+                output_ids, past_key_values, next_inputs_embeds, finished = fast_greedy_generate(
+                    model=self.model,
+                    inputs_embeds=next_inputs,
+                    past_key_values=past_key_values,
+                    eos_token_id=self.eos_token_id,
+                    inplace_output_ids=buffer,
+                        max_new_tokens=chunk_size,
+                    )
+            except RuntimeError as e:
+                if 'out of memory' in str(e).lower():
+                    print("Out of memory")
+                    torch.cuda.empty_cache()
+                    # mark the generation as finished
+                    state['finished'] = True
+                    all_tokens = torch.cat(state['tokens'], dim=1) if state['tokens'] else torch.empty((1, 0), dtype=torch.long)
+                    # Return a special indicator for OOM
+                    return all_tokens, True  # (tokens, oom_occurred)
+                raise e
 
             self.timing_data['generation_video_time'] = state['video_time']
 
@@ -3854,9 +3946,9 @@ class SimpleLiveInfer:
             if finished or state['tokens_generated'] >= Config.INPLACE_OUTPUT_SIZE:
                 state['finished'] = True
                 all_tokens = torch.cat(state['tokens'], dim=1) if state['tokens'] else torch.empty((1, 0), dtype=torch.long)
-                return all_tokens
+                return all_tokens, False  # (tokens, oom_occurred)
 
-        return None
+        return None, False  # (tokens, oom_occurred)
 
     def _call_for_streaming(self):
         while self.frame_embeds_queue:
@@ -3881,7 +3973,19 @@ class SimpleLiveInfer:
                     frame_embeds.view(1, -1, self.hidden_size),
                 ], dim=1)
                 del frame_embeds
-                outputs = self.model(inputs_embeds=inputs_embeds, use_cache=True, past_key_values=self.past_key_values)
+                
+                # Handle OOM in model forward pass
+                try:
+                    outputs = self.model(inputs_embeds=inputs_embeds, use_cache=True, past_key_values=self.past_key_values)
+                except RuntimeError as e:
+                    if 'out of memory' in str(e).lower():
+                        print("Out of memory in _call_for_streaming")
+                        torch.cuda.empty_cache()
+                        self.oom_occurred = True
+                        # Free inputs_embeds and return None to indicate OOM
+                        del inputs_embeds
+                        return None, None
+                    raise e
                 
                 # Free inputs_embeds immediately after forward pass
                 del inputs_embeds
@@ -3943,8 +4047,15 @@ class SimpleLiveInfer:
         streaming_time = 0.0
         if self.frame_embeds_queue:
             streaming_start = time.time()
-            video_time, query = self._call_for_streaming()
+            result = self._call_for_streaming()
             streaming_time = time.time() - streaming_start
+            
+            # Handle OOM case from _call_for_streaming
+            if result is None or result == (None, None):
+                # OOM occurred in _call_for_streaming
+                return None, None
+            
+            video_time, query = result
         elif self.generation_state is None and self.query_queue:
             video_time, query = self.query_queue.popleft()
 
@@ -4234,7 +4345,7 @@ def main():
         print(f"   • Average Fluency: {avg_fluency:.3f}")
         print(f"   • Average Responses per Video: {avg_responses_per_video:.1f}")
         print(f"   • Average Time Diff (latency per response): {avg_time_diff:.3f}s")
-        print(f"   • Average Rebuffering Time per Frame: {avg_rebuffering_time:.3f}s")
+        # print(f"   • Average Rebuffering Time per Frame: {avg_rebuffering_time:.3f}s")
         
         
         print(f"\n🎯 PERFORMANCE SUMMARY:")
@@ -5078,10 +5189,10 @@ Responses: {len(all_gt_prefix_visual)}"""
     create_ppl_over_time_visualization(video_data, output_dir, data_source)
     
     # Print summary statistics
-    print(f"\n📊 DUAL PPL ANALYSIS SUMMARY ({data_source.upper()}):")
-    print(f"   • Total responses analyzed: {len(all_gt_prefix_visual)}")
-    print(f"   • GT Prefix PPL: {np.mean(all_gt_prefix_visual):.3f} ± {np.std(all_gt_prefix_visual):.3f}")
-    print(f"   • VLM Prefix PPL: {np.mean(all_vlm_prefix_visual):.3f} ± {np.std(all_vlm_prefix_visual):.3f}")
+    # print(f"\n📊 DUAL PPL ANALYSIS SUMMARY ({data_source.upper()}):")
+    # print(f"   • Total responses analyzed: {len(all_gt_prefix_visual)}")
+    # print(f"   • GT Prefix PPL: {np.mean(all_gt_prefix_visual):.3f} ± {np.std(all_gt_prefix_visual):.3f}")
+    # print(f"   • VLM Prefix PPL: {np.mean(all_vlm_prefix_visual):.3f} ± {np.std(all_vlm_prefix_visual):.3f}")
     
     # Calculate differences and correlation
     # if len(all_gt_prefix_visual) == len(all_vlm_prefix_visual):
@@ -5718,15 +5829,15 @@ def create_response_length_distribution_analysis(results, output_dir="timing_plo
     plt.close()
     
     # Print summary to console
-    print(f"\n📊 Response Length Distribution Analysis Summary ({data_source}):")
-    print(f"   Total Responses: {len(all_response_lengths)}")
-    print(f"   Total Conversations: {len(conversation_ids)}")
-    print(f"   Mean Response Length: {mean_length:.1f} words")
-    print(f"   Median Response Length: {median_length:.1f} words")
-    print(f"   Length Range: {min(all_response_lengths)} - {max(all_response_lengths)} words")
-    print(f"   Standard Deviation: {std_length:.1f} words")
-    print(f"   90th Percentile: {p90:.1f} words")
-    print(f"   95th Percentile: {p95:.1f} words")
+    # print(f"\n📊 Response Length Distribution Analysis Summary ({data_source}):")
+    # print(f"   Total Responses: {len(all_response_lengths)}")
+    # print(f"   Total Conversations: {len(conversation_ids)}")
+    # print(f"   Mean Response Length: {mean_length:.1f} words")
+    # print(f"   Median Response Length: {median_length:.1f} words")
+    # print(f"   Length Range: {min(all_response_lengths)} - {max(all_response_lengths)} words")
+    # print(f"   Standard Deviation: {std_length:.1f} words")
+    # print(f"   90th Percentile: {p90:.1f} words")
+    # print(f"   95th Percentile: {p95:.1f} words")
 
 if __name__ == "__main__":
     main()
