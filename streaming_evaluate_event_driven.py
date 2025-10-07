@@ -71,13 +71,13 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 10            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 1             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -473,7 +473,7 @@ def create_frame_features_vs_response_length_visualization(frame_features_data, 
     plt.savefig(summary_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
     plt.close()
     
-    print(f"✅ Saved correlation summary bar chart to {summary_path}\n")
+    print(f"✅ Saved correlation summary bar chart to {summary_path}")
 
 class FilteredEgo4DRefinedNarrationStream:
     """Ego4D Refined Narration Stream that only includes videos with features - now processes per-conversation"""
@@ -616,21 +616,35 @@ class FilteredEgo4DRefinedNarrationStream:
                                         'content': entry['text'],
                                         'time': entry.get('time', 0.0)
                                     })
+
+                            # Normalize timestamps: find first user prompt time and subtract it from all times
+                            user_times = [turn['time'] for turn in conversation]
+                            first_user_time = min(user_times)
+                            normalized_conversation = []
+                            for turn in conversation:
+                                normalized_turn = {
+                                    'role': turn['role'],
+                                    'content': turn['content'],
+                                    'time': max(0.0, turn['time'] - first_user_time),  # Ensure no negative times
+                                    'original_time': turn['time']  # Keep original time for visualization
+                                }
+                                normalized_conversation.append(normalized_turn)
                             
                             if conversation:
                                 # Calculate conversation duration
-                                start_time = min(entry.get('time', 0.0) for entry in narration_entries if isinstance(entry, dict) and 'time' in entry)
-                                end_time = max(entry.get('time', 0.0) for entry in narration_entries if isinstance(entry, dict) and 'time' in entry)
+                                start_time = min(turn['time'] for turn in normalized_conversation)
+                                end_time = max(turn['time'] for turn in normalized_conversation)
                                 duration = end_time - start_time
                                 
                                 self.conversations.append({
                                     'video_uid': video_uid,
-                                    'conversation_id': f"narration_{video_uid}_{annotation_uid}",
-                                    'conversation': conversation,
+                                    'conversation_id': annotation_uid,
+                                    'conversation': normalized_conversation,
                                     'start_time': start_time,
                                     'end_time': end_time,
                                     'duration': duration,
-                                    'original_conversation': conversation  # Keep original for metrics
+                                    'original_conversation': conversation,  # Keep original for metrics
+                                    'timestamp_offset': first_user_time
                                 })
         elif data_source == 'goalstep':
             # For goalstep, each video has one conversation
@@ -5335,20 +5349,20 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, normalized_
                 if conv_turn['role'] == 'user' and conv_turn['time'] <= gt_time + 1e-6:
                     user_prompt = conv_turn['content']
                     break
-        print(f"📊 GT Time: {gt_time} GT Content: {gt_content} User Prompt: {user_prompt}")
+        # print(f"📊 GT Time: {gt_time} GT Content: {gt_content} User Prompt: {user_prompt}")
         
         # 1. PPL with GT prefix (golden context) - WITH VISUAL
         gt_conversation = create_conversation_with_gt_prefix(
             normalized_conversation, gt_time, user_prompt, gt_content
         )
-        print(f"📊 GT Conversation: {gt_conversation}")
+        # print(f"📊 GT Conversation: {gt_conversation}")
         ppl_gt_prefix_visual = calculate_ppl_for_response(model, tokenizer, gt_conversation, video_tensor, device, data_source, use_visual=True, custom_threshold=None, frame_index=frame_index)
         
         # 2. PPL with VLM prefix (actual generated responses as context) - WITH VISUAL
         vlm_conversation = create_conversation_with_vlm_prefix(
             generated_turns, gt_time, user_prompt, gt_content
         )
-        print(f"📊 VLM Conversation: {vlm_conversation}")
+        # print(f"📊 VLM Conversation: {vlm_conversation}")
         ppl_vlm_prefix_visual = calculate_ppl_for_response(model, tokenizer, vlm_conversation, video_tensor, device, data_source, use_visual=True, custom_threshold=None, frame_index=frame_index)
                     
         if ppl_gt_prefix_visual is not None:
@@ -5621,7 +5635,7 @@ def create_response_length_distribution_analysis(results, output_dir="timing_plo
     for conv_id in conversation_ids:
         lengths_by_conversation.append(conversation_response_lengths[conv_id])
     
-    plt.boxplot(lengths_by_conversation, labels=[f'Conv {i+1}' for i in range(len(conversation_ids))])
+    plt.boxplot(lengths_by_conversation)
     plt.xlabel('Conversation')
     plt.ylabel('Response Length (words)')
     plt.title('Response Length Distribution by Conversation')
