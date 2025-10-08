@@ -106,7 +106,9 @@ class Config:
     GENERATION_CHUNK_SIZE = 32
 
     # Scheduling
-    SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer' or 'buffer_age
+    SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer' or 'buffer_weighted_score'
+    BUFFER_WEIGHTED_SCORE_FACTOR = 1
+    EWMA_FACTOR = 0.9
 
 # =============================================================================
 # IMAGE DIFFERENCE FEATURE CALCULATION
@@ -2785,7 +2787,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
     processor_clock = 0.0
     processor_segments = []
     conversation_summaries = []
-    age_of_conversations = {}
+    # default to 0 dict for age_of_conversations, erl_of_conversations, crl_of_conversations
+    age_of_conversations = {cid: 0 for cid in conversation_indices}
+    erl_of_conversations = {cid: 0 for cid in conversation_indices}
+    crl_of_conversations = {cid: 0 for cid in conversation_indices}
     
     # On-the-fly buffer tracking for each conversation
     listening_speed = Config.USER_LISTENING_SPEED_MAX  # Use listening speed as requested
@@ -2987,12 +2992,12 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     heapq.heappush(cached_events, (event_time, priority, sequence_counter, payload, buffer_level))
                 elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                     heapq.heappush(cached_events, (buffer_level, event_time, priority, sequence_counter, payload))
-                elif Config.SCHEDULING_METHOD == 'buffer_age':
+                elif Config.SCHEDULING_METHOD == 'buffer_weighted_score':
                     # older conversations have higher priority
-                    if conversation_id not in age_of_conversations:
-                        age_of_conversations[conversation_id] = 0
-                    age = age_of_conversations[conversation_id]
-                    heapq.heappush(cached_events, (buffer_level, -age, event_time, priority, sequence_counter, payload))
+                    r = Config.BUFFER_WEIGHTED_SCORE_FACTOR
+                    remaining_length = erl_of_conversations[conversation_id] - crl_of_conversations[conversation_id]
+                    score = r * remaining_length - age_of_conversations[conversation_id]
+                    heapq.heappush(cached_events, (buffer_level, score, event_time, priority, sequence_counter, payload))
                 else:
                     raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
         
@@ -3003,7 +3008,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                 for _, event_time, priority, sequence_counter, payload in cached_events:
                     heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
-            elif Config.SCHEDULING_METHOD == 'buffer_age':
+            elif Config.SCHEDULING_METHOD == 'buffer_weighted_score':
                 for _, _, event_time, priority, sequence_counter, payload in cached_events:
                     heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
             else:
@@ -3049,8 +3054,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                             found_lower_buffer = True
                 selected_conversation_id = payload[1][:12]
                 # print(f"🔍 Found lowest {found_lower_buffer}: Selected: {selected_conversation_id} ({buffer_level}), Lowest-buffer: {lowest_buffer_conversation_id} ({lowest_buffer_level})")
-            elif Config.SCHEDULING_METHOD == 'buffer_age':
-                buffer_level, age, event_time, priority, _, payload = heapq.heappop(cached_events)
+            elif Config.SCHEDULING_METHOD == 'buffer_weighted_score':
+                buffer_level, score, event_time, priority, _, payload = heapq.heappop(cached_events)
                 # push back the cached events
                 for _, _, et, pri, seq, pl in cached_events:
                     heapq.heappush(event_queue, (et, pri, seq, pl))
@@ -3148,6 +3153,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 if text or is_response:
                     tokens = re.findall(r"\b\w+\b", text)
                     word_count = float(len(tokens))
+                    crl_of_conversations[conversation_id] += word_count
                     
                     buffer_state = onthefly_buffer_data[conversation_id]
                     response_idx = last_event.get('response_idx', 0)
@@ -3167,11 +3173,13 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     if not context.oom_occurred:
                         if context.processed_prompt_cnt == context.received_prompt_cnt:
                             buffer_state['buffer'] += word_count
+                            
                         if is_first_chunk:
                             buffer_state['unanswered_prompts'] -= 1
                             if not is_last_chunk and last_event.get('trigger_method') == 'score':
                                 buffer_state['pending_responses'].add(context.response_expected)
                                 context.response_expected += 1
+
                         if is_last_chunk:
                             buffer_state['pending_responses'].discard(response_idx)
                             
@@ -3191,8 +3199,15 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 # update age of conversation if not finished
                 age_of_conversations[conversation_id] += 1
             else:
-                # finished, del age of conversation
-                del age_of_conversations[conversation_id]
+                # finished, reset age of conversation
+                age_of_conversations[conversation_id] = 0
+                # update erl of conversation
+                if erl_of_conversations[conversation_id] == 0:
+                    erl_of_conversations[conversation_id] = crl_of_conversations[conversation_id]
+                else:
+                    erl_of_conversations[conversation_id] = (1-Config.EWMA_FACTOR) * erl_of_conversations[conversation_id] + Config.EWMA_FACTOR * crl_of_conversations[conversation_id]
+                # reset crl of conversation
+                crl_of_conversations[conversation_id] = 0
 
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
@@ -3234,6 +3249,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 if text or is_response:
                     tokens = re.findall(r"\b\w+\b", text)
                     word_count = float(len(tokens))
+                    crl_of_conversations[conversation_id] += word_count
                     
                     buffer_state = onthefly_buffer_data[conversation_id]
                     response_idx = last_event.get('response_idx', 0)
@@ -3274,9 +3290,17 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 # update age of conversation if not finished
                 age_of_conversations[conversation_id] += 1
             else:
-                # if finished, del age of conversation
+                # if finished, reset age of conversation
                 assert not context.pending_frame_events, f"pending_frame_events: {context.pending_frame_events}"
-                del age_of_conversations[conversation_id]
+                # reset age of conversation
+                age_of_conversations[conversation_id] = 0
+                # update erl of conversation
+                if erl_of_conversations[conversation_id] == 0:
+                    erl_of_conversations[conversation_id] = crl_of_conversations[conversation_id]
+                else:
+                    erl_of_conversations[conversation_id] = (1-Config.EWMA_FACTOR) * erl_of_conversations[conversation_id] + Config.EWMA_FACTOR * crl_of_conversations[conversation_id]
+                # reset crl of conversation
+                crl_of_conversations[conversation_id] = 0
 
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
