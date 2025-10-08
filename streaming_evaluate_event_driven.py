@@ -27,6 +27,7 @@ import transformers
 from scipy.stats import spearmanr
 from collections import defaultdict
 import cv2
+from transformers.cache_utils import DynamicCache
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -71,13 +72,13 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES =600            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -729,18 +730,6 @@ class FilteredEgo4DRefinedNarrationStream:
         
         return input_text, frames, load_ranges, sample_idx, evaluation_kwargs
 
-def get_gpu_memory():
-    """Get current GPU memory usage in MB"""
-    try:
-        result = subprocess.run(
-            ['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader,nounits'],
-            capture_output=True,
-            text=True,
-        )
-        return int(result.stdout.strip())
-    except Exception:
-        return 0
-
 def get_cpu_memory():
     """Get current process CPU memory usage in MB"""
     try:
@@ -846,11 +835,33 @@ def calculate_inputs_embeds_memory_mb(inputs_embeds):
         return 0.0
     return _tensor_numel_bytes(inputs_embeds) / (1024**2)
 
+def move_dynamic_cache_to(cache: DynamicCache, device: str = "cpu"):
+    # Generic: traverse known structure (Cache -> layers -> attributes)
+    # print("move_dynamic_cache_to", device)
+    if hasattr(cache, "layers"):
+        for layer in cache.layers:
+            # Move any tensor attributes on the layer
+            for name, val in vars(layer).items():
+                if torch.is_tensor(val):
+                    setattr(layer, name, val.to(device))
+                elif isinstance(val, (list, tuple)):
+                    seq = []
+                    changed = False
+                    for x in val:
+                        if torch.is_tensor(x):
+                            seq.append(x.to(device)); changed = True
+                        else:
+                            seq.append(x)
+                    if changed:
+                        setattr(layer, name, type(val)(seq))
+    return cache
 
 def _move_cache_to_device(obj, device):
     """Recursively move cache containers to a target device."""
     if obj is None:
         return None
+    if isinstance(obj, DynamicCache):
+        return move_dynamic_cache_to(obj, device)
     if torch.is_tensor(obj):
         return obj.to(device, non_blocking=True)
     if isinstance(obj, list):
@@ -865,22 +876,17 @@ def _move_cache_to_device(obj, device):
     return obj
 
 
-
 def move_kv_cache_to_device(past_key_values, device):
     """Return KV cache moved to the target device while preserving structure."""
     if past_key_values is None:
         return None
-    target_device = torch.device(device) if not isinstance(device, torch.device) else device
-    return _move_cache_to_device(past_key_values, target_device)
-
-
+    return _move_cache_to_device(past_key_values, device)
 
 def canonical_device(device):
     """Normalize device inputs to torch.device."""
     if isinstance(device, torch.device):
         return device
     return torch.device(device)
-
 
 def print_memory_status(prefix="💾", context="GPU Memory"):
     """Print current GPU memory status with consistent formatting"""
@@ -908,7 +914,7 @@ def defragment_gpu_memory():
         torch.cuda.synchronize()
         
         # Try to allocate and free a small tensor to trigger defragmentation
-        temp_tensor = torch.randn(1000, 1000, device='cuda')
+        temp_tensor = torch.randn(1000, 1000, device='cuda:0')
         del temp_tensor
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
@@ -2026,15 +2032,17 @@ class EventDrivenConversationContext:
             'conversation_id': self.conversation_id
         })
         
-        print(f"🚨 OOM occurred for conversation {self.conversation_id} at frame {frame_idx}, truncating conversation")
+        # print(f"🚨 OOM occurred for conversation {self.conversation_id} at frame {frame_idx}, truncating conversation")
     
     def track_memory_snapshot(self, liveinfer, frame_idx):
         """Track memory usage snapshot at a given frame index."""
         # GPU memory tracking
-        current_memory = get_gpu_memory()
+        gpu_memory_info = get_gpu_memory_info()
+        torch_allocated_mb = gpu_memory_info['allocated_mb']
+        torch_reserved_mb = gpu_memory_info['cached_mb']
         if self.initial_memory is None:
-            self.initial_memory = current_memory
-        memory_growth = current_memory - self.initial_memory
+            self.initial_memory = torch_allocated_mb
+        memory_growth = torch_allocated_mb - self.initial_memory
         memory_per_frame = memory_growth / max(1, frame_idx) if frame_idx > 0 else 0
 
         # CPU memory tracking
@@ -2042,12 +2050,6 @@ class EventDrivenConversationContext:
         if not hasattr(self, 'initial_cpu_memory') or self.initial_cpu_memory is None:
             self.initial_cpu_memory = current_cpu_memory
         cpu_memory_growth = current_cpu_memory - self.initial_cpu_memory
-
-        torch_allocated_mb = 0.0
-        torch_reserved_mb = 0.0
-        if torch.cuda.is_available():
-            torch_allocated_mb = torch.cuda.memory_allocated(self.device_obj) / (1024**2)
-            torch_reserved_mb = torch.cuda.memory_reserved(self.device_obj) / (1024**2)
 
         kv_cache_memory_mb = calculate_kv_cache_memory_mb(liveinfer.past_key_values)
         
@@ -2059,23 +2061,13 @@ class EventDrivenConversationContext:
         # kv_cache_memory_mb already calculated above
         
         # 3. Other allocated tensors (intermediate activations, embeddings, buffers)
-        other_allocated_mb = max(torch_allocated_mb - model_memory_mb - kv_cache_memory_mb, 0.0)
+        activation_memory_mb = max(torch_allocated_mb - model_memory_mb - kv_cache_memory_mb, 0.0)
         
         # 4. PyTorch memory pool overhead (reserved - allocated)
-        pytorch_pool_mb = max(torch_reserved_mb - torch_allocated_mb, 0.0)
-        
-        # 5. Non-PyTorch memory (nvidia-smi - reserved)
-        # Includes CUDA context, cuDNN workspace, driver allocations
-        cuda_overhead_mb = max(current_memory - torch_reserved_mb, 0.0)
-        
-        # For visualization compatibility, combine intermediate tensors
-        activation_memory_mb = other_allocated_mb
-        
-        # "Other" now represents everything outside core model + KV cache + activations
-        other_memory_mb = pytorch_pool_mb + cuda_overhead_mb
+        other_memory_mb = max(torch_reserved_mb - torch_allocated_mb, 0.0)
 
         self.memory_data['frames'].append(frame_idx)
-        self.memory_data['memory_usage'].append(current_memory)
+        self.memory_data['memory_usage'].append(torch_allocated_mb)
         self.memory_data['memory_growth'].append(memory_growth)
         self.memory_data['memory_per_frame'].append(memory_per_frame)
         self.memory_data['model_memory'].append(model_memory_mb)
@@ -2089,30 +2081,16 @@ class EventDrivenConversationContext:
         self.memory_data['cpu_memory'].append(current_cpu_memory)
         self.memory_data['cpu_memory_growth'].append(cpu_memory_growth)
         
-        # Additional detailed breakdown
-        self.memory_data.setdefault('other_allocated', []).append(other_allocated_mb)
-        self.memory_data.setdefault('pytorch_pool', []).append(pytorch_pool_mb)
-        self.memory_data.setdefault('cuda_overhead', []).append(cuda_overhead_mb)
-        
-        # Print detailed breakdown every 10 frames for debugging
-        # if frame_idx % 10 == 0:
-        #     print(f"\n📊 Memory Breakdown at Frame {frame_idx}:")
-        #     print(f"   nvidia-smi total:        {current_memory:7.1f} MB")
-        #     print(f"   ├─ torch.reserved:       {torch_reserved_mb:7.1f} MB")
-        #     print(f"   │  ├─ torch.allocated:   {torch_allocated_mb:7.1f} MB")
-        #     print(f"   │  │  ├─ Model params:   {model_memory_mb:7.1f} MB")
-        #     print(f"   │  │  ├─ KV cache:       {kv_cache_memory_mb:7.1f} MB")
-        #     print(f"   │  │  └─ Activations:    {other_allocated_mb:7.1f} MB (model buffers, embeddings, etc.)")
-        #     print(f"   │  └─ PyTorch pool:      {pytorch_pool_mb:7.1f} MB (reserved - allocated)")
-        #     print(f"   └─ CUDA overhead:        {cuda_overhead_mb:7.1f} MB (nvidia-smi - reserved)")
+        # print(f"\n📊 Memory Breakdown at Frame {frame_idx}:")
+        # print(f"   nvidia-smi total:        {torch_allocated_mb:7.1f} MB")
+        # print(f"   ├─ torch.reserved:       {torch_reserved_mb:7.1f} MB")
+        # print(f"   │  ├─ torch.allocated:   {torch_allocated_mb:7.1f} MB")
+        # print(f"   │  │  ├─ Model params:   {model_memory_mb:7.1f} MB")
+        # print(f"   │  │  ├─ KV cache:       {kv_cache_memory_mb:7.1f} MB")
+        # print(f"   │  │  └─ Activations:    {other_allocated_mb:7.1f} MB (model buffers, embeddings, etc.)")
+        # print(f"   │  └─ PyTorch pool:      {pytorch_pool_mb:7.1f} MB (reserved - allocated)")
+        # print(f"   └─ CUDA overhead:        {cuda_overhead_mb:7.1f} MB (nvidia-smi - reserved)")
             
-        #     # Show what activations are growing
-        #     if len(self.memory_data.get('other_allocated', [])) > 1:
-        #         prev_activation = self.memory_data['other_allocated'][-2]
-        #         activation_growth = other_allocated_mb - prev_activation
-        #         if abs(activation_growth) > 1.0:  # Only show if > 1MB change
-        #             print(f"   ⚠️  Activation growth: {activation_growth:+.1f} MB since last measurement")
-        
         self.completed = False
         self.result = None
         self.generation_event_pending = False
@@ -2141,7 +2119,7 @@ class EventDrivenConversationContext:
             liveinfer.set_conversation_context(self.conversation_id)  # Set conversation context for feature tracking
             assert isinstance(self.video_frames, torch.Tensor), f"video_frames is not a torch.Tensor: {type(self.video_frames)}"
             liveinfer.video_tensor = self.video_frames
-            self.initial_memory = get_gpu_memory()
+            self.initial_memory = get_gpu_memory_info()['allocated_mb']
         else:
             liveinfer.restore_state(self.liveinfer_state)
             liveinfer.set_conversation_context(self.conversation_id)  # Ensure context is set after restore
@@ -2149,6 +2127,8 @@ class EventDrivenConversationContext:
         self.pending_frame_events = collections.deque()
 
     def save_liveinfer_state(self, liveinfer):
+        if self.oom_occurred:
+            return
         self.liveinfer_state = liveinfer.capture_state()
 
     def handle_prompt(self, liveinfer, relative_time, prompt_content):
@@ -2169,20 +2149,16 @@ class EventDrivenConversationContext:
         return sequence_counter + 1
 
     def handle_frame(self, liveinfer, relative_time, frame_idx, start_time):
-        # print("handle_frame", frame_idx, "conversation_id", self.conversation_id)
         
         # Skip processing if OOM has already occurred
         if self.oom_occurred:
-            print(f"⏭️ Skipping frame {frame_idx} for conversation {self.conversation_id} due to previous OOM")
+            # print(f"⏭️ Skipping frame {frame_idx} for conversation {self.conversation_id} due to previous OOM")
             return {
                 'frame_compute_time': 0.0,
                 'frame_processing_time': 0.0,
                 'generation_time': 0.0,
                 'prompt_count': 0,
             }
-        
-        if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
-            self.track_memory_snapshot(liveinfer, frame_idx)
 
         frame_start_time = time.time()
         frame_processing_time = 0.0
@@ -2195,6 +2171,7 @@ class EventDrivenConversationContext:
         # Check for OOM after input_video_stream call
         if liveinfer.oom_occurred:
             self.handle_oom(frame_idx, global_time)
+            liveinfer.oom_occurred = False
             return {
                 'frame_compute_time': 0.0,
                 'frame_processing_time': time.time() - frame_start_time,
@@ -2210,10 +2187,16 @@ class EventDrivenConversationContext:
         })
         liveinfer.texts_generated_previous = ""
         query, response = liveinfer()
-        
+        if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
+            self.track_memory_snapshot(liveinfer, frame_idx)
+        liveinfer.offload_kv_cache()
+
+        frame_processing_time = time.time() - frame_start_time
+
         # Check for OOM after liveinfer call
         if liveinfer.oom_occurred:
             self.handle_oom(frame_idx, global_time)
+            liveinfer.oom_occurred = False
             return {
                 'frame_compute_time': 0.0,
                 'frame_processing_time': time.time() - frame_start_time,
@@ -2221,7 +2204,6 @@ class EventDrivenConversationContext:
                 'prompt_count': 1 if query else 0,
             }
 
-        frame_processing_time = time.time() - frame_start_time
         timing_data = liveinfer.get_timing_data()
 
         kv_cache_mb = timing_data.get('kv_cache_mb', 0.0)
@@ -2312,9 +2294,15 @@ class EventDrivenConversationContext:
         }
 
     def handle_generation(self, liveinfer, relative_time, start_time):
+        video_time = liveinfer.timing_data.get('generation_video_time', 0.0)
+        
+        # Track memory during generation chunks (use video_time as pseudo frame index for tracking)
+        # Convert video time to frame index for consistency
+        pseudo_frame_idx = int(video_time * Config.FRAME_FPS)
+            
         # Skip processing if OOM has already occurred
         if self.oom_occurred:
-            print(f"⏭️ Skipping generation for conversation {self.conversation_id} due to previous OOM")
+            # print(f"⏭️ Skipping generation for conversation {self.conversation_id} due to previous OOM")
             return {
                 'frame_compute_time': 0.0,
                 'frame_processing_time': 0.0,
@@ -2324,12 +2312,15 @@ class EventDrivenConversationContext:
         chunk_start = time.time()
         liveinfer.texts_generated_previous = ""
         query, response = liveinfer()
-        # query, response = None, None
+        if pseudo_frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
+            self.track_memory_snapshot(liveinfer, pseudo_frame_idx)
+        liveinfer.offload_kv_cache()
         chunk_duration = time.time() - chunk_start
         
         # Check for OOM after liveinfer call
         if liveinfer.oom_occurred:
             self.handle_oom(-1, start_time + chunk_duration)  # Use -1 for generation events
+            liveinfer.oom_occurred = False
             return {
                 'frame_compute_time': 0.0,
                 'frame_processing_time': 0.0,
@@ -2342,14 +2333,6 @@ class EventDrivenConversationContext:
 
         self.total_generation_time += chunk_duration
         # print(f"========== chunk_duration: {chunk_duration}, total_generation_time: {self.total_generation_time}")
-
-        video_time = liveinfer.timing_data.get('generation_video_time', 0.0)
-        
-        # Track memory during generation chunks (use video_time as pseudo frame index for tracking)
-        # Convert video time to frame index for consistency
-        pseudo_frame_idx = int(video_time * Config.FRAME_FPS)
-        if pseudo_frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
-            self.track_memory_snapshot(liveinfer, pseudo_frame_idx)
         
         texts_generated_previous = liveinfer.texts_generated_previous
 
@@ -2396,10 +2379,6 @@ class EventDrivenConversationContext:
 
     def finalize(self, liveinfer):
         self.frame_scores_data = liveinfer.get_frame_scores()
-
-        # Note: Rebuffering calculations are now handled by buffer_data simulation
-        # which provides more accurate user experience metrics
-
         response_time = sum(timing_data['response_time'] for timing_data in self.frame_timing_data)/sum(timing_data['prompt_count'] for timing_data in self.frame_timing_data)
         total_processing_time = sum(self.frame_processing_times)
         visual_embedding_time = self.total_visual_embedding_time
@@ -2407,7 +2386,7 @@ class EventDrivenConversationContext:
         generation_time = self.total_generation_time
         num_processed_frames = len(self.frame_processing_times)
 
-        content_metrics = calculate_metrics_like_benchmark(
+        content_metrics = calculate_metrics(
             self.model,
             self.tokenizer,
             self.video_frames,
@@ -2452,17 +2431,6 @@ class EventDrivenConversationContext:
             'type': 'conversation_end',
             'conversation_id': self.conversation_id
         })
-        
-        # Create processor segments for this conversation
-        processor_segments = []
-        for event in self.event_log:
-            if event.get('type') == 'generation_complete':
-                processor_segments.append({
-                    'conversation_id': self.conversation_id,
-                    'start': event.get('start_time', 0.0),
-                    'end': event.get('time', 0.0),
-                    'generation_duration': event.get('generation_duration', 0.0)
-                })
 
         self.result = {
             'conversation_id': self.conversation_id,
@@ -2511,10 +2479,6 @@ class EventDrivenConversationContext:
         for turn in generated_turns_original:
             timeline_events.append({'time': turn['time'], 'type': 'generated', 'content': turn['text']})
         timeline_events.sort(key=lambda x: x['time'])
-
-        # print(f"\n📊 CONVERSATION SUMMARY:")
-        # print(f"   Total events: {len(timeline_events)} (Generated: {len(self.generated_turns)}, Ground Truth: {len([t for t in self.conversation_data['conversation'] if t['role'] == 'assistant'])})")
-        # print(f"   User prompts: {len([t for t in self.conversation_data['conversation'] if t['role'] == 'user'])}")
 
         self.video_frames = None
         self.completed = True
@@ -2675,7 +2639,7 @@ class LiveBufferVisualizer:
         
         # Sample current memory usage
         if current_time is not None:
-            gpu_mem = get_gpu_memory()
+            gpu_mem = get_gpu_memory_info()['allocated_mb']
             cpu_mem = get_cpu_memory()
             
             self.gpu_memory_times.append(current_time)
@@ -2793,7 +2757,7 @@ class LiveBufferVisualizer:
         plt.close(self.fig)
         print(f"✅ Final live visualization saved: {self.output_path}")
     
-def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', num_conversations=3, random_selection=False, specific_indices=None, data_source='goalstep', custom_threshold=None, conversation_start_times=None):
+def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0', num_conversations=3, random_selection=False, specific_indices=None, data_source='goalstep', custom_threshold=None, conversation_start_times=None):
     """Evaluate multiple conversations using a shared event-driven LiveInfer instance."""
 
     results = []
@@ -3083,9 +3047,13 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         event_type, conversation_id, payload_data = payload
         context = contexts[conversation_id]
 
+        # Skip event processing if OOM has occurred for this conversation
+        if context.oom_occurred:
+            continue
+
         if active_conversation_id != conversation_id:
-            if active_conversation_id is not None:
-                contexts[active_conversation_id].save_liveinfer_state(shared_liveinfer)
+            # if active_conversation_id is not None:
+            #     contexts[active_conversation_id].save_liveinfer_state(shared_liveinfer)
             context.ensure_liveinfer_loaded(shared_liveinfer)
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             active_conversation_id = conversation_id
@@ -3123,10 +3091,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             continue
 
         if event_type == 'frame':
-            # Skip frame processing if OOM has occurred for this conversation
-            if context.oom_occurred:
-                print(f"⏭️ Skipping frame event for conversation {conversation_id} due to OOM")
-                continue
                 
             if shared_liveinfer.generation_state is not None or getattr(shared_liveinfer, 'generation_event_pending', False):
                 context.pending_frame_events.append((event_time, priority, payload_data))
@@ -3216,10 +3180,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
             continue
 
         if event_type == 'generation':
-            # Skip generation processing if OOM has occurred for this conversation
-            if context.oom_occurred:
-                print(f"⏭️ Skipping generation event for conversation {conversation_id} due to OOM")
-                continue
                 
             start_time = max(processor_clock, event_time)
             
@@ -3312,6 +3272,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         update_buffer_to_time(buffer_state, processor_clock, listening_speed, cid, oom_occurred)
     
     # Finalize each conversation and collect results
+    defragment_gpu_memory()
+
     for cid, context in contexts.items():
         context.finalize(shared_liveinfer)
         context.liveinfer_state = None
@@ -3321,17 +3283,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
         all_memory_data[unique_key] = context.memory_data
         if context.result.get('frame_scores_data'):
             all_frame_scores_data[unique_key] = context.result['frame_scores_data']
-        
-        # Log OOM occurrence
-        if context.result.get('oom_occurred', False):
-            print(f"🚨 Conversation {context.conversation_id} experienced OOM at frame {context.result.get('oom_frame_idx', 'unknown')}")
-        conversation_summaries.append({
-            'conversation_id': context.conversation_id,
-            'label': context.conversation_id,
-            'start': context.conversation_start_time,
-            'end': context.actual_end_time,
-            'events': context.event_log
-        })
     
     shared_liveinfer.reset()
 
@@ -3386,7 +3337,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda', n
 
     return results, buffer_data, all_memory_data
 
-def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda', num_conversations=None, random_selection=False, specific_indices=None, data_source='goalstep', conversation_start_times=None):
+def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda:0', num_conversations=None, random_selection=False, specific_indices=None, data_source='goalstep', conversation_start_times=None):
     """Evaluate conversations across different streaming thresholds to analyze threshold sensitivity."""
     import torch
     
@@ -3567,7 +3518,8 @@ class SimpleLiveInfer:
     def capture_state(self):
         state = {
             'last_ids': self.last_ids.detach().clone().cpu() if torch.is_tensor(self.last_ids) else self.last_ids,
-            'past_key_values': move_kv_cache_to_device(self.past_key_values, 'cpu') if self.past_key_values is not None else None,
+            # 'past_key_values': move_kv_cache_to_device(self.past_key_values, 'cpu') if self.past_key_values is not None else None,
+            'past_key_values': self.past_key_values,
             'query_queue': list(self.query_queue),
             'frame_embeds_queue': [(timestamp, embed.detach().cpu() if torch.is_tensor(embed) else embed) for timestamp, embed in list(self.frame_embeds_queue)],
             'video_time': self.video_time,
@@ -3591,7 +3543,8 @@ class SimpleLiveInfer:
                 'tokens_generated': gen_state['tokens_generated'],
                 'total_generation_time': gen_state['total_generation_time'],
                 'next_inputs_embeds_cpu': gen_state['next_inputs_embeds_cpu'].clone() if gen_state['next_inputs_embeds_cpu'] is not None else None,
-                'past_key_values_cpu': move_kv_cache_to_device(gen_state['past_key_values_cpu'], 'cpu') if gen_state['past_key_values_cpu'] is not None else None,
+                # 'past_key_values_cpu': move_kv_cache_to_device(gen_state['past_key_values_cpu'], 'cpu') if gen_state['past_key_values_cpu'] is not None else None,
+                'past_key_values_cpu': gen_state['past_key_values_cpu'],
                 'finished': gen_state['finished'],
                 'chunk_invocations': gen_state['chunk_invocations'],
             }
@@ -3604,7 +3557,8 @@ class SimpleLiveInfer:
             self.last_ids = state['last_ids'].to(self.device)
         else:
             self.last_ids = torch.tensor(state['last_ids'], device=self.device)
-        self.past_key_values = move_kv_cache_to_device(state['past_key_values'], self.device) if state['past_key_values'] is not None else None
+        # self.past_key_values = move_kv_cache_to_device(state['past_key_values'], self.device) if state['past_key_values'] is not None else None
+        self.past_key_values = state['past_key_values']
         self.video_time = state['video_time']
         self.last_frame_idx = state['last_frame_idx']
         self.video_tensor = state['video_tensor']
@@ -3734,10 +3688,12 @@ class SimpleLiveInfer:
                         except RuntimeError as e:
                             if 'out of memory' in str(e).lower():
                                 print("Out of memory in visual_embed")
-                                torch.cuda.empty_cache()
                                 self.oom_occurred = True
                                 # Free GPU frame and break out of frame processing loop
                                 del gpu_frame
+                                del frame_embeds
+                                # release all data on gpu for this liveinfer
+                                defragment_gpu_memory()
                                 break
                             raise e
                         
@@ -3775,7 +3731,7 @@ class SimpleLiveInfer:
             response_tokens, oom_occurred = result
             if oom_occurred:
                 self.oom_occurred = True
-                print(f"🚨 OOM detected in SimpleLiveInfer for conversation {self.current_conversation_id}")
+                # print(f"🚨 OOM detected in SimpleLiveInfer for conversation {self.current_conversation_id}")
         else:
             # Fallback for old format
             response_tokens = result
@@ -3858,15 +3814,14 @@ class SimpleLiveInfer:
         target = past_key_values if past_key_values is not None else self.past_key_values
         if target is None:
             return target
-        
-        if self.device_obj.type == 'cuda':
-            # Get a sample tensor to check current device
-            sample_tensor = self._get_sample_tensor_from_cache(target)
-            
+
+        # Get a sample tensor to check current device
+        sample_tensor = self._get_sample_tensor_from_cache(target)
+        if self.device == 'cuda:0':
             # Only move if we have a tensor and it's not on the target device
-            if sample_tensor is not None and sample_tensor.device != self.device_obj:
+            if sample_tensor is not None and sample_tensor.device != torch.device(self.device):
                 start = time.time()
-                target = move_kv_cache_to_device(target, self.device_obj)
+                target = move_kv_cache_to_device(target, self.device)
                 self._kv_reload_time += time.time() - start
         return target
 
@@ -3882,8 +3837,9 @@ class SimpleLiveInfer:
         # Only move if we have a tensor and it's not already on CPU
         if sample_tensor is not None and sample_tensor.device != torch.device('cpu'):
             start = time.time()
-            target = move_kv_cache_to_device(target, torch.device('cpu'))
+            target = move_kv_cache_to_device(target, 'cpu')
             self._kv_offload_time += time.time() - start
+            
         return target
 
     def _initialize_generation_state(self, video_time, query):
@@ -3909,20 +3865,12 @@ class SimpleLiveInfer:
             formatted_query = None
             self.last_ids = self._added_stream_generation_ids
 
-        # Debug context snapshot (optional insights)
-        # context_info = self._get_context_info()
-        # print(f"📊 CONTEXT FOR GENERATION (Time: {video_time}s):")
-        # print(f"   • Streamed frames processed: {context_info['num_frames']}", end=", ")
-        # print(f"User prompts in history: {context_info['num_prompts']}", end=", ")
-        # print(f"Previous responses: {context_info['num_responses']}", end=", ")
-        # print(f"Total tokens in past_key_values: {context_info['total_tokens']}")
-
         with torch.no_grad():
             inputs_embeds = self.model.get_input_embeddings()(self.last_ids)
             next_inputs_cpu = inputs_embeds.detach().cpu()
 
         # Ensure KV cache resides on CPU while idle
-        self.past_key_values = self._offload_kv_cache(self.past_key_values)
+        # self.past_key_values = self._offload_kv_cache(self.past_key_values)
 
         self.generation_state = {
             'video_time': video_time,
@@ -3945,6 +3893,7 @@ class SimpleLiveInfer:
         with torch.no_grad():
             next_inputs = state['next_inputs_embeds_cpu'].to(self.device)
             past_key_values = self._ensure_kv_on_device(state['past_key_values_cpu'])
+            past_key_values = state['past_key_values_cpu']
 
             buffer = torch.zeros(1, chunk_size, dtype=torch.long, device=self.device)
             # handle OOM with try and except
@@ -3959,8 +3908,10 @@ class SimpleLiveInfer:
                     )
             except RuntimeError as e:
                 if 'out of memory' in str(e).lower():
-                    print("Out of memory")
-                    torch.cuda.empty_cache()
+                    print("Out of memory in execute generation chunk")
+                    del past_key_values
+                    del next_inputs
+                    defragment_gpu_memory()
                     # mark the generation as finished
                     state['finished'] = True
                     all_tokens = torch.cat(state['tokens'], dim=1) if state['tokens'] else torch.empty((1, 0), dtype=torch.long)
@@ -3986,8 +3937,8 @@ class SimpleLiveInfer:
             else:
                 state['next_inputs_embeds_cpu'] = None
 
-            state['past_key_values_cpu'] = self._offload_kv_cache(past_key_values)
-            self.past_key_values = state['past_key_values_cpu']
+            # state['past_key_values_cpu'] = self._offload_kv_cache(past_key_values)
+            # self.past_key_values = state['past_key_values_cpu']
 
             if finished or state['tokens_generated'] >= Config.INPLACE_OUTPUT_SIZE:
                 state['finished'] = True
@@ -4025,11 +3976,12 @@ class SimpleLiveInfer:
                     outputs = self.model(inputs_embeds=inputs_embeds, use_cache=True, past_key_values=self.past_key_values)
                 except RuntimeError as e:
                     if 'out of memory' in str(e).lower():
-                        print("Out of memory in _call_for_streaming")
-                        torch.cuda.empty_cache()
+                        print("Out of memory in call for streaming")
                         self.oom_occurred = True
                         # Free inputs_embeds and return None to indicate OOM
                         del inputs_embeds
+                        del self.past_key_values
+                        defragment_gpu_memory()
                         return None, None
                     raise e
                 
@@ -4052,7 +4004,7 @@ class SimpleLiveInfer:
                 if self.query_queue and video_time >= self.query_queue[0][0]:
                     video_time, query = self.query_queue.popleft()
                     self.trigger_method = 'prompt'
-                    # Note: Response triggers are now tracked in _call_for_response
+                    # Note: Response triggers are now tracked in call for response
                     del last_logits  # Clean up
                     return video_time, query
                 
@@ -4074,7 +4026,7 @@ class SimpleLiveInfer:
                 torch.cuda.empty_cache()  # Force PyTorch to release memory to CUDA
                 
                 if self.last_ids.numel() == 1 and int(self.last_ids.item()) != self.frame_token_interval_id: 
-                    # Note: Response triggers are now tracked in _call_for_response
+                    # Note: Response triggers are now tracked in call for response
                     self.trigger_method = 'score'
                     return video_time, None
         
@@ -4096,9 +4048,7 @@ class SimpleLiveInfer:
             result = self._call_for_streaming()
             streaming_time = time.time() - streaming_start
             
-            # Handle OOM case from _call_for_streaming
             if result is None or result == (None, None):
-                # OOM occurred in _call_for_streaming
                 return None, None
             
             video_time, query = result
@@ -4119,9 +4069,6 @@ class SimpleLiveInfer:
             )
             query, response = self._call_for_response(target_time, query)
 
-        # After this invocation, keep KV cache on CPU to free GPU memory
-        self.past_key_values = self._offload_kv_cache(self.past_key_values)
-
         # Record timing metadata for diagnostics
         kv_cache_mb = calculate_kv_cache_memory_mb(self.past_key_values)
         transfer_record = {
@@ -4137,6 +4084,11 @@ class SimpleLiveInfer:
         self.timing_data['total_call_time'] = time.time() - start_time
 
         return query, response
+
+    def offload_kv_cache(self):
+        self.past_key_values = self._offload_kv_cache(self.past_key_values)
+        if self.generation_state is not None:
+            self.generation_state['past_key_values_cpu'] = self.past_key_values
     
     def get_timing_data(self):
         """Get the timing data for the last operation."""
@@ -4251,7 +4203,7 @@ def main():
     
     # Build model and tokenizer
     model, tokenizer = build_model_and_tokenizer(is_training=False, set_vision_inside=True, **asdict(args))
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     model.to(device)
     model.eval()  # Explicitly set to eval mode to disable dropout, etc.
     
@@ -4333,15 +4285,10 @@ def main():
             conversation_start_times=default_start_times
         )
         
-        # print("\n" + "=" * 60)
-        # print("📊 EVALUATION RESULTS")
-        # print("=" * 60)
-        
         # Calculate aggregate metrics
         avg_ppl = sum(r['lm_ppl'] for r in results) / len(results)
         avg_fluency = sum(r['fluency'] for r in results) / len(results)
         avg_responses_per_video = sum(len(r['generated_turns']) for r in results) / len(results)
-        avg_rebuffering_time = sum(r.get('average_rebuffering_time', 0.0) for r in results) / len(results)
         
         # Calculate time diff metric: average latency per generated response
         # Sum the actual timing components for each response
@@ -5002,7 +4949,7 @@ def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, dev
             # Process frames one by one from CPU to GPU (like VLM streaming)
             if video_tensor is not None and hasattr(video_tensor, 'shape') and video_tensor.shape[0] > 0:
                 # Clear cache before processing
-                torch.cuda.empty_cache()
+                defragment_gpu_memory()
                 
                 # Use the same frame-by-frame approach as VLM streaming
                 # Process only the first frame to minimize memory usage
@@ -5035,10 +4982,9 @@ def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, dev
                 # Clear cache and delete GPU tensors to free memory
                 del single_frame_gpu
                 del single_frame_cpu
-                torch.cuda.empty_cache()
                 
                 # Extract PPL for this response
-                lm_ppl, frame_diff, _, _ = raw_metrics.tolist()
+                lm_ppl, _, _, _ = raw_metrics.tolist()
                 return float(lm_ppl)
             else:
                 return None
@@ -5047,9 +4993,13 @@ def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, dev
             return None
             
     except Exception as e:
-        print(f"PPL calculation error: {e}")
-        traceback.print_exc()
+        assert 'CUDA out of memory' in str(e), f"PPL calculation error: {e}"
+        print(f"CUDA out of memory. Skip the remaining responses of this conversation")
+        defragment_gpu_memory()
         return None
+        # print(f"PPL calculation error: {e}")
+        # traceback.print_exc()
+        # return None
 
 def create_conversation_with_gt_prefix(normalized_conversation, gt_time, user_prompt, gt_content):
     """Create conversation using ground truth responses as context (golden prefix)."""
@@ -5308,7 +5258,7 @@ def create_ppl_over_time_visualization(video_data, output_dir="timing_plots", da
     
     plt.close()
 
-def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, normalized_conversation, generated_turns, device, data_source='goalstep'):
+def calculate_metrics(model, tokenizer, video_tensor, normalized_conversation, generated_turns, device, data_source='goalstep'):
     """Calculate metrics exactly like evaluate.py using stream_evaluate and compute_metrics."""
     
     # Extract ground truth assistant responses from the conversation
@@ -5327,7 +5277,7 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, normalized_
     gt_ppls_vlm_prefix_visual = []  # PPL using VLM responses as context with visual
     
     
-    # print(f"📊 Calculating dual PPL (visual context) for {len(ground_truth_responses)} ground truth responses...")
+    print(f"📊 Calculating dual PPL (visual context) for {len(ground_truth_responses)} ground truth responses...")
     
     for i, gt_response in enumerate(ground_truth_responses):
         
@@ -5365,31 +5315,38 @@ def calculate_metrics_like_benchmark(model, tokenizer, video_tensor, normalized_
         # print(f"📊 VLM Conversation: {vlm_conversation}")
         ppl_vlm_prefix_visual = calculate_ppl_for_response(model, tokenizer, vlm_conversation, video_tensor, device, data_source, use_visual=True, custom_threshold=None, frame_index=frame_index)
                     
-        if ppl_gt_prefix_visual is not None:
-            gt_ppls_gt_prefix_visual.append(ppl_gt_prefix_visual)
-        if ppl_vlm_prefix_visual is not None:
-            gt_ppls_vlm_prefix_visual.append(ppl_vlm_prefix_visual)
+        if ppl_gt_prefix_visual is None or ppl_vlm_prefix_visual is None:
+            print(f"🚨 OOM occurred for conversation {i}")
+            print(f"📊 Video Tensor Shape: {video_tensor.shape}")
+            print(f"📊 Frame Index: {frame_index}")
+            print(f"📊 GT Content: {gt_content}")
+            print(f"📊 GT Time: {gt_time}")
+            print(f"📊 User Prompt: {user_prompt}")
+            print(f"📊 GT Conversation: {gt_conversation}")
+            print(f"📊 VLM Conversation: {vlm_conversation}")
+            break
+        
+        gt_ppls_gt_prefix_visual.append(ppl_gt_prefix_visual)
+        gt_ppls_vlm_prefix_visual.append(ppl_vlm_prefix_visual)
             
-        if i % 10 == 0:  # Progress indicator
-            # print(f"   Processed {i+1}/{len(ground_truth_responses)} GT responses...")
-            # Clean up GPU memory periodically
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        # Clean up GPU memory periodically
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         # Clean up memory after each response to prevent OOM
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     
     # Calculate average PPLs for all four contexts
-    avg_gt_ppl_gt_prefix_visual = sum(gt_ppls_gt_prefix_visual) / len(gt_ppls_gt_prefix_visual)
-    avg_gt_ppl_vlm_prefix_visual = sum(gt_ppls_vlm_prefix_visual) / len(gt_ppls_vlm_prefix_visual)
-    print(f"📊 GT Prefix PPL (Visual): {len(gt_ppls_gt_prefix_visual)} responses, avg PPL: {avg_gt_ppl_gt_prefix_visual:.3f}")
-    print(f"📊 GT Prefix PPL (Visual) range: {min(gt_ppls_gt_prefix_visual):.3f} - {max(gt_ppls_gt_prefix_visual):.3f}")
-    print(f"📊 VLM Prefix PPL (Visual): {len(gt_ppls_vlm_prefix_visual)} responses, avg PPL: {avg_gt_ppl_vlm_prefix_visual:.3f}")
-    print(f"📊 VLM Prefix PPL (Visual) range: {min(gt_ppls_vlm_prefix_visual):.3f} - {max(gt_ppls_vlm_prefix_visual):.3f}")
-    
-    # Use average of visual PPLs as the main metric
-    avg_ppl = (avg_gt_ppl_gt_prefix_visual + avg_gt_ppl_vlm_prefix_visual) / 2 if (avg_gt_ppl_gt_prefix_visual > 0 and avg_gt_ppl_vlm_prefix_visual > 0) else max(avg_gt_ppl_gt_prefix_visual, avg_gt_ppl_vlm_prefix_visual)
+    # avg_gt_ppl_gt_prefix_visual = sum(gt_ppls_gt_prefix_visual) / len(gt_ppls_gt_prefix_visual)
+    if gt_ppls_vlm_prefix_visual:
+        avg_gt_ppl_vlm_prefix_visual = sum(gt_ppls_vlm_prefix_visual) / len(gt_ppls_vlm_prefix_visual)
+    else:
+        avg_gt_ppl_vlm_prefix_visual = 0.0
+    # print(f"📊 GT Prefix PPL (Visual): {len(gt_ppls_gt_prefix_visual)} responses, avg PPL: {avg_gt_ppl_gt_prefix_visual:.3f}")
+    # print(f"📊 GT Prefix PPL (Visual) range: {min(gt_ppls_gt_prefix_visual):.3f} - {max(gt_ppls_gt_prefix_visual):.3f}")
+    # print(f"📊 VLM Prefix PPL (Visual): {len(gt_ppls_vlm_prefix_visual)} responses, avg PPL: {avg_gt_ppl_vlm_prefix_visual:.3f}")
+    # print(f"📊 VLM Prefix PPL (Visual) range: {min(gt_ppls_vlm_prefix_visual):.3f} - {max(gt_ppls_vlm_prefix_visual):.3f}")
     
     return {
         'lm_ppl': avg_gt_ppl_vlm_prefix_visual,
