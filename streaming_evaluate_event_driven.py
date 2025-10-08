@@ -106,7 +106,7 @@ class Config:
     GENERATION_CHUNK_SIZE = 32
 
     # Scheduling
-    SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer'
+    SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer' or 'buffer_age
 
 # =============================================================================
 # IMAGE DIFFERENCE FEATURE CALCULATION
@@ -2785,6 +2785,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
     processor_clock = 0.0
     processor_segments = []
     conversation_summaries = []
+    age_of_conversations = {}
     
     # On-the-fly buffer tracking for each conversation
     listening_speed = Config.USER_LISTENING_SPEED_MAX  # Use listening speed as requested
@@ -2986,6 +2987,12 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     heapq.heappush(cached_events, (event_time, priority, sequence_counter, payload, buffer_level))
                 elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                     heapq.heappush(cached_events, (buffer_level, event_time, priority, sequence_counter, payload))
+                elif Config.SCHEDULING_METHOD == 'buffer_age':
+                    # older conversations have higher priority
+                    if conversation_id not in age_of_conversations:
+                        age_of_conversations[conversation_id] = 0
+                    age = age_of_conversations[conversation_id]
+                    heapq.heappush(cached_events, (buffer_level, -age, event_time, priority, sequence_counter, payload))
                 else:
                     raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
         
@@ -2995,6 +3002,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                 for _, event_time, priority, sequence_counter, payload in cached_events:
+                    heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
+            elif Config.SCHEDULING_METHOD == 'buffer_age':
+                for _, _, event_time, priority, sequence_counter, payload in cached_events:
                     heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
             else:
                 raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
@@ -3039,6 +3049,11 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                             found_lower_buffer = True
                 selected_conversation_id = payload[1][:12]
                 # print(f"🔍 Found lowest {found_lower_buffer}: Selected: {selected_conversation_id} ({buffer_level}), Lowest-buffer: {lowest_buffer_conversation_id} ({lowest_buffer_level})")
+            elif Config.SCHEDULING_METHOD == 'buffer_age':
+                buffer_level, age, event_time, priority, _, payload = heapq.heappop(cached_events)
+                # push back the cached events
+                for _, _, et, pri, seq, pl in cached_events:
+                    heapq.heappush(event_queue, (et, pri, seq, pl))
             else:
                 raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
         else:
@@ -3173,6 +3188,12 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
+                # update age of conversation if not finished
+                age_of_conversations[conversation_id] += 1
+            else:
+                # finished, del age of conversation
+                del age_of_conversations[conversation_id]
+
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
 
@@ -3250,13 +3271,13 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
+                # update age of conversation if not finished
+                age_of_conversations[conversation_id] += 1
             else:
-                # if finished, start processing pending frames
-                while context.pending_frame_events:
-                    pending_time, pending_priority, pending_payload = context.pending_frame_events.popleft()
-                    heapq.heappush(event_queue, (max(processor_clock, pending_time), pending_priority, sequence_counter, ('frame', conversation_id, pending_payload)))
-                    sequence_counter += 1
-                    print("??? pending_frame_events", processor_clock, pending_time)
+                # if finished, del age of conversation
+                assert not context.pending_frame_events, f"pending_frame_events: {context.pending_frame_events}"
+                del age_of_conversations[conversation_id]
+
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
             # print("----END----EVENT", event_type, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id, "--------")
