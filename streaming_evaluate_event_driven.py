@@ -56,10 +56,6 @@ class Config:
     MAX_FRAMES_LIMIT = 5000              # Maximum frames to process
     MIN_FRAMES_LIMIT = 1000              # Minimum frames to process
     
-    # Streaming thresholds for different dataset types
-    STREAMING_THRESHOLD_GOALSTEP = 0.725  # Threshold for goalstep dataset (works well with user queries)
-    STREAMING_THRESHOLD_NARRATION = 0.95  # Threshold for narration dataset (testing higher threshold)
-    
     # Visualization
     OUTPUT_DIR = "timing_plots"
     PLOT_DPI = 300
@@ -72,21 +68,15 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES =600            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 30            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
-    
-    # User-level rebuffering configuration
-    USER_READING_SPEED_MIN = 3.0          # Words per second (slow reading)
-    USER_READING_SPEED_MAX = 5.0          # Words per second (fast reading)
-    USER_LISTENING_SPEED_MIN = 2.0        # Words per second (slow listening)
-    USER_LISTENING_SPEED_MAX = 2.7        # Words per second (fast listening)
     
     # File paths
     DATASET_BASE_PATH = "datasets/ego4d/v2/full_scale_2fps_384"
@@ -103,12 +93,17 @@ class Config:
     EXPECTED_RESPONSE_LENGTH = 20.0
     LENGTH_FACTOR_MIN = 0.5
     LENGTH_FACTOR_MAX = 2.0
-    GENERATION_CHUNK_SIZE = 32
+    
+    # Streaming thresholds for different dataset types
+    STREAMING_THRESHOLD_GOALSTEP = 0.725  # Threshold for goalstep dataset (works well with user queries)
+    STREAMING_THRESHOLD_NARRATION = 0.725  # Threshold for narration dataset (testing higher threshold)
 
     # Scheduling
     SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer' or 'buffer_weighted_score'
     BUFFER_WEIGHTED_SCORE_FACTOR = 1
     EWMA_FACTOR = 0.9
+    GENERATION_CHUNK_SIZE = 32
+    USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
 
 # =============================================================================
 # IMAGE DIFFERENCE FEATURE CALCULATION
@@ -1231,8 +1226,8 @@ def create_processor_timeline(processor_segments, onthefly_buffer_data=None, con
     buffer_output_path = None
     if buffer_data:
         fig_buffer, axes_grid = plt.subplots(
-            2,
             1,
+            2,
             figsize=(Config.PLOT_FIGSIZE_LARGE[0], Config.PLOT_FIGSIZE_MEDIUM[1] * 0.8),
             sharex=True
         )
@@ -1326,7 +1321,7 @@ def create_processor_timeline(processor_segments, onthefly_buffer_data=None, con
                     color='#666666'
                 )
 
-        axes_grid[0].set_title(f'Listening ({Config.USER_LISTENING_SPEED_MAX:.2f} words/s)', fontsize=11)
+        axes_grid[0].set_title(f'Listening', fontsize=11)
         axes_grid[1].set_xlabel('Processor Time (s)')
 
         if data_present:
@@ -2787,13 +2782,13 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
     processor_clock = 0.0
     processor_segments = []
     conversation_summaries = []
-    # default to 0 dict for age_of_conversations, erl_of_conversations, crl_of_conversations
-    age_of_conversations = {cid: 0 for cid in conversation_indices}
-    erl_of_conversations = {cid: 0 for cid in conversation_indices}
-    crl_of_conversations = {cid: 0 for cid in conversation_indices}
+    # defaultdict for age_of_conversations, erl_of_conversations, crl_of_conversations
+    age_of_conversations = defaultdict(int)
+    erl_of_conversations = defaultdict(int)
+    crl_of_conversations = defaultdict(int)
     
     # On-the-fly buffer tracking for each conversation
-    listening_speed = Config.USER_LISTENING_SPEED_MAX  # Use listening speed as requested
+    listening_speed = Config.USER_CONSUMPTION_SPEED  # Use listening speed as requested
     onthefly_buffer_data = {}  
     
     first_conversation_duration = None
@@ -3038,11 +3033,11 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                 buffer_level, event_time, priority, _, payload = heapq.heappop(cached_events)
                 # push back the cached events
-                available_conversation_ids = []
+                available_events = []
                 for bf, et, pri, seq, pl in cached_events:
                     heapq.heappush(event_queue, (et, pri, seq, pl))
                     if event_time == et:
-                        available_conversation_ids.append(pl[1])
+                        available_events.append((et, bf, pl[1]))
                 lowest_buffer_level = float('inf')
                 found_lower_buffer = False
                 for (et, bf, cid) in available_events:
@@ -3088,22 +3083,17 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred)
             
             # Skip buffer updates if OOM has occurred
-            if not context.oom_occurred:
-                buffer_state['pending_responses'].add(context.response_expected)
-                context.response_expected += 1
-                buffer_state['unanswered_prompts'] += 1
-                context.received_prompt_cnt += 1
+            buffer_state['pending_responses'].add(context.response_expected)
+            context.response_expected += 1
+            buffer_state['unanswered_prompts'] += 1
+            context.received_prompt_cnt += 1
 
-                # Record buffer state after adding words
-                buffer_state['buffer'] = 0.0
-                buffer_state['times'].append(processor_clock)
-                buffer_state['values'].append(0.0)
-                buffer_state['rebuffer_times'].append(processor_clock)
-                buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-            else:
-                # Still update conversation counters even if OOM occurred
-                context.response_expected += 1
-                context.received_prompt_cnt += 1
+            # Record buffer state after adding words
+            buffer_state['buffer'] = 0.0
+            buffer_state['times'].append(processor_clock)
+            buffer_state['values'].append(0.0)
+            buffer_state['rebuffer_times'].append(processor_clock)
+            buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
             
             context.handle_prompt(shared_liveinfer, relative_time, payload_data)
             shared_liveinfer.generation_event_pending = context.generation_event_pending
@@ -3157,6 +3147,20 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     
                     buffer_state = onthefly_buffer_data[conversation_id]
                     response_idx = last_event.get('response_idx', 0)
+
+                    # advance to the start time of the chunk, set the buffer to 0
+                    update_buffer_to_time(buffer_state, start_time, listening_speed, conversation_id, context.oom_occurred)
+
+                    # this is exactly the same as when the prompt is processed,
+                    # here we handle the case when the trigger method is score instead of prompt
+                    if last_event.get('trigger_method') == 'score':
+                        buffer_state['buffer'] = 0.0
+                        buffer_state['times'].append(start_time)
+                        buffer_state['values'].append(0.0)
+                        buffer_state['rebuffer_times'].append(start_time)
+                        buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+                        buffer_state['pending_responses'].add(context.response_expected)
+                        context.response_expected += 1
                     
                     # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
                     update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred)
@@ -3171,28 +3175,25 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                                         
                     # Add words to buffer (happens at chunk completion time)
                     if not context.oom_occurred:
-                        if context.processed_prompt_cnt == context.received_prompt_cnt:
-                            buffer_state['buffer'] += word_count
-                            
                         if is_first_chunk:
+                            buffer_state['buffer'] = 0
                             buffer_state['unanswered_prompts'] -= 1
-                            if not is_last_chunk and last_event.get('trigger_method') == 'score':
-                                buffer_state['pending_responses'].add(context.response_expected)
-                                context.response_expected += 1
+                            # if not is_last_chunk and last_event.get('trigger_method') == 'score':
+                            #     buffer_state['pending_responses'].add(context.response_expected)
+                            #     context.response_expected += 1
 
                         if is_last_chunk:
                             buffer_state['pending_responses'].discard(response_idx)
+
+                        # update buffer only if the latest prompt has been processed
+                        if context.processed_prompt_cnt == context.received_prompt_cnt:
+                            buffer_state['buffer'] += word_count
                             
                         # Record buffer state after adding words
                         buffer_state['times'].append(processor_clock)
                         buffer_state['values'].append(buffer_state['buffer'])
                         buffer_state['rebuffer_times'].append(processor_clock)
                         buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-                    else:
-                        # Still update conversation counters even if OOM occurred
-                        if is_first_chunk:
-                            if not is_last_chunk and last_event.get('trigger_method') == 'score':
-                                context.response_expected += 1
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
@@ -3264,11 +3265,12 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                         
                         is_last_chunk = last_event.get('is_last_chunk', False)
                         is_first_chunk = last_event.get('is_first_chunk', False)
-                        if is_first_chunk:
-                            buffer_state['unanswered_prompts'] -= 1
-                            if not is_last_chunk and last_event.get('trigger_method') == 'score':
-                                buffer_state['pending_responses'].add(context.response_expected)
-                                context.response_expected += 1
+                        assert not is_first_chunk, f"is_first_chunk: {is_first_chunk}"
+                        # if is_first_chunk:
+                        #     buffer_state['unanswered_prompts'] -= 1
+                        #     if not is_last_chunk and last_event.get('trigger_method') == 'score':
+                        #         buffer_state['pending_responses'].add(context.response_expected)
+                        #         context.response_expected += 1
                         if is_last_chunk:
                             buffer_state['pending_responses'].discard(response_idx)
 
@@ -3277,13 +3279,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                         buffer_state['values'].append(buffer_state['buffer'])
                         buffer_state['rebuffer_times'].append(processor_clock)
                         buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-                    else:
-                        # Still update conversation counters even if OOM occurred
-                        is_last_chunk = last_event.get('is_last_chunk', False)
-                        is_first_chunk = last_event.get('is_first_chunk', False)
-                        if is_first_chunk:
-                            if not is_last_chunk and last_event.get('trigger_method') == 'score':
-                                context.response_expected += 1
+
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
@@ -3309,12 +3305,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
     # ===== FINALIZE ALL CONVERSATIONS AFTER EVENT LOOP COMPLETES =====
     print("\n🏁 All events processed. Finalizing all conversations...")
-    
-    # Update all conversations to the final processor_clock time
-    for cid, buffer_state in onthefly_buffer_data.items():
-        context = contexts.get(cid)
-        oom_occurred = context.oom_occurred if context else False
-        update_buffer_to_time(buffer_state, processor_clock, listening_speed, cid, oom_occurred)
     
     # Finalize each conversation and collect results
     defragment_gpu_memory()
@@ -4264,8 +4254,6 @@ def main():
     print(f"   • V Placeholder ID: {Config.V_PLACEHOLDER_ID}")
     print(f"   • Default Num Videos: {Config.DEFAULT_NUM_VIDEOS}")
     print(f"   • Debug Thresholds: {Config.DEBUG_THRESHOLDS}")
-    print(f"   • User Reading Speed: {Config.USER_READING_SPEED_MIN}-{Config.USER_READING_SPEED_MAX} wps")
-    print(f"   • User Listening Speed: {Config.USER_LISTENING_SPEED_MIN}-{Config.USER_LISTENING_SPEED_MAX} wps")
     
     # Create filtered dataset with configurable data source
     data_source = getattr(args, 'data_source', 'narration')  # Default to narration
