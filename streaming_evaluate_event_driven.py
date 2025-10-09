@@ -68,7 +68,7 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 10            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 50            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
@@ -102,7 +102,7 @@ class Config:
     SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer' or 'buffer_weighted_score'
     BUFFER_WEIGHTED_SCORE_FACTOR = 1
     EWMA_FACTOR = 0.9
-    GENERATION_CHUNK_SIZE = 8
+    GENERATION_CHUNK_SIZE = 32
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
 
 # =============================================================================
@@ -2567,13 +2567,13 @@ class LiveBufferVisualizer:
         
         # Configure scheduling axes
         self.ax_scheduling.set_xlabel('Processor Time (s)')
-        self.ax_scheduling.set_ylabel('Buffer Level (words)')
-        self.ax_scheduling.set_title('Scheduling Buffer Levels')
+        self.ax_scheduling.set_ylabel('Scheduling Decisions')
+        self.ax_scheduling.set_title('Scheduling Decisions')
         self.ax_scheduling.grid(True, alpha=0.3)
         
         self.ax_scheduling_diff.set_xlabel('Processor Time (s)')
-        self.ax_scheduling_diff.set_ylabel('Buffer Level Difference (words)')
-        self.ax_scheduling_diff.set_title('Selected vs Lowest Buffer Level')
+        self.ax_scheduling_diff.set_ylabel('Scheduling Scores')
+        self.ax_scheduling_diff.set_title('Scheduling Scores')
         self.ax_scheduling_diff.grid(True, alpha=0.3)
         
         # Store line objects for each conversation
@@ -2588,9 +2588,9 @@ class LiveBufferVisualizer:
         
         # Scheduling lines
         self.selected_buffer_line, = self.ax_scheduling.plot([], [], color='#d62728', linewidth=2, 
-                                                           label='Selected Buffer Level', alpha=0.9)
+                                                           label='Selected Lowest', alpha=0.9)
         self.lowest_buffer_line, = self.ax_scheduling.plot([], [], color='#ff7f0e', linewidth=2, 
-                                                         label='Lowest Buffer Level', alpha=0.9)
+                                                         label='Selected Nonzero', alpha=0.9)
         self.buffer_diff_line, = self.ax_scheduling_diff.plot([], [], color='#9467bd', linewidth=2, 
                                                             label='Buffer Level Difference', alpha=0.9)
         
@@ -2612,12 +2612,6 @@ class LiveBufferVisualizer:
         self.gpu_memory_values = []
         self.cpu_memory_times = []
         self.cpu_memory_values = []
-        
-        # Initialize scheduling tracking lists
-        self.scheduling_times = []
-        self.selected_buffer_levels = []
-        self.lowest_buffer_levels = []
-        self.buffer_differences = []
         
         plt.tight_layout()
         
@@ -2682,13 +2676,13 @@ class LiveBufferVisualizer:
             self.scheduling_times = scheduling_data.get('times', [])
             self.selected_lowest = scheduling_data.get('selected_lowest', [])
             self.selected_increment = scheduling_data.get('selected_increment', [])
-            self.buffer_differences = scheduling_data.get('buffer_differences', [])
+            self.selected_score = scheduling_data.get('selected_score', [])
             
             # Update scheduling plots
             if self.scheduling_times:
                 self.selected_buffer_line.set_data(self.scheduling_times, self.selected_lowest)
                 self.lowest_buffer_line.set_data(self.scheduling_times, self.selected_increment)
-                self.buffer_diff_line.set_data(self.scheduling_times, self.buffer_differences)
+                self.buffer_diff_line.set_data(self.scheduling_times, self.selected_score)
         
         # Update axis limits
         if max_time > 0:
@@ -2706,20 +2700,15 @@ class LiveBufferVisualizer:
             self.ax_rebuffer.set_ylim(0, max_rebuffer * 1.1)
         
         # Update scheduling axis limits
-        if self.selected_buffer_levels:
-            max_selected = max(self.selected_lowest)
-            max_lowest = max(self.selected_increment)
-            max_buffers = max(max_selected, max_lowest)
-            self.ax_scheduling.set_ylim(0, max_buffers * 1.1)
+        if self.selected_lowest:
+            max_selected_lowest = max(self.selected_lowest)
+            max_selected_increment = max(self.selected_increment)
+            max_selected = max(max_selected_lowest, max_selected_increment)
+            self.ax_scheduling.set_ylim(0, max_selected * 1.1)
         
-        if self.buffer_differences:
-            max_diff = max(self.buffer_differences)
-            min_diff = min(self.buffer_differences)
-            diff_range = max_diff - min_diff
-            if diff_range > 0:
-                self.ax_scheduling_diff.set_ylim(min_diff - diff_range * 0.1, max_diff + diff_range * 0.1)
-            else:
-                self.ax_scheduling_diff.set_ylim(0, max_diff * 1.1)
+        if self.selected_score:
+            max_selected_score = max(self.selected_score)
+            self.ax_scheduling_diff.set_ylim(0, max_selected_score * 1.1)
         
         # Update memory axis limits
         if self.gpu_memory_values:
@@ -3035,9 +3024,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             'times': scheduling_selection_times,
             'selected_lowest': scheduling_selected_lowest_buffer,
             'selected_increment': scheduling_selected_increment,
-            'buffer_differences': [increment + lowest for lowest, increment in zip(scheduling_selected_lowest_buffer, scheduling_selected_increment)]
+            'selected_score': [increment + lowest for lowest, increment in zip(scheduling_selected_lowest_buffer, scheduling_selected_increment)]
         }
-        print("scheduling_data", scheduling_data)
         live_viz.update(onthefly_buffer_data, current_time=processor_clock, scheduling_data=scheduling_data)
         
         # flush out any delayed events to process prompts first
@@ -3055,7 +3043,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             else:
                 # delay frames to the processor clock but keep the time of the event
                 # if no prompt is found, the frames will be processed in order of the event queue as original
-                # cached_events.append((event_time, priority, sequence_counter, payload))
                 buffer_state = onthefly_buffer_data[conversation_id]
                 buffer_level = buffer_state['buffer']
                 if Config.SCHEDULING_METHOD == 'earliest_available':
@@ -3084,7 +3071,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         if cached_events:
             print("cached_events")
             for event_time, priority, sequence_counter, payload, buffer_level in cached_events:
-                print(event_time, payload[0], payload[1][:12])
+                print(event_time, buffer_level, payload[0], payload[1][:12])
         
         scheduled_event = False
         
@@ -3102,14 +3089,24 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
             event_time, priority, _, payload = unprocessed_prompt_event
         elif cached_events:
+            selected_lowest = 1
             if Config.SCHEDULING_METHOD == 'earliest_available':
                 event_time, priority, sequence_counter, payload, buffer_level = heapq.heappop(cached_events)
-                selected_lowest = 1
+                lowest_buffer_level = buffer_level
+                # check the lowest buffer level of the cached events
+                for cid, buffer_state in onthefly_buffer_data.items():
+                    available_buffer_level = buffer_state['buffer']
+                    in_cached_events = False
+                    for et, pri, seq, pl, bf in cached_events:
+                        if cid == pl[1]:
+                            in_cached_events = True
+                            break
+                    if in_cached_events and available_buffer_level < lowest_buffer_level:
+                        selected_lowest = 0
+                        lowest_buffer_level = available_buffer_level
+                # push back the cached events
                 for et, pri, seq, pl, bf in cached_events:
                     heapq.heappush(event_queue, (et, pri, seq, pl))
-                    if event_time == et:
-                        if bf < buffer_level:
-                            selected_lowest = 0
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                 buffer_level, event_time, priority, _, payload = heapq.heappop(cached_events)
                 # push back the cached events
@@ -3131,10 +3128,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             else:
                 raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
 
-            scheduling_selected_lowest_buffer.append(selected_lowest + scheduling_selected_lowest_buffer[-1])
-            selection_time = max(event_time, processor_clock)
-            scheduling_selection_times.append(selection_time)
-            scheduling_selected_increment.append(1)
+            # only interested in scheduled events
             scheduled_event = True
         else:
             event_time, priority, _, payload = heapq.heappop(event_queue)
@@ -3152,6 +3146,14 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             context.ensure_liveinfer_loaded(shared_liveinfer)
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             active_conversation_id = conversation_id
+
+        # pend all late frames
+        if event_type == 'frame':
+            # this is necessary to handle frames that arrive before the generation event is finished
+            if shared_liveinfer.generation_state is not None or getattr(shared_liveinfer, 'generation_event_pending', False):
+                shared_liveinfer.pending_frame_events.append((event_time, priority, payload_data))
+                context.save_liveinfer_state(shared_liveinfer)
+                continue
 
         relative_time = max(0.0, event_time - context.conversation_start_time)
         print("--------EVENT", event_type, event_time, processor_clock, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id[:12], "--------")
@@ -3180,13 +3182,13 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             context.save_liveinfer_state(shared_liveinfer)
             continue
 
+        # now the event is at least frame or generation
+        if scheduled_event:
+            scheduling_selected_lowest_buffer.append(selected_lowest + scheduling_selected_lowest_buffer[-1])
+            selection_time = max(event_time, processor_clock)
+            scheduling_selection_times.append(selection_time)
+
         if event_type == 'frame':
-            
-            # this is necessary to handle frames that arrive before the generation event is finished
-            if shared_liveinfer.generation_state is not None or getattr(shared_liveinfer, 'generation_event_pending', False):
-                shared_liveinfer.pending_frame_events.append((event_time, priority, payload_data))
-                context.save_liveinfer_state(shared_liveinfer)
-                continue
 
             start_time = max(processor_clock, event_time)
             
@@ -3285,8 +3287,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
 
-            # valid_scheduling = scheduled_event and word_count > 0
-            # scheduling_selected_increment.append(valid_scheduling + scheduling_selected_increment[-1])
+            if scheduled_event:
+                valid_scheduling = word_count > 0
+                scheduling_selected_increment.append(valid_scheduling + scheduling_selected_increment[-1])
 
             # print("----END----EVENT", event_type, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id, "--------")
             continue
@@ -3376,8 +3379,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
 
-            # valid_scheduling = scheduled_event and word_count > 0
-            # scheduling_selected_increment.append(valid_scheduling + scheduling_selected_increment[-1])
+            if scheduled_event:
+                valid_scheduling = word_count > 0
+                scheduling_selected_increment.append(valid_scheduling + scheduling_selected_increment[-1])
 
             # print("----END----EVENT", event_type, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id, "--------")
             continue
