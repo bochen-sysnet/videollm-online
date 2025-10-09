@@ -2529,17 +2529,15 @@ class LiveBufferVisualizer:
         for i, cid in enumerate(self.conversation_ids):
             self.colors[cid] = base_colors[i % len(base_colors)]
         
-        # Create figure with 6 subplots: buffer, rebuffering, GPU memory, CPU memory, scheduling metrics
-        self.fig, self.axes = plt.subplots(3, 2, figsize=(16, 15))
+        # Create figure with 4 subplots: buffer, rebuffering, combined GPU+CPU memory, scheduling metrics
+        self.fig, self.axes = plt.subplots(2, 2, figsize=(16, 10))
         self.fig.suptitle(f'Live System Monitoring - {data_source.title()} (Listening Mode)', 
                          fontsize=14, fontweight='bold')
         
         self.ax_buffer = self.axes[0, 0]
         self.ax_rebuffer = self.axes[0, 1]
-        self.ax_gpu = self.axes[1, 0]
-        self.ax_cpu = self.axes[1, 1]
-        self.ax_scheduling = self.axes[2, 0]
-        self.ax_scheduling_diff = self.axes[2, 1]
+        self.ax_memory = self.axes[1, 0]  # Combined GPU and CPU memory
+        self.ax_scheduling = self.axes[1, 1]  # Combined scheduling metrics
         
         # Configure buffer axes
         self.ax_buffer.set_ylabel('Buffer Size (words)')
@@ -2553,46 +2551,35 @@ class LiveBufferVisualizer:
         self.ax_rebuffer.set_title('Cumulative Rebuffering Time')
         self.ax_rebuffer.grid(True, alpha=0.3)
         
-        # Configure GPU memory axes
-        self.ax_gpu.set_xlabel('Processor Time (s)')
-        self.ax_gpu.set_ylabel('GPU Memory (MB)')
-        self.ax_gpu.set_title('GPU Memory Usage (nvidia-smi)')
-        self.ax_gpu.grid(True, alpha=0.3)
+        # Configure combined memory axes
+        self.ax_memory.set_xlabel('Processor Time (s)')
+        self.ax_memory.set_ylabel('Memory Usage (MB)')
+        self.ax_memory.set_title('Memory Usage (GPU + CPU)')
+        self.ax_memory.grid(True, alpha=0.3)
         
-        # Configure CPU memory axes
-        self.ax_cpu.set_xlabel('Processor Time (s)')
-        self.ax_cpu.set_ylabel('CPU Memory (MB)')
-        self.ax_cpu.set_title('CPU Memory Usage (Process RSS)')
-        self.ax_cpu.grid(True, alpha=0.3)
-        
-        # Configure scheduling axes
+        # Configure combined scheduling axes
         self.ax_scheduling.set_xlabel('Processor Time (s)')
-        self.ax_scheduling.set_ylabel('Scheduling Decisions')
-        self.ax_scheduling.set_title('Scheduling Decisions')
+        self.ax_scheduling.set_ylabel('Scheduling Metrics')
+        self.ax_scheduling.set_title('Scheduling Decisions & Scores')
         self.ax_scheduling.grid(True, alpha=0.3)
-        
-        self.ax_scheduling_diff.set_xlabel('Processor Time (s)')
-        self.ax_scheduling_diff.set_ylabel('Scheduling Scores')
-        self.ax_scheduling_diff.set_title('Scheduling Scores')
-        self.ax_scheduling_diff.grid(True, alpha=0.3)
         
         # Store line objects for each conversation
         self.buffer_lines = {}
         self.rebuffer_lines = {}
         
-        # Single line for GPU and CPU (system-wide)
-        self.gpu_line, = self.ax_gpu.plot([], [], color='#1f77b4', linewidth=2.5, 
+        # Combined memory lines (both GPU and CPU on same plot)
+        self.gpu_line, = self.ax_memory.plot([], [], color='#1f77b4', linewidth=2.5, 
                                           label='GPU Memory', alpha=0.9)
-        self.cpu_line, = self.ax_cpu.plot([], [], color='#2ca02c', linewidth=2.5, 
+        self.cpu_line, = self.ax_memory.plot([], [], color='#2ca02c', linewidth=2.5, 
                                           label='CPU Memory', alpha=0.9)
         
-        # Scheduling lines
+        # Combined scheduling lines (both decisions and scores on same plot)
         self.selected_buffer_line, = self.ax_scheduling.plot([], [], color='#d62728', linewidth=2, 
                                                            label='Selected Lowest', alpha=0.9)
         self.lowest_buffer_line, = self.ax_scheduling.plot([], [], color='#ff7f0e', linewidth=2, 
                                                          label='Selected Nonzero', alpha=0.9)
-        self.buffer_diff_line, = self.ax_scheduling_diff.plot([], [], color='#9467bd', linewidth=2, 
-                                                            label='Buffer Level Difference', alpha=0.9)
+        self.buffer_diff_line, = self.ax_scheduling.plot([], [], color='#9467bd', linewidth=2, 
+                                                            label='Scheduling Scores', alpha=0.9)
         
         for cid in self.conversation_ids:
             color = self.colors[cid]
@@ -2602,10 +2589,8 @@ class LiveBufferVisualizer:
                                                               alpha=0.9)
         
         self.ax_buffer.legend(loc='upper right', fontsize=8, title='Conversation')
-        self.ax_gpu.legend(loc='upper left', fontsize=8)
-        self.ax_cpu.legend(loc='upper left', fontsize=8)
+        self.ax_memory.legend(loc='upper left', fontsize=8)
         self.ax_scheduling.legend(loc='upper right', fontsize=8)
-        self.ax_scheduling_diff.legend(loc='upper right', fontsize=8)
         
         # Initialize memory tracking lists
         self.gpu_memory_times = []
@@ -2667,7 +2652,7 @@ class LiveBufferVisualizer:
             self.cpu_memory_times.append(current_time)
             self.cpu_memory_values.append(cpu_mem)
             
-            # Update memory plots
+            # Update memory plots (combined on same axis)
             self.gpu_line.set_data(self.gpu_memory_times, self.gpu_memory_values)
             self.cpu_line.set_data(self.cpu_memory_times, self.cpu_memory_values)
         
@@ -2678,7 +2663,7 @@ class LiveBufferVisualizer:
             self.selected_increment = scheduling_data.get('selected_increment', [])
             self.selected_score = scheduling_data.get('selected_score', [])
             
-            # Update scheduling plots
+            # Update scheduling plots (combined on same axis)
             if self.scheduling_times:
                 self.selected_buffer_line.set_data(self.scheduling_times, self.selected_lowest)
                 self.lowest_buffer_line.set_data(self.scheduling_times, self.selected_increment)
@@ -2688,10 +2673,8 @@ class LiveBufferVisualizer:
         if max_time > 0:
             self.ax_buffer.set_xlim(0, max_time * 1.05)
             self.ax_rebuffer.set_xlim(0, max_time * 1.05)
-            self.ax_gpu.set_xlim(0, max_time * 1.05)
-            self.ax_cpu.set_xlim(0, max_time * 1.05)
+            self.ax_memory.set_xlim(0, max_time * 1.05)
             self.ax_scheduling.set_xlim(0, max_time * 1.05)
-            self.ax_scheduling_diff.set_xlim(0, max_time * 1.05)
         
         if max_buffer > 0:
             self.ax_buffer.set_ylim(0, max_buffer * 1.1)
@@ -2699,25 +2682,25 @@ class LiveBufferVisualizer:
         if max_rebuffer > 0:
             self.ax_rebuffer.set_ylim(0, max_rebuffer * 1.1)
         
-        # Update scheduling axis limits
-        if self.selected_lowest:
-            max_selected_lowest = max(self.selected_lowest)
-            max_selected_increment = max(self.selected_increment)
-            max_selected = max(max_selected_lowest, max_selected_increment)
-            self.ax_scheduling.set_ylim(0, max_selected * 1.1)
-        
-        if self.selected_score:
-            max_selected_score = max(self.selected_score)
-            self.ax_scheduling_diff.set_ylim(0, max_selected_score * 1.1)
-        
-        # Update memory axis limits
+        # Update combined memory axis limits
+        max_memory = 0
         if self.gpu_memory_values:
-            max_gpu = max(self.gpu_memory_values)
-            self.ax_gpu.set_ylim(0, max_gpu * 1.1)
-        
+            max_memory = max(max_memory, max(self.gpu_memory_values))
         if self.cpu_memory_values:
-            max_cpu = max(self.cpu_memory_values)
-            self.ax_cpu.set_ylim(0, max_cpu * 1.1)
+            max_memory = max(max_memory, max(self.cpu_memory_values))
+        if max_memory > 0:
+            self.ax_memory.set_ylim(0, max_memory * 1.1)
+        
+        # Update scheduling axis limits
+        max_scheduling = 0
+        if self.selected_lowest:
+            max_scheduling = max(max_scheduling, max(self.selected_lowest))
+        if self.selected_increment:
+            max_scheduling = max(max_scheduling, max(self.selected_increment))
+        if self.selected_score:
+            max_scheduling = max(max_scheduling, max(self.selected_score))
+        if max_scheduling > 0:
+            self.ax_scheduling.set_ylim(0, max_scheduling * 1.1)
         
         # Redraw and save
         self.fig.canvas.draw()
@@ -2764,8 +2747,8 @@ class LiveBufferVisualizer:
         if max_time > 0:
             self.ax_buffer.set_xlim(0, max_time * 1.05)
             self.ax_rebuffer.set_xlim(0, max_time * 1.05)
-            self.ax_gpu.set_xlim(0, max_time * 1.05)
-            self.ax_cpu.set_xlim(0, max_time * 1.05)
+            self.ax_memory.set_xlim(0, max_time * 1.05)
+            self.ax_scheduling.set_xlim(0, max_time * 1.05)
         
         if max_buffer > 0:
             self.ax_buffer.set_ylim(0, max_buffer * 1.1)
@@ -2773,29 +2756,34 @@ class LiveBufferVisualizer:
         if max_rebuffer > 0:
             self.ax_rebuffer.set_ylim(0, max_rebuffer * 1.1)
         
-        # Update memory axis limits
+        # Update combined memory axis limits
+        max_memory = 0
+        min_memory = float('inf')
+        memory_stats = []
+        
         if self.gpu_memory_values:
             max_gpu = max(self.gpu_memory_values)
             min_gpu = min(self.gpu_memory_values)
-            self.ax_gpu.set_ylim(min_gpu * 0.95, max_gpu * 1.05)
-            
-            # Add stats text
             avg_gpu = sum(self.gpu_memory_values) / len(self.gpu_memory_values)
-            self.ax_gpu.text(0.02, 0.98, 
-                f'Min: {min_gpu:.0f} MB\nAvg: {avg_gpu:.0f} MB\nMax: {max_gpu:.0f} MB',
-                transform=self.ax_gpu.transAxes, va='top', ha='left',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.7), fontsize=9)
+            max_memory = max(max_memory, max_gpu)
+            min_memory = min(min_memory, min_gpu)
+            memory_stats.append(f'GPU: {min_gpu:.0f}-{max_gpu:.0f} MB (avg: {avg_gpu:.0f})')
         
         if self.cpu_memory_values:
             max_cpu = max(self.cpu_memory_values)
             min_cpu = min(self.cpu_memory_values)
-            self.ax_cpu.set_ylim(min_cpu * 0.95, max_cpu * 1.05)
-            
-            # Add stats text
             avg_cpu = sum(self.cpu_memory_values) / len(self.cpu_memory_values)
-            self.ax_cpu.text(0.02, 0.98,
-                f'Min: {min_cpu:.0f} MB\nAvg: {avg_cpu:.0f} MB\nMax: {max_cpu:.0f} MB',
-                transform=self.ax_cpu.transAxes, va='top', ha='left',
+            max_memory = max(max_memory, max_cpu)
+            min_memory = min(min_memory, min_cpu)
+            memory_stats.append(f'CPU: {min_cpu:.0f}-{max_cpu:.0f} MB (avg: {avg_cpu:.0f})')
+        
+        if max_memory > 0:
+            self.ax_memory.set_ylim(min_memory * 0.95, max_memory * 1.05)
+            
+            # Add combined stats text
+            stats_text = '\n'.join(memory_stats)
+            self.ax_memory.text(0.02, 0.98, stats_text,
+                transform=self.ax_memory.transAxes, va='top', ha='left',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.7), fontsize=9)
         
         # Save final high-quality version
