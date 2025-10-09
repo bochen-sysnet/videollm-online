@@ -102,7 +102,7 @@ class Config:
     SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer' or 'buffer_weighted_score'
     BUFFER_WEIGHTED_SCORE_FACTOR = 1
     EWMA_FACTOR = 0.9
-    GENERATION_CHUNK_SIZE = 32
+    GENERATION_CHUNK_SIZE = 8
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
 
 # =============================================================================
@@ -2276,11 +2276,11 @@ class EventDrivenConversationContext:
                 liveinfer.update_frame_response_length(frame_idx, word_count, self.conversation_id)
             if response:
                 self.response_generated += 1
-            #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Response: {response}")
-            # elif texts_generated_previous:
-            #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Chunk: {texts_generated_previous}")
-            # elif query:
-            #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Query: {query}")
+                print(f"[t={self.conversation_start_time + relative_time:.2f}s] Response: {response}")
+            elif texts_generated_previous:
+                print(f"[t={self.conversation_start_time + relative_time:.2f}s] Chunk: {texts_generated_previous}")
+            elif query:
+                print(f"[t={self.conversation_start_time + relative_time:.2f}s] Query: {query}")
             # print(f"  └─ Generation time: {frame_processing_time:.3f}s\t start_time: {start_time:.3f}\t prompt_idx: {self.response_generated}")
 
         self.frames_processed += 1
@@ -2360,11 +2360,11 @@ class EventDrivenConversationContext:
                 liveinfer.update_frame_response_length(pseudo_frame_idx, word_count, self.conversation_id)
             if response:
                 self.response_generated += 1
-            #     print(f"[t={video_time:.2f}s] Response: {response}")
-            # elif texts_generated_previous:
-            #     print(f"[t={video_time:.2f}s] Chunk: {texts_generated_previous}")
-            # elif query:
-            #     print(f"[t={video_time:.2f}s] Query: {query}")
+                print(f"[t={video_time:.2f}s] Response: {response}")
+            elif texts_generated_previous:
+                print(f"[t={video_time:.2f}s] Chunk: {texts_generated_previous}")
+            elif query:
+                print(f"[t={video_time:.2f}s] Query: {query}")
             # print(f"  └─ Generation time: {chunk_duration:.3f}s\t start_time: {start_time:.3f}\t prompt_idx: {self.response_generated}")
         return {
             'frame_compute_time': 0.0,
@@ -3231,20 +3231,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 
                 buffer_state = onthefly_buffer_data[conversation_id]
                 response_idx = last_event.get('response_idx', 0)
-
-                # advance to the start time of the chunk, set the buffer to 0
-                update_buffer_to_time(buffer_state, start_time, listening_speed, conversation_id, context.oom_occurred)
-
-                # this is exactly the same as when the prompt is processed,
-                # here we handle the case when the trigger method is score instead of prompt
-                if last_event.get('trigger_method') == 'score':
-                    buffer_state['buffer'] = 0.0
-                    buffer_state['times'].append(start_time)
-                    buffer_state['values'].append(0.0)
-                    buffer_state['rebuffer_times'].append(start_time)
-                    buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-                    buffer_state['pending_responses'].add(context.response_expected)
-                    context.response_expected += 1
                 
                 # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
                 update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred)
@@ -3261,15 +3247,20 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 if not context.oom_occurred:
                     buffer_state['buffer'] = 0
                     buffer_state['unanswered_prompts'] -= 1
+                    if last_event.get('trigger_method') == 'score':
+                        buffer_state['pending_responses'].add(context.response_expected)
+                        context.response_expected += 1
 
                     if is_last_chunk:
                         buffer_state['pending_responses'].discard(response_idx)
+                        if '2a8' in conversation_id:
+                            print("-----------discard pending response", response_idx, buffer_state['pending_responses'])
                         assert shared_liveinfer.generation_state is None, f"generation_state: {shared_liveinfer.generation_state}"
 
                     # update buffer only if the latest prompt has been processed
                     if context.processed_prompt_cnt == context.received_prompt_cnt:
                         buffer_state['buffer'] += word_count
-                        
+
                     # Record buffer state after adding words
                     buffer_state['times'].append(processor_clock)
                     buffer_state['values'].append(buffer_state['buffer'])
@@ -3281,7 +3272,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 # update age of conversation if not finished
                 age_of_conversations[conversation_id] += 1
             else:
-                print("FInished frame event, pending_frame_events", shared_liveinfer.pending_frame_events)
                 # finished, reset age of conversation
                 age_of_conversations[conversation_id] = 0
                 # update erl of conversation
@@ -3352,11 +3342,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     is_last_chunk = last_event.get('is_last_chunk', False)
                     is_first_chunk = last_event.get('is_first_chunk', False)
                     assert not is_first_chunk, f"is_first_chunk: {is_first_chunk}"
-                    # if is_first_chunk:
-                    #     buffer_state['unanswered_prompts'] -= 1
-                    #     if not is_last_chunk and last_event.get('trigger_method') == 'score':
-                    #         buffer_state['pending_responses'].add(context.response_expected)
-                    #         context.response_expected += 1
+                    
                     if is_last_chunk:
                         buffer_state['pending_responses'].discard(response_idx)
                         assert shared_liveinfer.generation_state is None, f"generation_state: {shared_liveinfer.generation_state}"
