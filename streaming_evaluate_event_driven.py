@@ -68,7 +68,7 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 30            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 10            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
@@ -2119,14 +2119,14 @@ class EventDrivenConversationContext:
             self.initial_memory = get_gpu_memory_info()['allocated_mb']
         else:
             liveinfer.restore_state(self.liveinfer_state)
-            liveinfer.set_conversation_context(self.conversation_id)  # Ensure context is set after restore
+            # liveinfer.set_conversation_context(self.conversation_id)  # Ensure context is set after restore
         self.generation_event_pending = getattr(liveinfer, 'generation_event_pending', False)
-        self.pending_frame_events = collections.deque()
 
     def save_liveinfer_state(self, liveinfer):
         if self.oom_occurred:
             return
         self.liveinfer_state = liveinfer.capture_state()
+        # print("saved pending_frame_events (2)", liveinfer.pending_frame_events, self.conversation_id[:12])
 
     def handle_prompt(self, liveinfer, relative_time, prompt_content):
         liveinfer.input_query_stream(prompt_content, video_time=relative_time)
@@ -2138,7 +2138,7 @@ class EventDrivenConversationContext:
         })
 
     def schedule_generation_event(self, event_queue, event_time, sequence_counter):
-        # print("schedule_generation_event", self.generation_event_pending, event_time, sequence_counter)
+        print("schedule_generation_event", self.generation_event_pending, event_time, sequence_counter)
         if self.generation_event_pending:
             return sequence_counter
         heapq.heappush(event_queue, (event_time, 1, sequence_counter, ('generation', self.conversation_id, None)))
@@ -2529,8 +2529,8 @@ class LiveBufferVisualizer:
         for i, cid in enumerate(self.conversation_ids):
             self.colors[cid] = base_colors[i % len(base_colors)]
         
-        # Create figure with 4 subplots: buffer, rebuffering, GPU memory, CPU memory
-        self.fig, self.axes = plt.subplots(2, 2, figsize=(16, 10))
+        # Create figure with 6 subplots: buffer, rebuffering, GPU memory, CPU memory, scheduling metrics
+        self.fig, self.axes = plt.subplots(3, 2, figsize=(16, 15))
         self.fig.suptitle(f'Live System Monitoring - {data_source.title()} (Listening Mode)', 
                          fontsize=14, fontweight='bold')
         
@@ -2538,6 +2538,8 @@ class LiveBufferVisualizer:
         self.ax_rebuffer = self.axes[0, 1]
         self.ax_gpu = self.axes[1, 0]
         self.ax_cpu = self.axes[1, 1]
+        self.ax_scheduling = self.axes[2, 0]
+        self.ax_scheduling_diff = self.axes[2, 1]
         
         # Configure buffer axes
         self.ax_buffer.set_ylabel('Buffer Size (words)')
@@ -2563,6 +2565,17 @@ class LiveBufferVisualizer:
         self.ax_cpu.set_title('CPU Memory Usage (Process RSS)')
         self.ax_cpu.grid(True, alpha=0.3)
         
+        # Configure scheduling axes
+        self.ax_scheduling.set_xlabel('Processor Time (s)')
+        self.ax_scheduling.set_ylabel('Buffer Level (words)')
+        self.ax_scheduling.set_title('Scheduling Buffer Levels')
+        self.ax_scheduling.grid(True, alpha=0.3)
+        
+        self.ax_scheduling_diff.set_xlabel('Processor Time (s)')
+        self.ax_scheduling_diff.set_ylabel('Buffer Level Difference (words)')
+        self.ax_scheduling_diff.set_title('Selected vs Lowest Buffer Level')
+        self.ax_scheduling_diff.grid(True, alpha=0.3)
+        
         # Store line objects for each conversation
         self.buffer_lines = {}
         self.rebuffer_lines = {}
@@ -2572,6 +2585,14 @@ class LiveBufferVisualizer:
                                           label='GPU Memory', alpha=0.9)
         self.cpu_line, = self.ax_cpu.plot([], [], color='#2ca02c', linewidth=2.5, 
                                           label='CPU Memory', alpha=0.9)
+        
+        # Scheduling lines
+        self.selected_buffer_line, = self.ax_scheduling.plot([], [], color='#d62728', linewidth=2, 
+                                                           label='Selected Buffer Level', alpha=0.9)
+        self.lowest_buffer_line, = self.ax_scheduling.plot([], [], color='#ff7f0e', linewidth=2, 
+                                                         label='Lowest Buffer Level', alpha=0.9)
+        self.buffer_diff_line, = self.ax_scheduling_diff.plot([], [], color='#9467bd', linewidth=2, 
+                                                            label='Buffer Level Difference', alpha=0.9)
         
         for cid in self.conversation_ids:
             color = self.colors[cid]
@@ -2583,12 +2604,20 @@ class LiveBufferVisualizer:
         self.ax_buffer.legend(loc='upper right', fontsize=8, title='Conversation')
         self.ax_gpu.legend(loc='upper left', fontsize=8)
         self.ax_cpu.legend(loc='upper left', fontsize=8)
+        self.ax_scheduling.legend(loc='upper right', fontsize=8)
+        self.ax_scheduling_diff.legend(loc='upper right', fontsize=8)
         
         # Initialize memory tracking lists
         self.gpu_memory_times = []
         self.gpu_memory_values = []
         self.cpu_memory_times = []
         self.cpu_memory_values = []
+        
+        # Initialize scheduling tracking lists
+        self.scheduling_times = []
+        self.selected_buffer_levels = []
+        self.lowest_buffer_levels = []
+        self.buffer_differences = []
         
         plt.tight_layout()
         
@@ -2598,8 +2627,8 @@ class LiveBufferVisualizer:
         self.fig.savefig(self.output_path, dpi=150, bbox_inches='tight')
         print(f"📊 Live visualization initialized: {self.output_path}")
     
-    def update(self, onthefly_buffer_data, current_time=None):
-        """Update the visualization with current buffer data and memory usage"""
+    def update(self, onthefly_buffer_data, current_time=None, scheduling_data=None):
+        """Update the visualization with current buffer data, memory usage, and scheduling metrics"""
         if not self.enabled:
             return
         
@@ -2648,18 +2677,49 @@ class LiveBufferVisualizer:
             self.gpu_line.set_data(self.gpu_memory_times, self.gpu_memory_values)
             self.cpu_line.set_data(self.cpu_memory_times, self.cpu_memory_values)
         
+        # Update scheduling metrics if provided
+        if scheduling_data is not None:
+            self.scheduling_times = scheduling_data.get('times', [])
+            self.selected_lowest = scheduling_data.get('selected_lowest', [])
+            self.selected_increment = scheduling_data.get('selected_increment', [])
+            self.buffer_differences = scheduling_data.get('buffer_differences', [])
+            
+            # Update scheduling plots
+            if self.scheduling_times:
+                self.selected_buffer_line.set_data(self.scheduling_times, self.selected_lowest)
+                self.lowest_buffer_line.set_data(self.scheduling_times, self.selected_increment)
+                self.buffer_diff_line.set_data(self.scheduling_times, self.buffer_differences)
+        
         # Update axis limits
         if max_time > 0:
             self.ax_buffer.set_xlim(0, max_time * 1.05)
             self.ax_rebuffer.set_xlim(0, max_time * 1.05)
             self.ax_gpu.set_xlim(0, max_time * 1.05)
             self.ax_cpu.set_xlim(0, max_time * 1.05)
+            self.ax_scheduling.set_xlim(0, max_time * 1.05)
+            self.ax_scheduling_diff.set_xlim(0, max_time * 1.05)
         
         if max_buffer > 0:
             self.ax_buffer.set_ylim(0, max_buffer * 1.1)
         
         if max_rebuffer > 0:
             self.ax_rebuffer.set_ylim(0, max_rebuffer * 1.1)
+        
+        # Update scheduling axis limits
+        if self.selected_buffer_levels:
+            max_selected = max(self.selected_lowest)
+            max_lowest = max(self.selected_increment)
+            max_buffers = max(max_selected, max_lowest)
+            self.ax_scheduling.set_ylim(0, max_buffers * 1.1)
+        
+        if self.buffer_differences:
+            max_diff = max(self.buffer_differences)
+            min_diff = min(self.buffer_differences)
+            diff_range = max_diff - min_diff
+            if diff_range > 0:
+                self.ax_scheduling_diff.set_ylim(min_diff - diff_range * 0.1, max_diff + diff_range * 0.1)
+            else:
+                self.ax_scheduling_diff.set_ylim(0, max_diff * 1.1)
         
         # Update memory axis limits
         if self.gpu_memory_values:
@@ -2955,10 +3015,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         buffer_state['last_rebuffering_start'] = last_rebuffering_start
 
 
-    scheduling_selected_buffer_levels = []
-    scheduling_lowest_buffer_levels = []
-    scheduling_selection_times = []
-
+    scheduling_selected_lowest_buffer = [0]
+    scheduling_selected_increment = [0]
+    scheduling_selection_times = [0]
     
     while event_queue:
         # ===== UPDATE ALL CONVERSATIONS TO CURRENT TIME BEFORE NEXT EVENT =====
@@ -2971,11 +3030,21 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             update_buffer_to_time(buffer_state, processor_clock, listening_speed, cid, oom_occurred)
         
         # Update live visualization with all conversations synchronized at the same time
-        live_viz.update(onthefly_buffer_data, current_time=processor_clock)
+        # Prepare scheduling data for visualization
+        scheduling_data = {
+            'times': scheduling_selection_times,
+            'selected_lowest': scheduling_selected_lowest_buffer,
+            'selected_increment': scheduling_selected_increment,
+            'buffer_differences': [increment + lowest for lowest, increment in zip(scheduling_selected_lowest_buffer, scheduling_selected_increment)]
+        }
+        print("scheduling_data", scheduling_data)
+        live_viz.update(onthefly_buffer_data, current_time=processor_clock, scheduling_data=scheduling_data)
         
         # flush out any delayed events to process prompts first
         cached_events = []
         unprocessed_prompt_event = None
+        cached_frame_events = []
+        cached_generation_events = []
         while event_queue and event_queue[0][0] < processor_clock:
             event_time, priority, sequence_counter, payload = heapq.heappop(event_queue)
             event_type, conversation_id, payload_data = payload
@@ -2992,15 +3061,32 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 if Config.SCHEDULING_METHOD == 'earliest_available':
                     heapq.heappush(cached_events, (event_time, priority, sequence_counter, payload, buffer_level))
                 elif Config.SCHEDULING_METHOD == 'lowest_buffer':
-                    heapq.heappush(cached_events, (buffer_level, event_time, priority, sequence_counter, payload))
+                    if event_type == 'frame' and not cached_generation_events:
+                        heapq.heappush(cached_frame_events, (buffer_level, event_time, priority, sequence_counter, payload))
+                    elif event_type == 'generation':
+                        heapq.heappush(cached_generation_events, (buffer_level, event_time, priority, sequence_counter, payload))
+                # todo: if same score, these two can be merged
                 elif Config.SCHEDULING_METHOD == 'buffer_weighted_score':
                     # older conversations have higher priority
                     r = Config.BUFFER_WEIGHTED_SCORE_FACTOR
                     remaining_length = erl_of_conversations[conversation_id] - crl_of_conversations[conversation_id]
                     score = r * remaining_length - age_of_conversations[conversation_id]
-                    heapq.heappush(cached_events, (buffer_level, score, event_time, priority, sequence_counter, payload))
+                    if event_type == 'frame' and not cached_generation_events:
+                        heapq.heappush(cached_frame_events, (buffer_level, score, event_time, priority, sequence_counter, payload))
+                    elif event_type == 'generation':
+                        heapq.heappush(cached_generation_events, (buffer_level, score, event_time, priority, sequence_counter, payload))
                 else:
                     raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
+
+        if not cached_events:
+            cached_events = cached_generation_events if cached_generation_events else cached_frame_events
+
+        if cached_events:
+            print("cached_events")
+            for event_time, priority, sequence_counter, payload, buffer_level in cached_events:
+                print(event_time, payload[0], payload[1][:12])
+        
+        scheduled_event = False
         
         if unprocessed_prompt_event is not None:
             if Config.SCHEDULING_METHOD == 'earliest_available':
@@ -3018,37 +3104,38 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         elif cached_events:
             if Config.SCHEDULING_METHOD == 'earliest_available':
                 event_time, priority, sequence_counter, payload, buffer_level = heapq.heappop(cached_events)
-                lowest_buffer_level = buffer_level
+                selected_lowest = 1
                 for et, pri, seq, pl, bf in cached_events:
                     heapq.heappush(event_queue, (et, pri, seq, pl))
                     if event_time == et:
-                        if bf < lowest_buffer_level:
-                            lowest_buffer_level = bf
+                        if bf < buffer_level:
+                            selected_lowest = 0
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                 buffer_level, event_time, priority, _, payload = heapq.heappop(cached_events)
                 # push back the cached events
-                lowest_buffer_level = buffer_level
+                selected_lowest = 1
                 for bf, et, pri, seq, pl in cached_events:
                     heapq.heappush(event_queue, (et, pri, seq, pl))
                     if event_time == et:
-                        if bf < lowest_buffer_level:
-                            lowest_buffer_level = bf
+                        if bf < buffer_level:
+                            selected_lowest = 0
             elif Config.SCHEDULING_METHOD == 'buffer_weighted_score':
                 buffer_level, score, event_time, priority, _, payload = heapq.heappop(cached_events)
                 # push back the cached events
-                lowest_buffer_level = buffer_level
+                selected_lowest = 1
                 for _, _, et, pri, seq, pl in cached_events:
                     heapq.heappush(event_queue, (et, pri, seq, pl))
                     if event_time == et:
-                        if bf < lowest_buffer_level:
-                            lowest_buffer_level = bf
+                        if bf < buffer_level:
+                            selected_lowest = 0
             else:
                 raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
 
-            scheduling_selected_buffer_levels.append(buffer_level)
-            scheduling_lowest_buffer_levels.append(lowest_buffer_level)
+            scheduling_selected_lowest_buffer.append(selected_lowest + scheduling_selected_lowest_buffer[-1])
             selection_time = max(event_time, processor_clock)
             scheduling_selection_times.append(selection_time)
+            scheduling_selected_increment.append(1)
+            scheduled_event = True
         else:
             event_time, priority, _, payload = heapq.heappop(event_queue)
             
@@ -3067,7 +3154,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             active_conversation_id = conversation_id
 
         relative_time = max(0.0, event_time - context.conversation_start_time)
-        # print("--------EVENT", event_type, relative_time, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id[:12], "--------")
+        print("--------EVENT", event_type, event_time, processor_clock, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id[:12], "--------")
 
         if event_type == 'prompt':
             processor_clock = max(processor_clock, event_time)
@@ -3094,10 +3181,13 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             continue
 
         if event_type == 'frame':
-                
+            
+            # this is necessary to handle frames that arrive before the generation event is finished
             if shared_liveinfer.generation_state is not None or getattr(shared_liveinfer, 'generation_event_pending', False):
-                context.pending_frame_events.append((event_time, priority, payload_data))
+                shared_liveinfer.pending_frame_events.append((event_time, priority, payload_data))
+                context.save_liveinfer_state(shared_liveinfer)
                 continue
+
             start_time = max(processor_clock, event_time)
             
             segment_info = context.handle_frame(shared_liveinfer, relative_time, payload_data, start_time)
@@ -3127,68 +3217,71 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             if context.oom_occurred:
                 continue
             
+            word_count = 0
             # Check if text was generated and update buffer
-            if context.event_log:
-                assert context.event_log[-1].get('type') == 'response', f"event_log: {context.event_log}"
-                last_event = context.event_log[-1]
-                text = last_event.get('detail', {}).get('text', '') if isinstance(last_event.get('detail'), dict) else last_event.get('detail', '')
-                is_response = last_event.get('is_response', False)
-                if text or is_response:
-                    tokens = re.findall(r"\b\w+\b", text)
-                    word_count = float(len(tokens))
-                    crl_of_conversations[conversation_id] += word_count
-                    
-                    buffer_state = onthefly_buffer_data[conversation_id]
-                    response_idx = last_event.get('response_idx', 0)
+            assert context.event_log, f"event_log: {context.event_log}"
+            assert context.event_log[-1].get('type') == 'response', f"event_log: {context.event_log}"
+            last_event = context.event_log[-1]
+            text = last_event.get('detail', {}).get('text', '') if isinstance(last_event.get('detail'), dict) else last_event.get('detail', '')
+            is_response = last_event.get('is_response', False)
+            if text or is_response:
+                tokens = re.findall(r"\b\w+\b", text)
+                word_count = float(len(tokens))
+                crl_of_conversations[conversation_id] += word_count
+                
+                buffer_state = onthefly_buffer_data[conversation_id]
+                response_idx = last_event.get('response_idx', 0)
 
-                    # advance to the start time of the chunk, set the buffer to 0
-                    update_buffer_to_time(buffer_state, start_time, listening_speed, conversation_id, context.oom_occurred)
+                # advance to the start time of the chunk, set the buffer to 0
+                update_buffer_to_time(buffer_state, start_time, listening_speed, conversation_id, context.oom_occurred)
 
-                    # this is exactly the same as when the prompt is processed,
-                    # here we handle the case when the trigger method is score instead of prompt
-                    if last_event.get('trigger_method') == 'score':
-                        buffer_state['buffer'] = 0.0
-                        buffer_state['times'].append(start_time)
-                        buffer_state['values'].append(0.0)
-                        buffer_state['rebuffer_times'].append(start_time)
-                        buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-                        buffer_state['pending_responses'].add(context.response_expected)
-                        context.response_expected += 1
-                    
-                    # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
-                    update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred)
-                    
-                    is_last_chunk = last_event.get('is_last_chunk', False)
-                    is_first_chunk = last_event.get('is_first_chunk', False)
-                    
-                    # update processed prompt cnt
-                    assert is_first_chunk, f"is_first_chunk: {is_first_chunk}"
-                    if last_event.get('trigger_method') == 'prompt':
-                        context.processed_prompt_cnt += 1
-                                        
-                    # Add words to buffer (happens at chunk completion time)
-                    if not context.oom_occurred:
-                        buffer_state['buffer'] = 0
-                        buffer_state['unanswered_prompts'] -= 1
+                # this is exactly the same as when the prompt is processed,
+                # here we handle the case when the trigger method is score instead of prompt
+                if last_event.get('trigger_method') == 'score':
+                    buffer_state['buffer'] = 0.0
+                    buffer_state['times'].append(start_time)
+                    buffer_state['values'].append(0.0)
+                    buffer_state['rebuffer_times'].append(start_time)
+                    buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+                    buffer_state['pending_responses'].add(context.response_expected)
+                    context.response_expected += 1
+                
+                # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
+                update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred)
+                
+                is_last_chunk = last_event.get('is_last_chunk', False)
+                is_first_chunk = last_event.get('is_first_chunk', False)
+                
+                # update processed prompt cnt
+                assert is_first_chunk, f"is_first_chunk: {is_first_chunk}"
+                if last_event.get('trigger_method') == 'prompt':
+                    context.processed_prompt_cnt += 1
+                                    
+                # Add words to buffer (happens at chunk completion time)
+                if not context.oom_occurred:
+                    buffer_state['buffer'] = 0
+                    buffer_state['unanswered_prompts'] -= 1
 
-                        if is_last_chunk:
-                            buffer_state['pending_responses'].discard(response_idx)
+                    if is_last_chunk:
+                        buffer_state['pending_responses'].discard(response_idx)
+                        assert shared_liveinfer.generation_state is None, f"generation_state: {shared_liveinfer.generation_state}"
 
-                        # update buffer only if the latest prompt has been processed
-                        if context.processed_prompt_cnt == context.received_prompt_cnt:
-                            buffer_state['buffer'] += word_count
-                            
-                        # Record buffer state after adding words
-                        buffer_state['times'].append(processor_clock)
-                        buffer_state['values'].append(buffer_state['buffer'])
-                        buffer_state['rebuffer_times'].append(processor_clock)
-                        buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+                    # update buffer only if the latest prompt has been processed
+                    if context.processed_prompt_cnt == context.received_prompt_cnt:
+                        buffer_state['buffer'] += word_count
+                        
+                    # Record buffer state after adding words
+                    buffer_state['times'].append(processor_clock)
+                    buffer_state['values'].append(buffer_state['buffer'])
+                    buffer_state['rebuffer_times'].append(processor_clock)
+                    buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
                 # update age of conversation if not finished
                 age_of_conversations[conversation_id] += 1
             else:
+                print("FInished frame event, pending_frame_events", shared_liveinfer.pending_frame_events)
                 # finished, reset age of conversation
                 age_of_conversations[conversation_id] = 0
                 # update erl of conversation
@@ -3201,6 +3294,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
+
+            # valid_scheduling = scheduled_event and word_count > 0
+            # scheduling_selected_increment.append(valid_scheduling + scheduling_selected_increment[-1])
 
             # print("----END----EVENT", event_type, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id, "--------")
             continue
@@ -3230,45 +3326,46 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             if context.oom_occurred:
                 continue
             
+            word_count = 0
             # Check if text was generated and update buffer
-            if context.event_log:
-                assert context.event_log[-1].get('type') == 'response', f"event_log: {context.event_log}"
-                last_event = context.event_log[-1]
-                text = last_event.get('detail', {}).get('text', '') if isinstance(last_event.get('detail'), dict) else last_event.get('detail', '')
-                is_response = last_event.get('is_response', False)
-                if text or is_response:
-                    tokens = re.findall(r"\b\w+\b", text)
-                    word_count = float(len(tokens))
-                    crl_of_conversations[conversation_id] += word_count
+            assert context.event_log, f"event_log: {context.event_log}"
+            assert context.event_log[-1].get('type') == 'response', f"event_log: {context.event_log}"
+            last_event = context.event_log[-1]
+            text = last_event.get('detail', {}).get('text', '') if isinstance(last_event.get('detail'), dict) else last_event.get('detail', '')
+            is_response = last_event.get('is_response', False)
+            if text or is_response:
+                tokens = re.findall(r"\b\w+\b", text)
+                word_count = float(len(tokens))
+                crl_of_conversations[conversation_id] += word_count
+                
+                buffer_state = onthefly_buffer_data[conversation_id]
+                response_idx = last_event.get('response_idx', 0)
+                
+                # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
+                update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred)
+
+                # Add words to buffer (happens at chunk completion time)
+                if not context.oom_occurred:
+                    if context.processed_prompt_cnt == context.received_prompt_cnt:
+                        buffer_state['buffer'] += word_count
                     
-                    buffer_state = onthefly_buffer_data[conversation_id]
-                    response_idx = last_event.get('response_idx', 0)
-                    
-                    # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
-                    update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred)
+                    is_last_chunk = last_event.get('is_last_chunk', False)
+                    is_first_chunk = last_event.get('is_first_chunk', False)
+                    assert not is_first_chunk, f"is_first_chunk: {is_first_chunk}"
+                    # if is_first_chunk:
+                    #     buffer_state['unanswered_prompts'] -= 1
+                    #     if not is_last_chunk and last_event.get('trigger_method') == 'score':
+                    #         buffer_state['pending_responses'].add(context.response_expected)
+                    #         context.response_expected += 1
+                    if is_last_chunk:
+                        buffer_state['pending_responses'].discard(response_idx)
+                        assert shared_liveinfer.generation_state is None, f"generation_state: {shared_liveinfer.generation_state}"
 
-                    # Add words to buffer (happens at chunk completion time)
-                    if not context.oom_occurred:
-                        if context.processed_prompt_cnt == context.received_prompt_cnt:
-                            buffer_state['buffer'] += word_count
-                        
-                        is_last_chunk = last_event.get('is_last_chunk', False)
-                        is_first_chunk = last_event.get('is_first_chunk', False)
-                        assert not is_first_chunk, f"is_first_chunk: {is_first_chunk}"
-                        # if is_first_chunk:
-                        #     buffer_state['unanswered_prompts'] -= 1
-                        #     if not is_last_chunk and last_event.get('trigger_method') == 'score':
-                        #         buffer_state['pending_responses'].add(context.response_expected)
-                        #         context.response_expected += 1
-                        if is_last_chunk:
-                            buffer_state['pending_responses'].discard(response_idx)
-
-                        # Record buffer state after adding words
-                        buffer_state['times'].append(processor_clock)
-                        buffer_state['values'].append(buffer_state['buffer'])
-                        buffer_state['rebuffer_times'].append(processor_clock)
-                        buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-
+                    # Record buffer state after adding words
+                    buffer_state['times'].append(processor_clock)
+                    buffer_state['values'].append(buffer_state['buffer'])
+                    buffer_state['rebuffer_times'].append(processor_clock)
+                    buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
@@ -3276,7 +3373,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 age_of_conversations[conversation_id] += 1
             else:
                 # if finished, reset age of conversation
-                assert not context.pending_frame_events, f"pending_frame_events: {context.pending_frame_events}"
+                while shared_liveinfer.pending_frame_events:
+                    pending_time, pending_priority, pending_payload = shared_liveinfer.pending_frame_events.popleft()
+                    heapq.heappush(event_queue, (pending_time, pending_priority, sequence_counter, ('frame', conversation_id, pending_payload)))
+                    sequence_counter += 1
                 # reset age of conversation
                 age_of_conversations[conversation_id] = 0
                 # update erl of conversation
@@ -3289,6 +3389,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
+
+            # valid_scheduling = scheduled_event and word_count > 0
+            # scheduling_selected_increment.append(valid_scheduling + scheduling_selected_increment[-1])
+
             # print("----END----EVENT", event_type, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id, "--------")
             continue
 
@@ -3620,7 +3724,8 @@ class SimpleLiveInfer:
         self.frame_embeds_queue = collections.deque()
         self.last_ids = torch.tensor([[]], device=self.device, dtype=torch.long)
         self.past_key_values = None
-        
+        self.pending_frame_events = collections.deque()
+        self.generation_event_pending = False
         # Reset tracking buffers
         self.kv_transfer_metrics = []
         
@@ -3642,8 +3747,8 @@ class SimpleLiveInfer:
         if conversation_id not in self.prev_frame_per_conversation:
             self.prev_frame_per_conversation[conversation_id] = None
         self._kv_offload_time = 0.0
-        self.generation_event_pending = False
-        self.pending_frame_events = collections.deque()
+        # self.generation_event_pending = False
+        # self.pending_frame_events = collections.deque()
     
     def input_query_stream(self, query, history=None, video_time=None):
         if video_time is None:
