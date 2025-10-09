@@ -2276,11 +2276,11 @@ class EventDrivenConversationContext:
                 liveinfer.update_frame_response_length(frame_idx, word_count, self.conversation_id)
             if response:
                 self.response_generated += 1
-                print(f"[t={self.conversation_start_time + relative_time:.2f}s] Response: {response}")
-            elif texts_generated_previous:
-                print(f"[t={self.conversation_start_time + relative_time:.2f}s] Chunk: {texts_generated_previous}")
-            elif query:
-                print(f"[t={self.conversation_start_time + relative_time:.2f}s] Query: {query}")
+            #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Response: {response}")
+            # elif texts_generated_previous:
+            #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Chunk: {texts_generated_previous}")
+            # elif query:
+            #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Query: {query}")
             # print(f"  └─ Generation time: {frame_processing_time:.3f}s\t start_time: {start_time:.3f}\t prompt_idx: {self.response_generated}")
 
         self.frames_processed += 1
@@ -2360,11 +2360,11 @@ class EventDrivenConversationContext:
                 liveinfer.update_frame_response_length(pseudo_frame_idx, word_count, self.conversation_id)
             if response:
                 self.response_generated += 1
-                print(f"[t={video_time:.2f}s] Response: {response}")
-            elif texts_generated_previous:
-                print(f"[t={video_time:.2f}s] Chunk: {texts_generated_previous}")
-            elif query:
-                print(f"[t={video_time:.2f}s] Query: {query}")
+            #     print(f"[t={video_time:.2f}s] Response: {response}")
+            # elif texts_generated_previous:
+            #     print(f"[t={video_time:.2f}s] Chunk: {texts_generated_previous}")
+            # elif query:
+            #     print(f"[t={video_time:.2f}s] Query: {query}")
             # print(f"  └─ Generation time: {chunk_duration:.3f}s\t start_time: {start_time:.3f}\t prompt_idx: {self.response_generated}")
         return {
             'frame_compute_time': 0.0,
@@ -3015,6 +3015,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             'selected_score': [increment + lowest for lowest, increment in zip(scheduling_selected_lowest_buffer, scheduling_selected_increment)]
         }
         live_viz.update(onthefly_buffer_data, current_time=processor_clock, scheduling_data=scheduling_data)
+        print("scheduling_selected_lowest_buffer", scheduling_selected_lowest_buffer)
         
         # flush out any delayed events to process prompts first
         cached_events = []
@@ -3055,11 +3056,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
         if not cached_events:
             cached_events = cached_generation_events if cached_generation_events else cached_frame_events
-
-        if cached_events:
-            print("cached_events")
-            for event_time, priority, sequence_counter, payload, buffer_level in cached_events:
-                print(event_time, buffer_level, payload[0], payload[1][:12])
         
         scheduled_event = False
         
@@ -3095,15 +3091,26 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 # push back the cached events
                 for et, pri, seq, pl, bf in cached_events:
                     heapq.heappush(event_queue, (et, pri, seq, pl))
+
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                 buffer_level, event_time, priority, _, payload = heapq.heappop(cached_events)
+                lowest_buffer_level = buffer_level
+                # check the lowest buffer level of the cached events
+                for cid, buffer_state in onthefly_buffer_data.items():
+                    available_buffer_level = buffer_state['buffer']
+                    in_cached_events = False
+                    for bf, et, pri, seq, pl in cached_events:
+                        if cid == pl[1]:
+                            in_cached_events = True
+                            break
+                    if in_cached_events and available_buffer_level < lowest_buffer_level:
+                        selected_lowest = 0
+                        lowest_buffer_level = available_buffer_level
+                assert selected_lowest == 1, f"selected_lowest: {selected_lowest}, lowest_buffer_level: {lowest_buffer_level}, buffer_level: {buffer_level}"
                 # push back the cached events
-                selected_lowest = 1
                 for bf, et, pri, seq, pl in cached_events:
                     heapq.heappush(event_queue, (et, pri, seq, pl))
-                    if event_time == et:
-                        if bf < buffer_level:
-                            selected_lowest = 0
+
             elif Config.SCHEDULING_METHOD == 'buffer_weighted_score':
                 buffer_level, score, event_time, priority, _, payload = heapq.heappop(cached_events)
                 # push back the cached events
