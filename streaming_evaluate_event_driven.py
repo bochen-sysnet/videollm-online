@@ -99,8 +99,9 @@ class Config:
     STREAMING_THRESHOLD_NARRATION = 0.725  # Threshold for narration dataset (testing higher threshold)
 
     # Scheduling
-    SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'lowest_buffer' or 'buffer_weighted_score'
+    SCHEDULING_METHOD = 'lowest_buffer' # 'earliest_available' or 'lowest_buffer' or 'buffer_weighted_score'
     BUFFER_WEIGHTED_SCORE_FACTOR = 1
+    SCORE_IMPACT = 0 # 0 means disable score and it becomes the same as lowest_buffer
     EWMA_FACTOR = 0.9
     GENERATION_CHUNK_SIZE = 32
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
@@ -3015,7 +3016,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             'selected_score': [increment + lowest for lowest, increment in zip(scheduling_selected_lowest_buffer, scheduling_selected_increment)]
         }
         live_viz.update(onthefly_buffer_data, current_time=processor_clock, scheduling_data=scheduling_data)
-        print("scheduling_selected_lowest_buffer", scheduling_selected_lowest_buffer)
         
         # flush out any delayed events to process prompts first
         cached_events = []
@@ -3037,16 +3037,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 if Config.SCHEDULING_METHOD == 'earliest_available':
                     heapq.heappush(cached_events, (event_time, priority, sequence_counter, payload, buffer_level))
                 elif Config.SCHEDULING_METHOD == 'lowest_buffer':
-                    if event_type == 'frame' and not cached_generation_events:
-                        heapq.heappush(cached_frame_events, (buffer_level, event_time, priority, sequence_counter, payload))
-                    elif event_type == 'generation':
-                        heapq.heappush(cached_generation_events, (buffer_level, event_time, priority, sequence_counter, payload))
-                # todo: if same score, these two can be merged
-                elif Config.SCHEDULING_METHOD == 'buffer_weighted_score':
-                    # older conversations have higher priority
                     r = Config.BUFFER_WEIGHTED_SCORE_FACTOR
                     remaining_length = erl_of_conversations[conversation_id] - crl_of_conversations[conversation_id]
-                    score = r * remaining_length - age_of_conversations[conversation_id]
+                    score = (r * remaining_length - age_of_conversations[conversation_id]) * Config.SCORE_IMPACT
                     if event_type == 'frame' and not cached_generation_events:
                         heapq.heappush(cached_frame_events, (buffer_level, score, event_time, priority, sequence_counter, payload))
                     elif event_type == 'generation':
@@ -3064,9 +3057,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 for event_time, priority, sequence_counter, payload, _ in cached_events:
                     heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
-                for _, event_time, priority, sequence_counter, payload in cached_events:
-                    heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
-            elif Config.SCHEDULING_METHOD == 'buffer_weighted_score':
                 for _, _, event_time, priority, sequence_counter, payload in cached_events:
                     heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
             else:
@@ -3093,13 +3083,13 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     heapq.heappush(event_queue, (et, pri, seq, pl))
 
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
-                buffer_level, event_time, priority, _, payload = heapq.heappop(cached_events)
+                buffer_level, score, event_time, priority, _, payload = heapq.heappop(cached_events)
                 lowest_buffer_level = buffer_level
                 # check the lowest buffer level of the cached events
                 for cid, buffer_state in onthefly_buffer_data.items():
                     available_buffer_level = buffer_state['buffer']
                     in_cached_events = False
-                    for bf, et, pri, seq, pl in cached_events:
+                    for bf, sc, et, pri, seq, pl in cached_events:
                         if cid == pl[1]:
                             in_cached_events = True
                             break
@@ -3108,18 +3098,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                         lowest_buffer_level = available_buffer_level
                 assert selected_lowest == 1, f"selected_lowest: {selected_lowest}, lowest_buffer_level: {lowest_buffer_level}, buffer_level: {buffer_level}"
                 # push back the cached events
-                for bf, et, pri, seq, pl in cached_events:
+                for bf, sc, et, pri, seq, pl in cached_events:
                     heapq.heappush(event_queue, (et, pri, seq, pl))
 
-            elif Config.SCHEDULING_METHOD == 'buffer_weighted_score':
-                buffer_level, score, event_time, priority, _, payload = heapq.heappop(cached_events)
-                # push back the cached events
-                selected_lowest = 1
-                for _, _, et, pri, seq, pl in cached_events:
-                    heapq.heappush(event_queue, (et, pri, seq, pl))
-                    if event_time == et:
-                        if bf < buffer_level:
-                            selected_lowest = 0
             else:
                 raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
 
