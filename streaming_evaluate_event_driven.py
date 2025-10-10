@@ -99,8 +99,8 @@ class Config:
     STREAMING_THRESHOLD_NARRATION = 0.725  # Threshold for narration dataset (testing higher threshold)
 
     # Scheduling
-    SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'random' or 'lowest_buffer' or 'buffer_weighted_score'
-    BUFFER_WEIGHTED_SCORE_FACTOR = 1
+    SCHEDULING_METHOD = 'lowest_buffer' # 'earliest_available' or 'random' or 'lowest_buffer' or 'buffer_weighted_score'
+    PRIORITY_WEIGHT = 1 # discount factor for remaining length compared to the age
     SCORE_IMPACT = 0 # 0 means disable score and it becomes the same as lowest_buffer
     EWMA_FACTOR = 0.9
     GENERATION_CHUNK_SIZE = 32
@@ -3046,7 +3046,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     if conversation_id not in cached_event_by_conversation or event_type == 'generation':
                         cached_event_by_conversation[conversation_id] = (event_time, priority, sequence_counter, payload, buffer_level)
                 elif Config.SCHEDULING_METHOD == 'lowest_buffer':
-                    r = Config.BUFFER_WEIGHTED_SCORE_FACTOR
+                    r = Config.PRIORITY_WEIGHT
                     remaining_length = erl_of_conversations[conversation_id] - crl_of_conversations[conversation_id]
                     score = (r * remaining_length - age_of_conversations[conversation_id]) * Config.SCORE_IMPACT
                     # we push all events based on buffer level
