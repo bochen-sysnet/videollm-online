@@ -68,13 +68,13 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 50            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 20            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 5                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 5             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -99,12 +99,17 @@ class Config:
     STREAMING_THRESHOLD_NARRATION = 0.725  # Threshold for narration dataset (testing higher threshold)
 
     # Scheduling
-    SCHEDULING_METHOD = 'lowest_buffer' # 'earliest_available' or 'lowest_buffer' or 'buffer_weighted_score'
+    SCHEDULING_METHOD = 'earliest_available' # 'earliest_available' or 'random' or 'lowest_buffer' or 'buffer_weighted_score'
     BUFFER_WEIGHTED_SCORE_FACTOR = 1
     SCORE_IMPACT = 0 # 0 means disable score and it becomes the same as lowest_buffer
     EWMA_FACTOR = 0.9
     GENERATION_CHUNK_SIZE = 32
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
+
+    # it controls the aggressiveness to select gen events
+    # higher means more aggressive, which is likely to ignore frame events that have lower buffer level
+    BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
+    BUFFER_URGENT_VALUE = GENERATION_CHUNK_SIZE * BUFFER_URGENT_FACTOR # higher means easier to select gen events
 
 # =============================================================================
 # IMAGE DIFFERENCE FEATURE CALCULATION
@@ -1993,6 +1998,7 @@ class EventDrivenConversationContext:
             # CPU memory tracking
             'cpu_memory': [],
             'cpu_memory_growth': [],
+            'time': []
         }
 
         self.frame_scores_data = {
@@ -2032,7 +2038,7 @@ class EventDrivenConversationContext:
         
         # print(f"🚨 OOM occurred for conversation {self.conversation_id} at frame {frame_idx}, truncating conversation")
     
-    def track_memory_snapshot(self, liveinfer, frame_idx):
+    def track_memory_snapshot(self, liveinfer, frame_idx, timestamp):
         """Track memory usage snapshot at a given frame index."""
         # GPU memory tracking
         gpu_memory_info = get_gpu_memory_info()
@@ -2074,6 +2080,7 @@ class EventDrivenConversationContext:
         self.memory_data['other_memory'].append(other_memory_mb)
         self.memory_data['torch_allocated'].append(torch_allocated_mb)
         self.memory_data['torch_reserved'].append(torch_reserved_mb)
+        self.memory_data['time'].append(timestamp)
         
         # CPU memory tracking
         self.memory_data['cpu_memory'].append(current_cpu_memory)
@@ -2139,7 +2146,7 @@ class EventDrivenConversationContext:
         })
 
     def schedule_generation_event(self, event_queue, event_time, sequence_counter):
-        print("schedule_generation_event", self.generation_event_pending, event_time, sequence_counter)
+        print("schedule_generation_event", self.conversation_id, event_time)
         if self.generation_event_pending:
             return sequence_counter
         heapq.heappush(event_queue, (event_time, 1, sequence_counter, ('generation', self.conversation_id, None)))
@@ -2186,7 +2193,7 @@ class EventDrivenConversationContext:
         liveinfer.texts_generated_previous = ""
         query, response = liveinfer()
         if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
-            self.track_memory_snapshot(liveinfer, frame_idx)
+            self.track_memory_snapshot(liveinfer, frame_idx, start_time + time.time() - frame_start_time)
         liveinfer.offload_kv_cache()
 
         frame_processing_time = time.time() - frame_start_time
@@ -2311,7 +2318,7 @@ class EventDrivenConversationContext:
         liveinfer.texts_generated_previous = ""
         query, response = liveinfer()
         if pseudo_frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
-            self.track_memory_snapshot(liveinfer, pseudo_frame_idx)
+            self.track_memory_snapshot(liveinfer, pseudo_frame_idx, start_time + time.time() - chunk_start)
         liveinfer.offload_kv_cache()
         chunk_duration = time.time() - chunk_start
         
@@ -3022,6 +3029,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         unprocessed_prompt_event = None
         cached_frame_events = []
         cached_generation_events = []
+        cached_event_by_conversation = {}
         while event_queue and event_queue[0][0] < processor_clock:
             event_time, priority, sequence_counter, payload = heapq.heappop(event_queue)
             event_type, conversation_id, payload_data = payload
@@ -3034,26 +3042,54 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 # if no prompt is found, the frames will be processed in order of the event queue as original
                 buffer_state = onthefly_buffer_data[conversation_id]
                 buffer_level = buffer_state['buffer']
-                if Config.SCHEDULING_METHOD == 'earliest_available':
-                    heapq.heappush(cached_events, (event_time, priority, sequence_counter, payload, buffer_level))
+                if Config.SCHEDULING_METHOD == 'earliest_available' or Config.SCHEDULING_METHOD == 'random':
+                    if conversation_id not in cached_event_by_conversation or event_type == 'generation':
+                        cached_event_by_conversation[conversation_id] = (event_time, priority, sequence_counter, payload, buffer_level)
                 elif Config.SCHEDULING_METHOD == 'lowest_buffer':
                     r = Config.BUFFER_WEIGHTED_SCORE_FACTOR
                     remaining_length = erl_of_conversations[conversation_id] - crl_of_conversations[conversation_id]
                     score = (r * remaining_length - age_of_conversations[conversation_id]) * Config.SCORE_IMPACT
-                    if event_type == 'frame' and not cached_generation_events:
-                        heapq.heappush(cached_frame_events, (buffer_level, score, event_time, priority, sequence_counter, payload))
-                    elif event_type == 'generation':
-                        heapq.heappush(cached_generation_events, (buffer_level, score, event_time, priority, sequence_counter, payload))
+                    # we push all events based on buffer level
+                    # if there are urgent events, we push them into frame/generation events
+                    # these urgents events will be scheduled with high priority for gen events then consider buffer level
+                    # need to obey the time order of each conversation
+                    # every conversation one event only; it must be a generation event if any
+                    if conversation_id not in cached_event_by_conversation or event_type == 'generation':
+                        cached_event_by_conversation[conversation_id] = (buffer_level, score, event_time, priority, sequence_counter, payload)
                 else:
                     raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
 
-        if not cached_events:
-            cached_events = cached_generation_events if cached_generation_events else cached_frame_events
+        if cached_event_by_conversation:
+            for conversation_id, event in cached_event_by_conversation.items():
+                heapq.heappush(cached_events, event)
+                if Config.SCHEDULING_METHOD == 'lowest_buffer':
+                    buffer_level, score, event_time, priority, sequence_counter, payload = event
+                    if buffer_level < Config.BUFFER_URGENT_VALUE:
+                        if event_type == 'frame' and not cached_generation_events:
+                            heapq.heappush(cached_frame_events, (buffer_level, score, event_time, priority, sequence_counter, payload))
+                        elif event_type == 'generation':
+                            heapq.heappush(cached_generation_events, (buffer_level, score, event_time, priority, sequence_counter, payload))
+
+        if cached_generation_events:
+            cached_events = cached_generation_events
+        elif cached_frame_events:
+            cached_events = cached_frame_events
+
+        # print("Events to be scheduled:")
+        # for event in cached_events:
+        #     if Config.SCHEDULING_METHOD == 'earliest_available' or Config.SCHEDULING_METHOD == 'random':
+        #         event_time, priority, sequence_counter, payload, buffer_level = event
+        #         print(event_time, payload[1][:12], buffer_level)
+        #     elif Config.SCHEDULING_METHOD == 'lowest_buffer':
+        #         buffer_level, score, event_time, priority, sequence_counter, payload = event
+        #         print("buffer_level", buffer_level, "score", score, "event_time", event_time, "payload", payload[1][:12])
+        #     else:
+        #         raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
         
         scheduled_event = False
         
         if unprocessed_prompt_event is not None:
-            if Config.SCHEDULING_METHOD == 'earliest_available':
+            if Config.SCHEDULING_METHOD == 'earliest_available' or Config.SCHEDULING_METHOD == 'random':
                 for event_time, priority, sequence_counter, payload, _ in cached_events:
                     heapq.heappush(event_queue, (event_time, priority, sequence_counter, payload))
             elif Config.SCHEDULING_METHOD == 'lowest_buffer':
@@ -3064,8 +3100,14 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             event_time, priority, _, payload = unprocessed_prompt_event
         elif cached_events:
             selected_lowest = 1
-            if Config.SCHEDULING_METHOD == 'earliest_available':
-                event_time, priority, sequence_counter, payload, buffer_level = heapq.heappop(cached_events)
+            if Config.SCHEDULING_METHOD == 'earliest_available' or Config.SCHEDULING_METHOD == 'random':
+                if Config.SCHEDULING_METHOD == 'earliest_available':
+                    event_time, priority, sequence_counter, payload, buffer_level = heapq.heappop(cached_events)
+                else:
+                    # select a random event and remove it from the cached events
+                    event_time, priority, sequence_counter, payload, buffer_level = random.choice(cached_events)
+                    cached_events.remove((event_time, priority, sequence_counter, payload, buffer_level))
+                    
                 lowest_buffer_level = buffer_level
                 # check the lowest buffer level of the cached events
                 for cid, buffer_state in onthefly_buffer_data.items():
@@ -3161,8 +3203,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         # now the event is at least frame or generation
         if scheduled_event:
             scheduling_selected_lowest_buffer.append(selected_lowest + scheduling_selected_lowest_buffer[-1])
-            selection_time = max(event_time, processor_clock)
-            scheduling_selection_times.append(selection_time)
+            scheduling_selection_times.append(scheduling_selection_times[-1] + 1)
 
         if event_type == 'frame':
 
@@ -3231,8 +3272,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
                     if is_last_chunk:
                         buffer_state['pending_responses'].discard(response_idx)
-                        if '2a8' in conversation_id:
-                            print("-----------discard pending response", response_idx, buffer_state['pending_responses'])
                         assert shared_liveinfer.generation_state is None, f"generation_state: {shared_liveinfer.generation_state}"
 
                     # update buffer only if the latest prompt has been processed
