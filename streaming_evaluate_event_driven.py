@@ -101,7 +101,8 @@ class Config:
     # Scheduling
     # 'round_robin' or 'random' or 'lowest_buffer' 
     SCHEDULING_METHOD = 'lowest_buffer' 
-    PRIORITY_WEIGHT = 1 # discount factor for remaining length compared to the age
+    RL_WEIGHT = 1 # discount factor for remaining length compared to the age
+    AGE_WEIGHT = 1 # discount factor for age compared to the remaining length
     SCORE_IMPACT = 0 # 0 means disable score and it becomes the same as lowest_buffer
     EWMA_FACTOR = 0.9
     GENERATION_CHUNK_SIZE = 32
@@ -2285,11 +2286,11 @@ class EventDrivenConversationContext:
                 liveinfer.update_frame_response_length(frame_idx, word_count, self.conversation_id)
             if response:
                 self.response_generated += 1
-                print(f"[t={self.conversation_start_time + relative_time:.2f}s] Response: {response}")
-            elif texts_generated_previous:
-                print(f"[t={self.conversation_start_time + relative_time:.2f}s] Chunk: {texts_generated_previous}")
-            elif query:
-                print(f"[t={self.conversation_start_time + relative_time:.2f}s] Query: {query}")
+            #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Response: {response}")
+            # elif texts_generated_previous:
+            #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Chunk: {texts_generated_previous}")
+            # elif query:
+            #     print(f"[t={self.conversation_start_time + relative_time:.2f}s] Query: {query}")
             # print(f"  └─ Generation time: {frame_processing_time:.3f}s\t start_time: {start_time:.3f}\t prompt_idx: {self.response_generated}")
 
         self.frames_processed += 1
@@ -2369,11 +2370,11 @@ class EventDrivenConversationContext:
                 liveinfer.update_frame_response_length(pseudo_frame_idx, word_count, self.conversation_id)
             if response:
                 self.response_generated += 1
-                print(f"[t={video_time:.2f}s] Response: {response}")
-            elif texts_generated_previous:
-                print(f"[t={video_time:.2f}s] Chunk: {texts_generated_previous}")
-            elif query:
-                print(f"[t={video_time:.2f}s] Query: {query}")
+            #     print(f"[t={video_time:.2f}s] Response: {response}")
+            # elif texts_generated_previous:
+            #     print(f"[t={video_time:.2f}s] Chunk: {texts_generated_previous}")
+            # elif query:
+            #     print(f"[t={video_time:.2f}s] Query: {query}")
             # print(f"  └─ Generation time: {chunk_duration:.3f}s\t start_time: {start_time:.3f}\t prompt_idx: {self.response_generated}")
         return {
             'frame_compute_time': 0.0,
@@ -2538,15 +2539,17 @@ class LiveBufferVisualizer:
         for i, cid in enumerate(self.conversation_ids):
             self.colors[cid] = base_colors[i % len(base_colors)]
         
-        # Create figure with 4 subplots: buffer, rebuffering, combined GPU+CPU memory, scheduling metrics
-        self.fig, self.axes = plt.subplots(2, 2, figsize=(16, 10))
+        # Create figure with 6 subplots: 2 rows, 3 columns
+        self.fig, self.axes = plt.subplots(2, 3, figsize=(24, 12))
         self.fig.suptitle(f'Live System Monitoring - {data_source.title()} (Listening Mode)', 
                          fontsize=14, fontweight='bold')
         
         self.ax_buffer = self.axes[0, 0]
         self.ax_rebuffer = self.axes[0, 1]
-        self.ax_memory = self.axes[1, 0]  # Combined GPU and CPU memory
-        self.ax_scheduling = self.axes[1, 1]  # Combined scheduling metrics
+        self.ax_memory = self.axes[0, 2]  # Combined GPU and CPU memory
+        self.ax_scheduling = self.axes[1, 0]  # Combined scheduling metrics
+        self.ax_age = self.axes[1, 1]  # Age of conversations
+        self.ax_erl_crl = self.axes[1, 2]  # ERL and CRL of conversations
         
         # Configure buffer axes
         self.ax_buffer.set_ylabel('Buffer Size (words)')
@@ -2572,9 +2575,23 @@ class LiveBufferVisualizer:
         self.ax_scheduling.set_title('Scheduling Decisions & Scores')
         self.ax_scheduling.grid(True, alpha=0.3)
         
+        # Configure age axes
+        self.ax_age.set_xlabel('Processor Time (s)')
+        self.ax_age.set_ylabel('Age (events)')
+        self.ax_age.set_title('Conversation Age')
+        self.ax_age.grid(True, alpha=0.3)
+        
+        # Configure ERL/CRL axes
+        self.ax_erl_crl.set_xlabel('Processor Time (s)')
+        self.ax_erl_crl.set_ylabel('Length (words)')
+        self.ax_erl_crl.set_title('Expected Remaining Length')
+        self.ax_erl_crl.grid(True, alpha=0.3)
+        
         # Store line objects for each conversation
         self.buffer_lines = {}
         self.rebuffer_lines = {}
+        self.age_lines = {}  # Age lines per conversation
+        self.erl_lines = {}  # ERL lines per conversation
         
         # Combined memory lines (both GPU and CPU on same plot)
         self.gpu_line, = self.ax_memory.plot([], [], color='#1f77b4', linewidth=2.5, 
@@ -2598,16 +2615,30 @@ class LiveBufferVisualizer:
                                                           label=cid[:12], alpha=0.9)
             self.rebuffer_lines[cid], = self.ax_rebuffer.plot([], [], color=color, linewidth=2, 
                                                               alpha=0.9)
+            self.age_lines[cid], = self.ax_age.plot([], [], color=color, linewidth=2, 
+                                                   label=cid[:12], alpha=0.9)
+            self.erl_lines[cid], = self.ax_erl_crl.plot([], [], color=color, linewidth=2, 
+                                                       label=f'{cid[:12]} ERL', alpha=0.9, linestyle='-')
         
         self.ax_buffer.legend(loc='upper right', fontsize=16, title='Conversation')
         self.ax_memory.legend(loc='upper left', fontsize=16)
         self.ax_scheduling.legend(loc='upper left', fontsize=16)
+        self.ax_age.legend(loc='upper left', fontsize=16, title='Conversation')
+        self.ax_erl_crl.legend(loc='upper right', fontsize=16, title='Conversation')
         
         # Initialize memory tracking lists
         self.gpu_memory_times = []
         self.gpu_memory_values = []
         self.cpu_memory_times = []
         self.cpu_memory_values = []
+        
+        # Initialize age, erl, crl tracking per conversation
+        self.age_data = {}  # {conversation_id: {'times': [], 'ages': []}}
+        self.erl_data = {}  # {conversation_id: {'times': [], 'erl': []}}
+        
+        for cid in self.conversation_ids:
+            self.age_data[cid] = {'times': [], 'ages': []}
+            self.erl_data[cid] = {'times': [], 'erl': []}
         
         plt.tight_layout()
         
@@ -2617,8 +2648,8 @@ class LiveBufferVisualizer:
         self.fig.savefig(self.output_path, dpi=150, bbox_inches='tight')
         print(f"📊 Live visualization initialized: {self.output_path}")
     
-    def update(self, onthefly_buffer_data, current_time=None, scheduling_data=None):
-        """Update the visualization with current buffer data, memory usage, and scheduling metrics"""
+    def update(self, onthefly_buffer_data, current_time=None, scheduling_data=None, age_erl_crl_data=None):
+        """Update the visualization with current buffer data, memory usage, scheduling metrics, and age/erl/crl data"""
         if not self.enabled:
             return
         
@@ -2682,12 +2713,35 @@ class LiveBufferVisualizer:
                 self.buffer_diff_line.set_data(self.scheduling_times, self.selected_score)
                 self.ending_line.set_data(self.scheduling_times, self.selected_ending)
         
+        # Update age, erl, crl plots if provided
+        if age_erl_crl_data is not None:
+            for cid in self.conversation_ids:
+                if cid in age_erl_crl_data:
+                    data = age_erl_crl_data[cid]
+                    
+                    # Update age data
+                    if 'age_times' in data and 'ages' in data:
+                        self.age_data[cid]['times'].extend(data['age_times'])
+                        self.age_data[cid]['ages'].extend(data['ages'])
+                        self.age_lines[cid].set_data(self.age_data[cid]['times'], self.age_data[cid]['ages'])
+                    
+                    # Update ERL data
+                    if 'erl_times' in data and 'erl' in data:
+                        self.erl_data[cid]['times'].extend(data['erl_times'])
+                        self.erl_data[cid]['erl'].extend(data['erl'])
+                        self.erl_lines[cid].set_data(self.erl_data[cid]['times'], self.erl_data[cid]['erl'])
+        
         # Update axis limits
         if max_time > 0:
             self.ax_buffer.set_xlim(0, max_time * 1.05)
             self.ax_rebuffer.set_xlim(0, max_time * 1.05)
             self.ax_memory.set_xlim(0, max_time * 1.05)
-            self.ax_scheduling.set_xlim(0, max_time * 1.05)
+            self.ax_age.set_xlim(0, max_time * 1.05)
+            self.ax_erl_crl.set_xlim(0, max_time * 1.05)
+
+        max_schedule_rounds = max(self.scheduling_times)
+        if max_schedule_rounds > 0:
+            self.ax_scheduling.set_xlim(0, max_schedule_rounds * 1.05)
         
         if max_buffer > 0:
             self.ax_buffer.set_ylim(0, max_buffer * 1.1)
@@ -2706,16 +2760,26 @@ class LiveBufferVisualizer:
         
         # Update scheduling axis limits
         max_scheduling = 0
-        if self.selected_lowest:
-            max_scheduling = max(max_scheduling, max(self.selected_lowest))
-        if self.selected_increment:
-            max_scheduling = max(max_scheduling, max(self.selected_increment))
         if self.selected_score:
-            max_scheduling = max(max_scheduling, max(self.selected_score))
-        if self.selected_ending:
-            max_scheduling = max(max_scheduling, max(self.selected_ending))
+            max_scheduling = max(self.selected_score)
         if max_scheduling > 0:
             self.ax_scheduling.set_ylim(0, max_scheduling * 1.1)
+        
+        # Update age axis limits
+        max_age = 0
+        for cid in self.conversation_ids:
+            if cid in self.age_data and self.age_data[cid]['ages']:
+                max_age = max(max_age, max(self.age_data[cid]['ages']))
+        if max_age > 0:
+            self.ax_age.set_ylim(0, max_age * 1.1)
+        
+        # Update ERL/CRL axis limits
+        max_length = 0
+        for cid in self.conversation_ids:
+            if cid in self.erl_data and self.erl_data[cid]['erl']:
+                max_length = max(max_length, max(self.erl_data[cid]['erl']))
+        if max_length > 0:
+            self.ax_erl_crl.set_ylim(0, max_length * 1.1)
         
         # Redraw and save
         self.fig.canvas.draw()
@@ -3032,7 +3096,17 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             'selected_score': [increment + lowest + ending for lowest, increment, ending in zip(scheduling_selected_lowest_buffer, scheduling_selected_increment, scheduling_selected_ending)],
             'selected_ending': scheduling_selected_ending
         }
-        live_viz.update(onthefly_buffer_data, current_time=processor_clock, scheduling_data=scheduling_data)
+        # Prepare age, erl, crl data for live visualization
+        age_erl_crl_data = {}
+        for cid in contexts.keys():
+            age_erl_crl_data[cid] = {
+                'age_times': [processor_clock],  # Use current time for age tracking
+                'ages': [age_of_conversations[cid]],
+                'erl_times': [processor_clock],  # Use current time for erl tracking
+                'erl': [erl_of_conversations[cid]],
+            }
+        
+        live_viz.update(onthefly_buffer_data, current_time=processor_clock, scheduling_data=scheduling_data, age_erl_crl_data=age_erl_crl_data)
         
         # flush out any delayed events to process prompts first
         cached_events = []
@@ -3063,9 +3137,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     else:
                         unschedulable_events.append((event_time, priority, sequence_counter, payload))
                 elif Config.SCHEDULING_METHOD == 'lowest_buffer':
-                    r = Config.PRIORITY_WEIGHT
+                    r = Config.RL_WEIGHT
+                    a = Config.AGE_WEIGHT
                     remaining_length = erl_of_conversations[conversation_id] - crl_of_conversations[conversation_id]
-                    score = (r * remaining_length - age_of_conversations[conversation_id]) * Config.SCORE_IMPACT
+                    score = (r * remaining_length - a * age_of_conversations[conversation_id]) * Config.SCORE_IMPACT
                     if conversation_id not in cached_event_by_conversation or event_type == 'generation':
                         if conversation_id in cached_event_by_conversation:
                             buffer_level0, score0, event_time0, priority0, sequence_counter0, payload0 = cached_event_by_conversation[conversation_id]
@@ -3084,6 +3159,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 if Config.SCHEDULING_METHOD == 'lowest_buffer':
                     buffer_level, score, event_time, priority, sequence_counter, payload = event
                     if buffer_level < Config.BUFFER_URGENT_VALUE:
+                        # we need to sort by score instead of buffer level here
                         if event_type == 'frame' and not cached_generation_events:
                             heapq.heappush(cached_frame_events, (buffer_level, score, event_time, priority, sequence_counter, payload))
                         elif event_type == 'generation':
@@ -3091,17 +3167,23 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         
         # print(f"Unschedulable events: {len(unschedulable_events)}, cached_events: {len(cached_events)}, cached_generation_events: {len(cached_generation_events)}, cached_frame_events: {len(cached_frame_events)}")
         if cached_generation_events:
+            tmp_events = []
             for event in cached_events:
+                buffer_level, score, event_time, priority, sequence_counter, payload = event
                 if event not in cached_generation_events:
-                    buffer_level, score, event_time, priority, sequence_counter, payload = event
                     unschedulable_events.append((event_time, priority, sequence_counter, payload))
-            cached_events = cached_generation_events
+                else:
+                    heapq.heappush(tmp_events, (0, score, event_time, priority, sequence_counter, payload))
+            cached_events = tmp_events
         elif cached_frame_events:
+            tmp_events = []
             for event in cached_events:
+                buffer_level, score, event_time, priority, sequence_counter, payload = event
                 if event not in cached_frame_events:
-                    buffer_level, score, event_time, priority, sequence_counter, payload = event
                     unschedulable_events.append((event_time, priority, sequence_counter, payload))
-            cached_events = cached_frame_events
+                else:
+                    heapq.heappush(tmp_events, (0, score, event_time, priority, sequence_counter, payload))
+            cached_events = tmp_events
 
         # print(f"Events to be scheduled: {len(cached_events)}")
         # for event in cached_events:
@@ -3318,20 +3400,23 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     buffer_state['rebuffer_times'].append(processor_clock)
                     buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
 
+                    if not is_last_chunk:
+                        # update age of conversation if not finished
+                        age_of_conversations[conversation_id] += 1
+                    else:
+                        # finished, reset age of conversation
+                        age_of_conversations[conversation_id] = 0
+                        # update erl of conversation
+                        if erl_of_conversations[conversation_id] == 0:
+                            erl_of_conversations[conversation_id] = crl_of_conversations[conversation_id]
+                        else:
+                            erl_of_conversations[conversation_id] = (1-Config.EWMA_FACTOR) * erl_of_conversations[conversation_id] + Config.EWMA_FACTOR * crl_of_conversations[conversation_id]
+                        # reset crl of conversation
+                        crl_of_conversations[conversation_id] = 0
+
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
-                # update age of conversation if not finished
-                age_of_conversations[conversation_id] += 1
-            else:
-                # finished, reset age of conversation
-                age_of_conversations[conversation_id] = 0
-                # update erl of conversation
-                if erl_of_conversations[conversation_id] == 0:
-                    erl_of_conversations[conversation_id] = crl_of_conversations[conversation_id]
-                else:
-                    erl_of_conversations[conversation_id] = (1-Config.EWMA_FACTOR) * erl_of_conversations[conversation_id] + Config.EWMA_FACTOR * crl_of_conversations[conversation_id]
-                # reset crl of conversation
-                crl_of_conversations[conversation_id] = 0
+                
 
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
@@ -3406,25 +3491,27 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     buffer_state['rebuffer_times'].append(processor_clock)
                     buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
 
+                    if not is_last_chunk:
+                        # update age of conversation if not finished
+                        age_of_conversations[conversation_id] += 1
+                    else:
+                        # if finished, reset age of conversation
+                        while shared_liveinfer.pending_frame_events:
+                            pending_time, pending_priority, pending_payload = shared_liveinfer.pending_frame_events.popleft()
+                            heapq.heappush(event_queue, (pending_time, pending_priority, sequence_counter, ('frame', conversation_id, pending_payload)))
+                            sequence_counter += 1
+                        # reset age of conversation
+                        age_of_conversations[conversation_id] = 0
+                        # update erl of conversation
+                        if erl_of_conversations[conversation_id] == 0:
+                            erl_of_conversations[conversation_id] = crl_of_conversations[conversation_id]
+                        else:
+                            erl_of_conversations[conversation_id] = (1-Config.EWMA_FACTOR) * erl_of_conversations[conversation_id] + Config.EWMA_FACTOR * crl_of_conversations[conversation_id]
+                        # reset crl of conversation
+                        crl_of_conversations[conversation_id] = 0
+
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
-                # update age of conversation if not finished
-                age_of_conversations[conversation_id] += 1
-            else:
-                # if finished, reset age of conversation
-                while shared_liveinfer.pending_frame_events:
-                    pending_time, pending_priority, pending_payload = shared_liveinfer.pending_frame_events.popleft()
-                    heapq.heappush(event_queue, (pending_time, pending_priority, sequence_counter, ('frame', conversation_id, pending_payload)))
-                    sequence_counter += 1
-                # reset age of conversation
-                age_of_conversations[conversation_id] = 0
-                # update erl of conversation
-                if erl_of_conversations[conversation_id] == 0:
-                    erl_of_conversations[conversation_id] = crl_of_conversations[conversation_id]
-                else:
-                    erl_of_conversations[conversation_id] = (1-Config.EWMA_FACTOR) * erl_of_conversations[conversation_id] + Config.EWMA_FACTOR * crl_of_conversations[conversation_id]
-                # reset crl of conversation
-                crl_of_conversations[conversation_id] = 0
 
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             context.save_liveinfer_state(shared_liveinfer)
