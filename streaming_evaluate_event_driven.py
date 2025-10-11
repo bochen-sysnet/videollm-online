@@ -68,13 +68,13 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 300            # Max frames for evaluation (use full video)
-    BATCH_SIZE_LIMIT = 5                # Max frames to load at once
+    MAX_EVAL_FRAMES = 600            # Max frames for evaluation (use full video)
+    BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 5             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -101,11 +101,11 @@ class Config:
     # Scheduling
     # 'round_robin' or 'random' or 'lowest_buffer' 
     SCHEDULING_METHOD = 'lowest_buffer' 
-    RL_WEIGHT = 1 # discount factor for remaining length compared to the age
+    RL_WEIGHT = 0 # discount factor for remaining length compared to the age
     AGE_WEIGHT = 1 # discount factor for age compared to the remaining length
-    SCORE_IMPACT = 0 # 0 means disable score and it becomes the same as lowest_buffer
+    SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
     EWMA_FACTOR = 0.9
-    GENERATION_CHUNK_SIZE = 32
+    GENERATION_CHUNK_SIZE = 16
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
 
     # it controls the aggressiveness to select gen events
@@ -2827,13 +2827,25 @@ class LiveBufferVisualizer:
             self.ax_buffer.set_xlim(0, max_time * 1.05)
             self.ax_rebuffer.set_xlim(0, max_time * 1.05)
             self.ax_memory.set_xlim(0, max_time * 1.05)
-            self.ax_scheduling.set_xlim(0, max_time * 1.05)
+            self.ax_age.set_xlim(0, max_time * 1.05)
+            self.ax_erl_crl.set_xlim(0, max_time * 1.05)
+
+        max_schedule_rounds = max(self.scheduling_times)
+        if max_schedule_rounds > 0:
+            self.ax_scheduling.set_xlim(0, max_schedule_rounds * 1.05)
         
         if max_buffer > 0:
             self.ax_buffer.set_ylim(0, max_buffer * 1.1)
         
         if max_rebuffer > 0:
             self.ax_rebuffer.set_ylim(0, max_rebuffer * 1.1)
+
+        # Update scheduling axis limits
+        max_scheduling = 0
+        if self.selected_score:
+            max_scheduling = max(self.selected_score)
+        if max_scheduling > 0:
+            self.ax_scheduling.set_ylim(0, max_scheduling * 1.1)
         
         # Update combined memory axis limits
         max_memory = 0
