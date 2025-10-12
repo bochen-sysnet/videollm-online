@@ -2539,17 +2539,21 @@ class LiveBufferVisualizer:
         for i, cid in enumerate(self.conversation_ids):
             self.colors[cid] = base_colors[i % len(base_colors)]
         
-        # Create figure with 6 subplots: 2 rows, 3 columns
-        self.fig, self.axes = plt.subplots(2, 3, figsize=(24, 12))
+        # Create figure with 7 subplots: 2 rows, 4 columns (last subplot spans 2 positions)
+        self.fig = plt.figure(figsize=(32, 12))
         self.fig.suptitle(f'Live System Monitoring - {data_source.title()} (Listening Mode)', 
                          fontsize=14, fontweight='bold')
         
-        self.ax_buffer = self.axes[0, 0]
-        self.ax_rebuffer = self.axes[0, 1]
-        self.ax_memory = self.axes[0, 2]  # Combined GPU and CPU memory
-        self.ax_scheduling = self.axes[1, 0]  # Combined scheduling metrics
-        self.ax_age = self.axes[1, 1]  # Age of conversations
-        self.ax_erl_crl = self.axes[1, 2]  # ERL and CRL of conversations
+        # Create a 2x4 grid with the last subplot spanning 2 positions
+        gs = self.fig.add_gridspec(2, 4)
+        
+        self.ax_buffer = self.fig.add_subplot(gs[0, 0])
+        self.ax_rebuffer = self.fig.add_subplot(gs[0, 1])
+        self.ax_memory = self.fig.add_subplot(gs[0, 2])  # Combined GPU and CPU memory
+        self.ax_scheduling = self.fig.add_subplot(gs[0, 3])  # Combined scheduling metrics
+        self.ax_age = self.fig.add_subplot(gs[1, 0])  # Age of conversations
+        self.ax_erl_crl = self.fig.add_subplot(gs[1, 1])  # ERL and CRL of conversations
+        self.ax_delays = self.fig.add_subplot(gs[1, 2])  # Processing and Queuing delays - NEW
         
         # Configure buffer axes
         self.ax_buffer.set_ylabel('Buffer Size (words)')
@@ -2587,6 +2591,12 @@ class LiveBufferVisualizer:
         self.ax_erl_crl.set_title('Expected Remaining Length')
         self.ax_erl_crl.grid(True, alpha=0.3)
         
+        # Configure delays axes
+        self.ax_delays.set_xlabel('Processor Time (s)')
+        self.ax_delays.set_ylabel('Delay Time (s)')
+        self.ax_delays.set_title('Processing and Queuing Delays (Averaged Across Conversations)')
+        self.ax_delays.grid(True, alpha=0.3)
+        
         # Store line objects for each conversation
         self.buffer_lines = {}
         self.rebuffer_lines = {}
@@ -2609,6 +2619,12 @@ class LiveBufferVisualizer:
         self.ending_line, = self.ax_scheduling.plot([], [], color='#8c564b', linewidth=2, 
                                                    label='Selected Ending Chunk', alpha=0.9)
         
+        # Delay lines (averaged across conversations)
+        self.processing_delay_line, = self.ax_delays.plot([], [], color='#e377c2', linewidth=2, 
+                                                        label='Processing Delay', alpha=0.9)
+        self.queuing_delay_line, = self.ax_delays.plot([], [], color='#17becf', linewidth=2, 
+                                                     label='Queuing Delay', alpha=0.9)
+        
         for cid in self.conversation_ids:
             color = self.colors[cid]
             self.buffer_lines[cid], = self.ax_buffer.plot([], [], color=color, linewidth=2, 
@@ -2625,6 +2641,7 @@ class LiveBufferVisualizer:
         self.ax_scheduling.legend(loc='upper left', fontsize=16)
         self.ax_age.legend(loc='upper left', fontsize=16, title='Conversation')
         self.ax_erl_crl.legend(loc='upper right', fontsize=16, title='Conversation')
+        self.ax_delays.legend(loc='upper left', fontsize=16)
         
         # Initialize memory tracking lists
         self.gpu_memory_times = []
@@ -2640,6 +2657,11 @@ class LiveBufferVisualizer:
             self.age_data[cid] = {'times': [], 'ages': []}
             self.erl_data[cid] = {'times': [], 'erl': []}
         
+        # Initialize delay tracking (averaged across conversations)
+        self.delay_times = []
+        self.avg_processing_delays = []
+        self.avg_queuing_delays = []
+        
         plt.tight_layout()
         
         # Save initial empty plot
@@ -2648,8 +2670,8 @@ class LiveBufferVisualizer:
         self.fig.savefig(self.output_path, dpi=150, bbox_inches='tight')
         print(f"📊 Live visualization initialized: {self.output_path}")
     
-    def update(self, onthefly_buffer_data, current_time=None, scheduling_data=None, age_erl_crl_data=None):
-        """Update the visualization with current buffer data, memory usage, scheduling metrics, and age/erl/crl data"""
+    def update(self, onthefly_buffer_data, current_time=None, scheduling_data=None, age_erl_crl_data=None, delay_data=None):
+        """Update the visualization with current buffer data, memory usage, scheduling metrics, age/erl/crl data, and delay data"""
         if not self.enabled:
             return
         
@@ -2731,6 +2753,16 @@ class LiveBufferVisualizer:
                         self.erl_data[cid]['erl'].extend(data['erl'])
                         self.erl_lines[cid].set_data(self.erl_data[cid]['times'], self.erl_data[cid]['erl'])
         
+        # Update delay plots if provided
+        if delay_data is not None:
+            self.delay_times.append(delay_data['times'])
+            self.avg_processing_delays.append(delay_data['avg_processing_delays'])
+            self.avg_queuing_delays.append(delay_data['avg_queuing_delays'])
+            
+            self.processing_delay_line.set_data(self.delay_times, self.avg_processing_delays)
+            self.queuing_delay_line.set_data(self.delay_times, self.avg_queuing_delays)
+            max_time = max(max_time, max(self.delay_times))
+        
         # Update axis limits
         if max_time > 0:
             self.ax_buffer.set_xlim(0, max_time * 1.05)
@@ -2738,6 +2770,7 @@ class LiveBufferVisualizer:
             self.ax_memory.set_xlim(0, max_time * 1.05)
             self.ax_age.set_xlim(0, max_time * 1.05)
             self.ax_erl_crl.set_xlim(0, max_time * 1.05)
+            self.ax_delays.set_xlim(0, max_time * 1.05)
 
         max_schedule_rounds = max(self.scheduling_times)
         if max_schedule_rounds > 0:
@@ -2780,6 +2813,15 @@ class LiveBufferVisualizer:
                 max_length = max(max_length, max(self.erl_data[cid]['erl']))
         if max_length > 0:
             self.ax_erl_crl.set_ylim(0, max_length * 1.1)
+        
+        # Update delays axis limits
+        max_delay = 0
+        if self.avg_processing_delays:
+            max_delay = max(max_delay, max(self.avg_processing_delays))
+        if self.avg_queuing_delays:
+            max_delay = max(max_delay, max(self.avg_queuing_delays))
+        if max_delay > 0:
+            self.ax_delays.set_ylim(0, max_delay * 1.1)
         
         # Redraw and save
         self.fig.canvas.draw()
@@ -3152,7 +3194,37 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 'erl': [erl_of_conversations[cid]],
             }
         
-        live_viz.update(onthefly_buffer_data, current_time=processor_clock, scheduling_data=scheduling_data, age_erl_crl_data=age_erl_crl_data)
+        # Prepare delay data for live visualization (averaged across conversations)
+        delay_data = {
+            'times': [],
+            'avg_processing_delays': [],
+            'avg_queuing_delays': []
+        }
+        
+        # Collect delay data from all conversations
+        all_processing_delays = []
+        all_queuing_delays = []
+        
+        for cid, buffer_state in onthefly_buffer_data.items():
+            if 'total_processing_delay' in buffer_state and 'total_queuing_delay' in buffer_state:
+                processing_delays = buffer_state['total_processing_delay']
+                queuing_delays = buffer_state['total_queuing_delay']
+                rebuffer_times = buffer_state['last_update_time']
+                
+                # Use rebuffer_times as the time base for delays
+                all_processing_delays.append(processing_delays)
+                all_queuing_delays.append(queuing_delays)
+        
+        avg_processing = sum(all_processing_delays) / len(all_processing_delays)
+        avg_queuing = sum(all_queuing_delays) / len(all_queuing_delays)
+        
+        delay_data = {
+            'times': processor_clock,
+            'avg_processing_delays': avg_processing,
+            'avg_queuing_delays': avg_queuing
+        }
+        
+        live_viz.update(onthefly_buffer_data, current_time=processor_clock, scheduling_data=scheduling_data, age_erl_crl_data=age_erl_crl_data, delay_data=delay_data)
         
         # flush out any delayed events to process prompts first
         cached_events = []
@@ -3434,35 +3506,35 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                         buffer_state['pending_responses'].add(context.response_expected)
                         context.response_expected += 1
 
-                    if is_last_chunk:
-                        buffer_state['pending_responses'].discard(response_idx)
-                        assert shared_liveinfer.generation_state is None, f"generation_state: {shared_liveinfer.generation_state}"
+                if is_last_chunk:
+                    buffer_state['pending_responses'].discard(response_idx)
+                    assert shared_liveinfer.generation_state is None, f"generation_state: {shared_liveinfer.generation_state}"
 
-                    # update buffer only if the latest prompt has been processed
-                    if context.processed_prompt_cnt == context.received_prompt_cnt:
-                        buffer_state['buffer'] += word_count
+                # update buffer only if the latest prompt has been processed
+                if context.processed_prompt_cnt == context.received_prompt_cnt:
+                    buffer_state['buffer'] += word_count
+                        
+                # Record buffer state after adding words
+                buffer_state['times'].append(processor_clock)
+                buffer_state['values'].append(buffer_state['buffer'])
+                buffer_state['rebuffer_times'].append(processor_clock)
+                buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+                buffer_state['processing_delays'].append(buffer_state['total_processing_delay'])
+                buffer_state['queuing_delays'].append(buffer_state['total_queuing_delay'])
 
-                    # Record buffer state after adding words
-                    buffer_state['times'].append(processor_clock)
-                    buffer_state['values'].append(buffer_state['buffer'])
-                    buffer_state['rebuffer_times'].append(processor_clock)
-                    buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-                    buffer_state['processing_delays'].append(buffer_state['total_processing_delay'])
-                    buffer_state['queuing_delays'].append(buffer_state['total_queuing_delay'])
-
-                    if not is_last_chunk:
-                        # update age of conversation if not finished
-                        age_of_conversations[conversation_id] += 1
+                if not is_last_chunk:
+                    # update age of conversation if not finished
+                    age_of_conversations[conversation_id] += 1
+                else:
+                    # finished, reset age of conversation
+                    age_of_conversations[conversation_id] = 0
+                    # update erl of conversation
+                    if erl_of_conversations[conversation_id] == 0:
+                        erl_of_conversations[conversation_id] = crl_of_conversations[conversation_id]
                     else:
-                        # finished, reset age of conversation
-                        age_of_conversations[conversation_id] = 0
-                        # update erl of conversation
-                        if erl_of_conversations[conversation_id] == 0:
-                            erl_of_conversations[conversation_id] = crl_of_conversations[conversation_id]
-                        else:
-                            erl_of_conversations[conversation_id] = (1-Config.EWMA_FACTOR) * erl_of_conversations[conversation_id] + Config.EWMA_FACTOR * crl_of_conversations[conversation_id]
-                        # reset crl of conversation
-                        crl_of_conversations[conversation_id] = 0
+                        erl_of_conversations[conversation_id] = (1-Config.EWMA_FACTOR) * erl_of_conversations[conversation_id] + Config.EWMA_FACTOR * crl_of_conversations[conversation_id]
+                    # reset crl of conversation
+                    crl_of_conversations[conversation_id] = 0
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
@@ -3522,18 +3594,18 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
                 update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred, is_queuing=False)
 
-                # Add words to buffer (happens at chunk completion time)
-                if not context.oom_occurred:
-                    if context.processed_prompt_cnt == context.received_prompt_cnt:
-                        buffer_state['buffer'] += word_count
-                    
-                    is_last_chunk = last_event.get('is_last_chunk', False)
-                    is_first_chunk = last_event.get('is_first_chunk', False)
-                    assert not is_first_chunk, f"is_first_chunk: {is_first_chunk}"
-                    
-                    if is_last_chunk:
-                        buffer_state['pending_responses'].discard(response_idx)
-                        assert shared_liveinfer.generation_state is None, f"generation_state: {shared_liveinfer.generation_state}"
+            # Add words to buffer (happens at chunk completion time)
+            if not context.oom_occurred:
+                if context.processed_prompt_cnt == context.received_prompt_cnt:
+                    buffer_state['buffer'] += word_count
+                
+                is_last_chunk = last_event.get('is_last_chunk', False)
+                is_first_chunk = last_event.get('is_first_chunk', False)
+                assert not is_first_chunk, f"is_first_chunk: {is_first_chunk}"
+                
+                if is_last_chunk:
+                    buffer_state['pending_responses'].discard(response_idx)
+                    assert shared_liveinfer.generation_state is None, f"generation_state: {shared_liveinfer.generation_state}"
 
                     # Record buffer state after adding words
                     buffer_state['times'].append(processor_clock)
@@ -3543,24 +3615,24 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     buffer_state['processing_delays'].append(buffer_state['total_processing_delay'])
                     buffer_state['queuing_delays'].append(buffer_state['total_queuing_delay'])
 
-                    if not is_last_chunk:
-                        # update age of conversation if not finished
-                        age_of_conversations[conversation_id] += 1
+                if not is_last_chunk:
+                    # update age of conversation if not finished
+                    age_of_conversations[conversation_id] += 1
+                else:
+                    # if finished, reset age of conversation
+                    while shared_liveinfer.pending_frame_events:
+                        pending_time, pending_priority, pending_payload = shared_liveinfer.pending_frame_events.popleft()
+                        heapq.heappush(event_queue, (pending_time, pending_priority, sequence_counter, ('frame', conversation_id, pending_payload)))
+                    sequence_counter += 1
+                    # reset age of conversation
+                    age_of_conversations[conversation_id] = 0
+                    # update erl of conversation
+                    if erl_of_conversations[conversation_id] == 0:
+                        erl_of_conversations[conversation_id] = crl_of_conversations[conversation_id]
                     else:
-                        # if finished, reset age of conversation
-                        while shared_liveinfer.pending_frame_events:
-                            pending_time, pending_priority, pending_payload = shared_liveinfer.pending_frame_events.popleft()
-                            heapq.heappush(event_queue, (pending_time, pending_priority, sequence_counter, ('frame', conversation_id, pending_payload)))
-                            sequence_counter += 1
-                        # reset age of conversation
-                        age_of_conversations[conversation_id] = 0
-                        # update erl of conversation
-                        if erl_of_conversations[conversation_id] == 0:
-                            erl_of_conversations[conversation_id] = crl_of_conversations[conversation_id]
-                        else:
-                            erl_of_conversations[conversation_id] = (1-Config.EWMA_FACTOR) * erl_of_conversations[conversation_id] + Config.EWMA_FACTOR * crl_of_conversations[conversation_id]
-                        # reset crl of conversation
-                        crl_of_conversations[conversation_id] = 0
+                        erl_of_conversations[conversation_id] = (1-Config.EWMA_FACTOR) * erl_of_conversations[conversation_id] + Config.EWMA_FACTOR * crl_of_conversations[conversation_id]
+                    # reset crl of conversation
+                    crl_of_conversations[conversation_id] = 0
 
             if shared_liveinfer.generation_state is not None:
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
@@ -4210,12 +4282,12 @@ class SimpleLiveInfer:
             # handle OOM with try and except
             try:
                 output_ids, past_key_values, next_inputs_embeds, finished = fast_greedy_generate(
-                    model=self.model,
-                    inputs_embeds=next_inputs,
-                    past_key_values=past_key_values,
-                    eos_token_id=self.eos_token_id,
-                    inplace_output_ids=buffer,
-                        max_new_tokens=chunk_size,
+                model=self.model,
+                inputs_embeds=next_inputs,
+                past_key_values=past_key_values,
+                eos_token_id=self.eos_token_id,
+                inplace_output_ids=buffer,
+                max_new_tokens=chunk_size,
                     )
             except RuntimeError as e:
                 if 'out of memory' in str(e).lower():
@@ -5766,22 +5838,46 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
     ax1.text(0, vlm_ppl_mean + vlm_ppl_std + 0.2, f'{vlm_ppl_mean:.2f}±{vlm_ppl_std:.2f}', 
              ha='center', va='bottom', fontsize=9, fontweight='bold')
     
-    # 2. Rebuffering Time - Listening Mode Only (top-right)
+    # 2. Rebuffering Time and Delays - Listening Mode Only (top-right)
     ax2 = axes[0, 1]
-    bars2 = ax2.bar([0], [listening_rebuffer_mean], yerr=[listening_rebuffer_std],
-                    color=colors[1], alpha=0.8, capsize=4, width=0.4,
+    
+    # Calculate delay statistics from buffer_data
+    processing_delays = []
+    queuing_delays = []
+    if buffer_data:
+        for cid, conversation_buffer in buffer_data.items():
+            listening_traj = conversation_buffer.get('listening', {})
+            if 'processing_delays' in listening_traj and listening_traj['processing_delays']:
+                processing_delays.append(listening_traj['processing_delays'][-1])
+            if 'queuing_delays' in listening_traj and listening_traj['queuing_delays']:
+                queuing_delays.append(listening_traj['queuing_delays'][-1])
+    
+    processing_mean = np.mean(processing_delays) if processing_delays else 0.0
+    processing_std = np.std(processing_delays) if processing_delays else 0.0
+    queuing_mean = np.mean(queuing_delays) if queuing_delays else 0.0
+    queuing_std = np.std(queuing_delays) if queuing_delays else 0.0
+    
+    # Create grouped bars for rebuffering, processing, and queuing delays
+    x_positions = [0, 1, 2]
+    values = [listening_rebuffer_mean, processing_mean, queuing_mean]
+    errors = [listening_rebuffer_std, processing_std, queuing_std]
+    labels_delays = ['Rebuffering', 'Processing', 'Queuing']
+    colors_delays = [colors[1], '#e377c2', '#17becf']
+    
+    bars2 = ax2.bar(x_positions, values, yerr=errors,
+                    color=colors_delays, alpha=0.8, capsize=4, width=0.6,
                     edgecolor='black', linewidth=0.5)
     ax2.set_ylabel('Time (s)')
-    ax2.set_xticks([0])
-    ax2.set_xticklabels(['Listening'])
+    ax2.set_xticks(x_positions)
+    ax2.set_xticklabels(labels_delays)
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.spines['top'].set_visible(False)
     ax2.spines['right'].set_visible(False)
     
     # Add value labels
-    ax2.text(0, listening_rebuffer_mean + listening_rebuffer_std + 0.1, 
-             f'{listening_rebuffer_mean:.2f}±{listening_rebuffer_std:.2f}', 
-             ha='center', va='bottom', fontsize=9, fontweight='bold')
+    for i, (val, err) in enumerate(zip(values, errors)):
+        ax2.text(i, val + err + 0.05, f'{val:.2f}±{err:.2f}', 
+                ha='center', va='bottom', fontsize=8, fontweight='bold')
     
     # 3. Fluency (bottom-left)
     ax3 = axes[1, 0]
