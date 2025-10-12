@@ -3670,18 +3670,18 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         print("\n📊 Creating memory usage analysis...")
         create_memory_visualization(all_memory_data, data_source=data_source)
 
-    if all_frame_scores_data:
-        print("\n📊 Creating frame score analysis...")
-        create_frame_score_analysis(all_frame_scores_data, data_source=data_source)
+    # if all_frame_scores_data:
+    #     print("\n📊 Creating frame score analysis...")
+    #     create_frame_score_analysis(all_frame_scores_data, data_source=data_source)
 
     # Finalize live visualization with final data
     live_viz.finalize(onthefly_buffer_data)
     
     # Collect frame features data from liveinfer
-    all_frame_features_data = shared_liveinfer.get_frame_features_data()
-    if all_frame_features_data:
-        print(f"\n📊 Creating frame features vs response length visualization with {len(all_frame_features_data)} frames...")
-        create_frame_features_vs_response_length_visualization(all_frame_features_data, data_source=data_source)
+    # all_frame_features_data = shared_liveinfer.get_frame_features_data()
+    # if all_frame_features_data:
+    #     print(f"\n📊 Creating frame features vs response length visualization with {len(all_frame_features_data)} frames...")
+    #     create_frame_features_vs_response_length_visualization(all_frame_features_data, data_source=data_source)
     
     # Create response length distribution analysis
     print(f"\n📊 Creating response length distribution analysis...")
@@ -4714,15 +4714,15 @@ def main():
         else:
             avg_time_diff = 0.0
         
-        print(f"\n🎯 AGGREGATE METRICS:")
-        print(f"   • Average Perplexity: {avg_ppl:.3f}")
-        print(f"   • Average Fluency: {avg_fluency:.3f}")
-        print(f"   • Average Responses per Video: {avg_responses_per_video:.1f}")
-        print(f"   • Average Time Diff (latency per response): {avg_time_diff:.3f}s")
+        # print(f"\n🎯 AGGREGATE METRICS:")
+        # print(f"   • Average Perplexity: {avg_ppl:.3f}")
+        # print(f"   • Average Fluency: {avg_fluency:.3f}")
+        # print(f"   • Average Responses per Video: {avg_responses_per_video:.1f}")
+        # print(f"   • Average Time Diff (latency per response): {avg_time_diff:.3f}s")
         # print(f"   • Average Rebuffering Time per Frame: {avg_rebuffering_time:.3f}s")
         
         
-        print(f"\n🎯 PERFORMANCE SUMMARY:")
+        print(f"🎯 PERFORMANCE SUMMARY:")
         print(f"   • Conversations Processed: {len(results)}")
         print(f"   • Total Frames: {sum(r['num_frames'] for r in results)}")
         print(f"   • Total Generated Responses: {sum(len(r['generated_turns']) for r in results)}")
@@ -5655,7 +5655,7 @@ def calculate_metrics(model, tokenizer, video_tensor, normalized_conversation, g
     gt_ppls_vlm_prefix_visual = []  # PPL using VLM responses as context with visual
     
     
-    print(f"📊 Calculating dual PPL (visual context) for {len(ground_truth_responses)} ground truth responses...")
+    # print(f"📊 Calculating PPL for {len(ground_truth_responses)} ground truth responses...")
     
     for i, gt_response in enumerate(ground_truth_responses):
         
@@ -5810,8 +5810,8 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
         'grid.linewidth': 0.5
     })
     
-    # Create figure with 4 vertical subplots in compact layout
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    # Create figure with 3 subplots in one row
+    fig, axes = plt.subplots(1, 3, figsize=(15, 6))
     fig.suptitle(f'Aggregated Performance Metrics - {data_source.title()}', fontsize=14, fontweight='bold', y=0.95)
     
     # Define colors and positions
@@ -5819,8 +5819,8 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
     x_pos = [0, 1, 2, 3]
     labels = ['VLM PPL', 'Rebuffering', 'Fluency', 'Latency']
     
-    # 1. VLM Perplexity with GT reference (top-left)
-    ax1 = axes[0, 0]
+    # 1. VLM Perplexity with GT reference (left)
+    ax1 = axes[1]
     bars1 = ax1.bar([0], [vlm_ppl_mean], yerr=[vlm_ppl_std], 
                     color=colors[0], alpha=0.8, capsize=4, width=0.4, 
                     edgecolor='black', linewidth=0.5)
@@ -5838,8 +5838,8 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
     ax1.text(0, vlm_ppl_mean + vlm_ppl_std + 0.2, f'{vlm_ppl_mean:.2f}±{vlm_ppl_std:.2f}', 
              ha='center', va='bottom', fontsize=9, fontweight='bold')
     
-    # 2. Rebuffering Time and Delays - Listening Mode Only (top-right)
-    ax2 = axes[0, 1]
+    # 2. Time Metrics - Rebuffering, Processing, Queuing, and Latency (middle)
+    ax2 = axes[0]
     
     # Calculate delay statistics from buffer_data
     processing_delays = []
@@ -5857,12 +5857,12 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
     queuing_mean = np.mean(queuing_delays) if queuing_delays else 0.0
     queuing_std = np.std(queuing_delays) if queuing_delays else 0.0
     
-    # Create grouped bars for rebuffering, processing, and queuing delays
-    x_positions = [0, 1, 2]
-    values = [listening_rebuffer_mean, processing_mean, queuing_mean]
-    errors = [listening_rebuffer_std, processing_std, queuing_std]
-    labels_delays = ['Rebuffering', 'Processing', 'Queuing']
-    colors_delays = [colors[1], '#e377c2', '#17becf']
+    # Create grouped bars for latency, rebuffering, processing, and queuing delays
+    x_positions = [0, 1, 2, 3]
+    values = [latency_mean, listening_rebuffer_mean, processing_mean, queuing_mean]
+    errors = [latency_std, listening_rebuffer_std, processing_std, queuing_std]
+    labels_delays = ['Latency', 'Rebuffering', 'Processing', 'Queuing']
+    colors_delays = [colors[3], colors[1], '#e377c2', '#17becf']
     
     bars2 = ax2.bar(x_positions, values, yerr=errors,
                     color=colors_delays, alpha=0.8, capsize=4, width=0.6,
@@ -5879,8 +5879,8 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
         ax2.text(i, val + err + 0.05, f'{val:.2f}±{err:.2f}', 
                 ha='center', va='bottom', fontsize=8, fontweight='bold')
     
-    # 3. Fluency (bottom-left)
-    ax3 = axes[1, 0]
+    # 3. Fluency (right)
+    ax3 = axes[2]
     bars3 = ax3.bar([0], [fluency_mean], yerr=[fluency_std],
                     color=colors[2], alpha=0.8, capsize=4, width=0.4,
                     edgecolor='black', linewidth=0.5)
@@ -5896,31 +5896,6 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
     ax3.text(0, fluency_mean + fluency_std + 0.02, f'{fluency_mean:.3f}±{fluency_std:.3f}', 
              ha='center', va='bottom', fontsize=9, fontweight='bold')
     
-    # 4. Response Latency (bottom-right)
-    ax4 = axes[1, 1]
-    bars4 = ax4.bar([0], [latency_mean], yerr=[latency_std],
-                    color=colors[3], alpha=0.8, capsize=4, width=0.4,
-                    edgecolor='black', linewidth=0.5)
-    ax4.set_ylabel('Time (s)')
-    ax4.set_xticks([0])
-    ax4.set_xticklabels(['Latency'])
-    ax4.grid(True, alpha=0.3, axis='y')
-    ax4.spines['top'].set_visible(False)
-    ax4.spines['right'].set_visible(False)
-    
-    # Add value labels
-    ax4.text(0, latency_mean + latency_std + 0.02, f'{latency_mean:.3f}±{latency_std:.3f}', 
-             ha='center', va='bottom', fontsize=9, fontweight='bold')
-    
-    # Add compact summary statistics
-    summary_text = f"""N={len(results)} conversations
-VLM PPL: {vlm_ppl_mean:.2f}±{vlm_ppl_std:.2f} (GT: {gt_ppl_mean:.2f})
-Listening Rebuffering: {listening_rebuffer_mean:.2f}±{listening_rebuffer_std:.2f}s
-Fluency: {fluency_mean:.3f}±{fluency_std:.3f}
-Latency: {latency_mean:.3f}±{latency_std:.3f}s"""
-    
-    fig.text(0.02, 0.02, summary_text, fontsize=8, fontfamily='monospace',
-             bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9, edgecolor='gray'))
     
     plt.tight_layout()
     plt.subplots_adjust(top=0.9, bottom=0.15)
@@ -5931,11 +5906,7 @@ Latency: {latency_mean:.3f}±{latency_std:.3f}s"""
     plt.close()
     
     print(f"📊 Aggregated metrics visualization saved to: {output_path}")
-    print(f"   • VLM PPL: {vlm_ppl_mean:.3f} ± {vlm_ppl_std:.3f} (GT: {gt_ppl_mean:.3f})")
-    print(f"   • Listening Rebuffering: {listening_rebuffer_mean:.3f} ± {listening_rebuffer_std:.3f}s (from {len(listening_rebuffering_times)} conversations)")
-    print(f"   • Fluency: {fluency_mean:.3f} ± {fluency_std:.3f}")
-    print(f"   • Latency: {latency_mean:.3f} ± {latency_std:.3f}s")
-
+    
 
 def create_response_length_distribution_analysis(results, output_dir="timing_plots", data_source="goalstep"):
     """Create analysis and visualization of response length distribution from generated_turns."""
@@ -6139,17 +6110,6 @@ def create_response_length_distribution_analysis(results, output_dir="timing_plo
     plt.savefig(os.path.join(output_dir, f'response_length_distribution_{data_source}.png'), 
                 dpi=300, bbox_inches='tight')
     plt.close()
-    
-    # Print summary to console
-    # print(f"\n📊 Response Length Distribution Analysis Summary ({data_source}):")
-    # print(f"   Total Responses: {len(all_response_lengths)}")
-    # print(f"   Total Conversations: {len(conversation_ids)}")
-    # print(f"   Mean Response Length: {mean_length:.1f} words")
-    # print(f"   Median Response Length: {median_length:.1f} words")
-    # print(f"   Length Range: {min(all_response_lengths)} - {max(all_response_lengths)} words")
-    # print(f"   Standard Deviation: {std_length:.1f} words")
-    # print(f"   90th Percentile: {p90:.1f} words")
-    # print(f"   95th Percentile: {p95:.1f} words")
 
 if __name__ == "__main__":
     main()
