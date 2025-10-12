@@ -104,15 +104,15 @@ class Config:
     SCHEDULING_METHOD = 'lowest_buffer' 
     AGE_WEIGHT = 1 # discount factor for age compared to the remaining length
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
-    GENERATION_CHUNK_SIZE = 8
+    GENERATION_CHUNK_SIZE = 32
     # it controls the aggressiveness to select gen events
     # higher means more aggressive, which is likely to ignore frame events that have lower buffer level
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
     BUFFER_URGENT_VALUE = GENERATION_CHUNK_SIZE * BUFFER_URGENT_FACTOR # higher means easier to select gen events
 
     # video settings
-    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
-    DEFAULT_NUM_VIDEOS = 5             # Default number of videos for evaluation
+    MAX_EVAL_FRAMES = 50            # Max frames for evaluation (use full video)
+    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
 
 # =============================================================================
 # IMAGE DIFFERENCE FEATURE CALCULATION
@@ -3757,7 +3757,15 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
     else:
         print(f"\n✅ No OOM occurrences in {len(results)} conversations")
 
-    return results, buffer_data, all_memory_data
+    scheduling_data = {
+        'times': scheduling_selection_times,
+        'selected_lowest': scheduling_selected_lowest_buffer,
+        'selected_increment': scheduling_selected_increment,
+        'selected_score': [increment + lowest + ending for lowest, increment, ending in zip(scheduling_selected_lowest_buffer, scheduling_selected_increment, scheduling_selected_ending)],
+        'selected_ending': scheduling_selected_ending
+    }
+
+    return results, buffer_data, all_memory_data, scheduling_data
 
 def streaming_evaluate_threshold_sweep(model, tokenizer, dataset, device='cuda:0', num_conversations=None, random_selection=False, specific_indices=None, data_source='goalstep', conversation_start_times=None):
     """Evaluate conversations across different streaming thresholds to analyze threshold sensitivity."""
@@ -4695,7 +4703,7 @@ def main():
             print("✅ Threshold sweep analysis completed!")
             return
 
-        results, buffer_data, memory_data = streaming_evaluate_conversations(
+        results, buffer_data, memory_data, scheduling_data = streaming_evaluate_conversations(
             model,
             tokenizer,
             dataset,
@@ -4782,7 +4790,7 @@ def main():
         
         # Create aggregated metrics visualization
         print(f"\n📊 Creating aggregated metrics visualization...")
-        create_aggregated_metrics_visualization(results, buffer_data=buffer_data, data_source=data_source)
+        create_aggregated_metrics_visualization(results, buffer_data=buffer_data, scheduling_data=scheduling_data, data_source=data_source)
         
         # Create time per token analysis (skipped for speed)
         # print(f"\n📊 Creating time per token analysis...")
@@ -5777,7 +5785,7 @@ def calculate_metrics(model, tokenizer, video_tensor, normalized_conversation, g
         }
     }
 
-def create_aggregated_metrics_visualization(results, buffer_data=None, output_dir="timing_plots", data_source="goalstep"):
+def create_aggregated_metrics_visualization(results, buffer_data=None, scheduling_data=None, output_dir="timing_plots", data_source="goalstep"):
     """Create aggregated metrics visualization with 4 vertical bar plots in scientific style."""
     
     os.makedirs(output_dir, exist_ok=True)
@@ -5850,8 +5858,8 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
         'grid.linewidth': 0.5
     })
     
-    # Create figure with 3 subplots in one row
-    fig, axes = plt.subplots(1, 3, figsize=(15, 6))
+    # Create figure with 4 subplots in 2x2 grid
+    fig, axes = plt.subplots(1, 4, figsize=(20, 6))
     fig.suptitle(f'Aggregated Performance Metrics - {data_source.title()}', fontsize=14, fontweight='bold', y=0.95)
     
     # Define colors and positions
@@ -5859,8 +5867,8 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
     x_pos = [0, 1, 2, 3]
     labels = ['VLM PPL', 'Rebuffering', 'Fluency', 'Latency']
     
-    # 1. VLM Perplexity with GT reference (left)
-    ax1 = axes[1]
+    # 1. VLM Perplexity with GT reference (top-left)
+    ax1 = axes[2]
     bars1 = ax1.bar([0], [vlm_ppl_mean], yerr=[vlm_ppl_std], 
                     color=colors[0], alpha=0.8, capsize=4, width=0.4, 
                     edgecolor='black', linewidth=0.5)
@@ -5878,7 +5886,7 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
     ax1.text(0, vlm_ppl_mean + vlm_ppl_std + 0.2, f'{vlm_ppl_mean:.2f}±{vlm_ppl_std:.2f}', 
              ha='center', va='bottom', fontsize=9, fontweight='bold')
     
-    # 2. Time Metrics - Rebuffering, Processing, Queuing, and Latency (middle)
+    # 2. Time Metrics - Rebuffering, Processing, Queuing, and Latency (top-right)
     ax2 = axes[0]
     
     # Calculate delay statistics from buffer_data
@@ -5919,8 +5927,8 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
         ax2.text(i, val + err + 0.05, f'{val:.2f}±{err:.2f}', 
                 ha='center', va='bottom', fontsize=8, fontweight='bold')
     
-    # 3. Fluency (right)
-    ax3 = axes[2]
+    # 3. Fluency (bottom-left)
+    ax3 = axes[1]
     bars3 = ax3.bar([0], [fluency_mean], yerr=[fluency_std],
                     color=colors[2], alpha=0.8, capsize=4, width=0.4,
                     edgecolor='black', linewidth=0.5)
@@ -5936,6 +5944,47 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, output_di
     ax3.text(0, fluency_mean + fluency_std + 0.02, f'{fluency_mean:.3f}±{fluency_std:.3f}', 
              ha='center', va='bottom', fontsize=9, fontweight='bold')
     
+    # 4. Scheduling Metrics (bottom-right)
+    ax4 = axes[3]
+    
+    # Calculate scheduling statistics from scheduling_data
+    scheduling_scores = []
+    selected_lowest_buffer = []
+    selected_nonzero = []
+    selected_ending = []
+    
+    if scheduling_data:
+        scheduling_scores = scheduling_data.get('selected_score', [])
+        selected_lowest_buffer = scheduling_data.get('selected_lowest', [])
+        selected_nonzero = scheduling_data.get('selected_increment', [])
+        selected_ending = scheduling_data.get('selected_ending', [])
+    
+    # Calculate means and standard deviations
+    scheduling_score_mean = scheduling_scores[-1] if scheduling_scores else 0.0
+    selected_lowest_mean = selected_lowest_buffer[-1] if selected_lowest_buffer else 0.0
+    selected_nonzero_mean = selected_nonzero[-1] if selected_nonzero else 0.0
+    selected_ending_mean = selected_ending[-1] if selected_ending else 0.0
+    
+    # Create grouped bars for scheduling metrics
+    x_positions = [0, 1, 2, 3]
+    values = [scheduling_score_mean, selected_lowest_mean, selected_nonzero_mean, selected_ending_mean]
+    labels_scheduling = ['Scheduling\nScore', 'Selected\nLowest Buffer', 'Selected\nNonzero', 'Selected\nEnding']
+    colors_scheduling = ['#9467bd', '#ff7f0e', '#2ca02c', '#8c564b']
+    
+    bars4 = ax4.bar(x_positions, values, 
+                    color=colors_scheduling, alpha=0.8, capsize=4, width=0.6,
+                    edgecolor='black', linewidth=0.5)
+    ax4.set_ylabel('Count/Score')
+    ax4.set_xticks(x_positions)
+    ax4.set_xticklabels(labels_scheduling, fontsize=8)
+    ax4.grid(True, alpha=0.3, axis='y')
+    ax4.spines['top'].set_visible(False)
+    ax4.spines['right'].set_visible(False)
+    
+    # Add value labels
+    for i, val in enumerate(values):
+        ax4.text(i, val + 0.05, f'{val:.1f}', 
+                ha='center', va='bottom', fontsize=7, fontweight='bold')
     
     plt.tight_layout()
     plt.subplots_adjust(top=0.9, bottom=0.15)
