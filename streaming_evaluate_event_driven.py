@@ -104,7 +104,7 @@ class Config:
     SCHEDULING_METHOD = 'lowest_buffer' 
     AGE_WEIGHT = 1 # discount factor for age compared to the remaining length
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
-    GENERATION_CHUNK_SIZE = 16
+    GENERATION_CHUNK_SIZE = 8
     # it controls the aggressiveness to select gen events
     # higher means more aggressive, which is likely to ignore frame events that have lower buffer level
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
@@ -112,7 +112,7 @@ class Config:
 
     # video settings
     MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
-    DEFAULT_NUM_VIDEOS = 20             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 5             # Default number of videos for evaluation
 
 # =============================================================================
 # IMAGE DIFFERENCE FEATURE CALCULATION
@@ -3189,7 +3189,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 buffer_state['queuing_delays'].append(queuing_delay_total)
                 break
         
-        
         buffer_state['last_update_time'] = current_time
         buffer_state['buffer'] = current_buffer
         buffer_state['total_rebuffer'] = rebuffer_total
@@ -3247,7 +3246,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             if 'total_processing_delay' in buffer_state and 'total_queuing_delay' in buffer_state:
                 processing_delays = buffer_state['total_processing_delay']
                 queuing_delays = buffer_state['total_queuing_delay']
-                rebuffer_times = buffer_state['last_update_time']
                 
                 # Use rebuffer_times as the time base for delays
                 all_processing_delays.append(processing_delays)
@@ -3461,13 +3459,13 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             context.received_prompt_cnt += 1
 
             # Record buffer state after adding words
-            buffer_state['buffer'] = 0.0
+            buffer_state['buffer'] = 0
             buffer_state['times'].append(processor_clock)
-            buffer_state['values'].append(0.0)
-            buffer_state['rebuffer_times'].append(processor_clock)
-            buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-            buffer_state['processing_delays'].append(buffer_state['total_processing_delay'])
-            buffer_state['queuing_delays'].append(buffer_state['total_queuing_delay'])
+            buffer_state['values'].append(0)
+            # buffer_state['rebuffer_times'].append(processor_clock)
+            # buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+            # buffer_state['processing_delays'].append(buffer_state['total_processing_delay'])
+            # buffer_state['queuing_delays'].append(buffer_state['total_queuing_delay'])
             
             context.handle_prompt(shared_liveinfer, relative_time, payload_data)
             shared_liveinfer.generation_event_pending = context.generation_event_pending
@@ -3481,6 +3479,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
         if event_type == 'frame':
 
+            if event_time > processor_clock:
+                update_buffer_to_time(buffer_state, event_time, listening_speed, conversation_id, context.oom_occurred)
             start_time = max(processor_clock, event_time)
             
             segment_info = context.handle_frame(shared_liveinfer, relative_time, payload_data, start_time)
@@ -3555,10 +3555,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 # Record buffer state after adding words
                 buffer_state['times'].append(processor_clock)
                 buffer_state['values'].append(buffer_state['buffer'])
-                buffer_state['rebuffer_times'].append(processor_clock)
-                buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-                buffer_state['processing_delays'].append(buffer_state['total_processing_delay'])
-                buffer_state['queuing_delays'].append(buffer_state['total_queuing_delay'])
+                # buffer_state['rebuffer_times'].append(processor_clock)
+                # buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+                # buffer_state['processing_delays'].append(buffer_state['total_processing_delay'])
+                # buffer_state['queuing_delays'].append(buffer_state['total_queuing_delay'])
 
                 if not is_last_chunk:
                     # update age of conversation if not finished
@@ -3591,6 +3591,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
         if event_type == 'generation':
                 
+            if event_time > processor_clock:
+                update_buffer_to_time(buffer_state, event_time, listening_speed, conversation_id, context.oom_occurred)
             start_time = max(processor_clock, event_time)
             
             segment_info = context.handle_generation(shared_liveinfer, relative_time, start_time)
@@ -3648,10 +3650,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     # Record buffer state after adding words
                     buffer_state['times'].append(processor_clock)
                     buffer_state['values'].append(buffer_state['buffer'])
-                    buffer_state['rebuffer_times'].append(processor_clock)
-                    buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-                    buffer_state['processing_delays'].append(buffer_state['total_processing_delay'])
-                    buffer_state['queuing_delays'].append(buffer_state['total_queuing_delay'])
+                    # buffer_state['rebuffer_times'].append(processor_clock)
+                    # buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
+                    # buffer_state['processing_delays'].append(buffer_state['total_processing_delay'])
+                    # buffer_state['queuing_delays'].append(buffer_state['total_queuing_delay'])
 
                 if not is_last_chunk:
                     # update age of conversation if not finished
