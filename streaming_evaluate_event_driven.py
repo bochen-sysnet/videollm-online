@@ -68,13 +68,11 @@ class Config:
     LIVE_VIZ_ENABLED = True         # Enable live visualization
     
     # Processing limits
-    MAX_EVAL_FRAMES = 10            # Max frames for evaluation (use full video)
     BATCH_SIZE_LIMIT = 10                # Max frames to load at once
     MEMORY_CHECK_INTERVAL = 1           # Check memory every N frames
     MEMORY_WARNING_THRESHOLD = 2000      # MB remaining before warning
     
     # Threshold sweep configuration
-    DEFAULT_NUM_VIDEOS = 10             # Default number of videos for evaluation
     DEBUG_THRESHOLDS = [0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]         # Coarse-grained thresholds
     # DEBUG_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92]  # Fine-grained thresholds
     
@@ -99,19 +97,22 @@ class Config:
     STREAMING_THRESHOLD_NARRATION = 0.725  # Threshold for narration dataset (testing higher threshold)
 
     # Scheduling
+    USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
+    RL_WEIGHT = 0 # discount factor for remaining length compared to the age
+    EWMA_FACTOR = 0.9
     # 'round_robin' or 'random' or 'lowest_buffer' 
     SCHEDULING_METHOD = 'lowest_buffer' 
-    RL_WEIGHT = 0 # discount factor for remaining length compared to the age
     AGE_WEIGHT = 1 # discount factor for age compared to the remaining length
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
-    EWMA_FACTOR = 0.9
     GENERATION_CHUNK_SIZE = 16
-    USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
-
     # it controls the aggressiveness to select gen events
     # higher means more aggressive, which is likely to ignore frame events that have lower buffer level
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
     BUFFER_URGENT_VALUE = GENERATION_CHUNK_SIZE * BUFFER_URGENT_FACTOR # higher means easier to select gen events
+
+    # video settings
+    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
+    DEFAULT_NUM_VIDEOS = 20             # Default number of videos for evaluation
 
 # =============================================================================
 # IMAGE DIFFERENCE FEATURE CALCULATION
@@ -2532,12 +2533,14 @@ class LiveBufferVisualizer:
         if not self.enabled:
             return
             
-        # Create color map for conversations
+        # Create color map for conversations using matplotlib colormap
         num_conversations = len(self.conversation_ids)
         self.colors = {}
-        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
-        for i, cid in enumerate(self.conversation_ids):
-            self.colors[cid] = base_colors[i % len(base_colors)]
+        if num_conversations > 0:
+            # Use a colormap that works well for multiple colors
+            colormap = plt.cm.Set3  # Good for up to 12 distinct colors
+            for i, cid in enumerate(self.conversation_ids):
+                self.colors[cid] = colormap(i / max(1, num_conversations - 1))
         
         # Create figure with 7 subplots: 2 rows, 4 columns (last subplot spans 2 positions)
         self.fig = plt.figure(figsize=(32, 12))
@@ -2636,12 +2639,47 @@ class LiveBufferVisualizer:
             self.erl_lines[cid], = self.ax_erl_crl.plot([], [], color=color, linewidth=2, 
                                                        label=f'{cid[:12]} ERL', alpha=0.9, linestyle='-')
         
-        self.ax_buffer.legend(loc='upper right', fontsize=16, title='Conversation')
-        self.ax_memory.legend(loc='upper left', fontsize=16)
-        self.ax_scheduling.legend(loc='upper left', fontsize=16)
-        self.ax_age.legend(loc='upper left', fontsize=16, title='Conversation')
-        self.ax_erl_crl.legend(loc='upper right', fontsize=16, title='Conversation')
-        self.ax_delays.legend(loc='upper left', fontsize=16)
+        # Create legends with limited entries (max 5 per subfigure)
+        max_legend_entries = 5
+        
+        # Buffer legend - limit to 5 conversations
+        buffer_handles, buffer_labels = self.ax_buffer.get_legend_handles_labels()
+        if len(buffer_handles) > max_legend_entries:
+            buffer_handles = buffer_handles[:max_legend_entries]
+            buffer_labels = buffer_labels[:max_legend_entries]
+            if len(self.conversation_ids) > max_legend_entries:
+                buffer_labels.append(f'+{len(self.conversation_ids) - max_legend_entries} more')
+                buffer_handles.append(plt.Line2D([0], [0], color='gray', linestyle='--', alpha=0.5))
+        self.ax_buffer.legend(buffer_handles, buffer_labels, loc='upper right', fontsize=12, title='Conversation')
+        
+        # Memory legend - keep as is (single lines)
+        self.ax_memory.legend(loc='upper left', fontsize=14)
+        
+        # Scheduling legend - keep as is (single lines)
+        self.ax_scheduling.legend(loc='upper left', fontsize=14)
+        
+        # Age legend - limit to 5 conversations
+        age_handles, age_labels = self.ax_age.get_legend_handles_labels()
+        if len(age_handles) > max_legend_entries:
+            age_handles = age_handles[:max_legend_entries]
+            age_labels = age_labels[:max_legend_entries]
+            if len(self.conversation_ids) > max_legend_entries:
+                age_labels.append(f'+{len(self.conversation_ids) - max_legend_entries} more')
+                age_handles.append(plt.Line2D([0], [0], color='gray', linestyle='--', alpha=0.5))
+        self.ax_age.legend(age_handles, age_labels, loc='upper left', fontsize=12, title='Conversation')
+        
+        # ERL/CRL legend - limit to 5 conversations
+        erl_handles, erl_labels = self.ax_erl_crl.get_legend_handles_labels()
+        if len(erl_handles) > max_legend_entries:
+            erl_handles = erl_handles[:max_legend_entries]
+            erl_labels = erl_labels[:max_legend_entries]
+            if len(self.conversation_ids) > max_legend_entries:
+                erl_labels.append(f'+{len(self.conversation_ids) - max_legend_entries} more')
+                erl_handles.append(plt.Line2D([0], [0], color='gray', linestyle='--', alpha=0.5))
+        self.ax_erl_crl.legend(erl_handles, erl_labels, loc='upper right', fontsize=12, title='Conversation')
+        
+        # Delays legend - keep as is (single lines)
+        self.ax_delays.legend(loc='upper left', fontsize=14)
         
         # Initialize memory tracking lists
         self.gpu_memory_times = []
@@ -6110,6 +6148,7 @@ def create_response_length_distribution_analysis(results, output_dir="timing_plo
     plt.savefig(os.path.join(output_dir, f'response_length_distribution_{data_source}.png'), 
                 dpi=300, bbox_inches='tight')
     plt.close()
+    print(f"🎯 Response length distribution analysis saved to {os.path.join(output_dir, f'response_length_distribution_{data_source}.png')}")
 
 if __name__ == "__main__":
     main()
