@@ -78,7 +78,6 @@ class Config:
     
     # File paths
     DATASET_BASE_PATH = "datasets/ego4d/v2/full_scale_2fps_384"
-    METADATA_PATH = "datasets/ego4d/v2/full_scale_2fps_384_1+3x3_google--siglip-large-patch16-384_metadata.json"
     
     # Model configuration
     VISION_PRETRAINED = 'google/siglip-large-patch16-384'
@@ -480,17 +479,13 @@ def create_frame_features_vs_response_length_visualization(frame_features_data, 
     print(f"✅ Saved correlation summary bar chart to {summary_path}")
 
 class FilteredEgo4DRefinedNarrationStream:
-    """Ego4D Refined Narration Stream that only includes videos with features - now processes per-conversation"""
+    """Ego4D Refined Narration Stream - processes videos directly without pre-computed features"""
     
     def __init__(self, split='val', frame_fps=2, is_training=False, augmentation=False, 
                  system_prompt='', tokenizer=None, vision_pretrained='google/siglip-large-patch16-384',
                  embed_mark='2fps_384_1+3x3', max_num_frames=1000, data_source='narration'):
         
-        # Get videos with features first
-        self.videos_with_features = get_videos_with_features()
-        print(f"📊 Found {len(self.videos_with_features)} videos with extracted features")
-        
-        # Load only the refined narration data for videos with features
+        # Basic configuration
         self.split = split
         self.frame_fps = frame_fps
         self.is_training = is_training
@@ -536,46 +531,45 @@ class FilteredEgo4DRefinedNarrationStream:
             
             for item_idx, item in enumerate(goalstep_data):
                 video_uid = item['video_uid']
-                if video_uid in self.videos_with_features:
-                    # Store the full conversation for this video with unique conversation ID
-                    conversation_id = f"goalstep_{item['video_uid']}_{item_idx}"
-                    conversation = []
-                    for conv in item['conversation']:
-                        conversation.append({
-                            'role': conv['role'],
-                            'content': conv['content'],
-                            'time': conv['time']
-                        })
-                    
-                    # Normalize timestamps: find first user prompt time and subtract it from all times
-                    user_times = [turn['time'] for turn in conversation]
-                    first_user_time = min(user_times)
-                    normalized_conversation = []
-                    for turn in conversation:
-                        normalized_turn = {
-                            'role': turn['role'],
-                            'content': turn['content'],
-                            'time': max(0.0, turn['time'] - first_user_time),  # Ensure no negative times
-                            'original_time': turn['time']  # Keep original time for visualization
-                        }
-                        normalized_conversation.append(normalized_turn)
-                    
-                    # Store the offset for converting back to original timestamps
-                    self.goalstep_timestamp_offsets[conversation_id] = first_user_time
-                    
-                    if video_uid not in self.data:
-                        self.data[video_uid] = {}
-                    if video_uid not in self.goalstep_conversations:
-                        self.goalstep_conversations[video_uid] = {}
-                    if video_uid not in self.goalstep_normalized_conversations:
-                        self.goalstep_normalized_conversations[video_uid] = {}
-                    if video_uid not in self.goalstep_durations:
-                        self.goalstep_durations[video_uid] = {}
-                    
-                    self.data[video_uid][conversation_id] = conversation
-                    self.goalstep_conversations[video_uid][conversation_id] = conversation
-                    self.goalstep_normalized_conversations[video_uid][conversation_id] = normalized_conversation
-                    self.goalstep_durations[video_uid][conversation_id] = item.get('duration', 0.0)
+                # Store the full conversation for this video with unique conversation ID
+                conversation_id = f"goalstep_{item['video_uid']}_{item_idx}"
+                conversation = []
+                for conv in item['conversation']:
+                    conversation.append({
+                        'role': conv['role'],
+                        'content': conv['content'],
+                        'time': conv['time']
+                    })
+                
+                # Normalize timestamps: find first user prompt time and subtract it from all times
+                user_times = [turn['time'] for turn in conversation]
+                first_user_time = min(user_times)
+                normalized_conversation = []
+                for turn in conversation:
+                    normalized_turn = {
+                        'role': turn['role'],
+                        'content': turn['content'],
+                        'time': max(0.0, turn['time'] - first_user_time),  # Ensure no negative times
+                        'original_time': turn['time']  # Keep original time for visualization
+                    }
+                    normalized_conversation.append(normalized_turn)
+                
+                # Store the offset for converting back to original timestamps
+                self.goalstep_timestamp_offsets[conversation_id] = first_user_time
+                
+                if video_uid not in self.data:
+                    self.data[video_uid] = {}
+                if video_uid not in self.goalstep_conversations:
+                    self.goalstep_conversations[video_uid] = {}
+                if video_uid not in self.goalstep_normalized_conversations:
+                    self.goalstep_normalized_conversations[video_uid] = {}
+                if video_uid not in self.goalstep_durations:
+                    self.goalstep_durations[video_uid] = {}
+                
+                self.data[video_uid][conversation_id] = conversation
+                self.goalstep_conversations[video_uid][conversation_id] = conversation
+                self.goalstep_normalized_conversations[video_uid][conversation_id] = normalized_conversation
+                self.goalstep_durations[video_uid][conversation_id] = item.get('duration', 0.0)
             
             # Extract all unique user prompts for instruction selection
             all_user_prompts = []
@@ -594,13 +588,27 @@ class FilteredEgo4DRefinedNarrationStream:
         else:
             raise ValueError(f"Unknown data source: {data_source}")
         
-        # Filter to only include videos with features
+        # Filter to only include videos that have corresponding video files
         self.filtered_video_uids = []
-        for video_uid in self.data.keys():
-            if video_uid in self.videos_with_features:
-                self.filtered_video_uids.append(video_uid)
+        missing_videos = []
+        total_videos = len(self.data.keys())
         
-        print(f"📊 Filtered to {len(self.filtered_video_uids)} videos with features")
+        for video_uid in self.data.keys():
+            video_path = f"{Config.DATASET_BASE_PATH}/{video_uid}.mp4"
+            if os.path.exists(video_path):
+                self.filtered_video_uids.append(video_uid)
+            else:
+                missing_videos.append(video_uid)
+        
+        if missing_videos:
+            print(f"⚠️  Found {len(missing_videos)} videos without corresponding video files:")
+            for video_uid in missing_videos[:5]:  # Show first 5 missing videos
+                print(f"   • {video_uid}")
+            if len(missing_videos) > 5:
+                print(f"   • ... and {len(missing_videos) - 5} more")
+        
+        print(f"📊 Dataset filtering: {len(self.filtered_video_uids)}/{total_videos} videos have available files")
+        print(f"📊 Using {len(self.filtered_video_uids)} videos with available video files")
         
         # Create conversation-level dataset instead of video-level
         self.conversations = []
@@ -698,32 +706,9 @@ class FilteredEgo4DRefinedNarrationStream:
         # Create input text from conversation turns
         input_text = " ".join([turn.get('text', turn.get('content', '')) for turn in conversation])
         
-        # Load actual frames from the feature directory
-        try:
-            # Load the pre-computed embeddings
-            feature_path = f"datasets/ego4d/v2/full_scale_2fps_384_1+3x3_google--siglip-large-patch16-384/{video_uid}.pt"
-            all_frames = torch.load(feature_path, weights_only=True)  # Shape: [num_frames, 10, 1024]
-            
-            # Calculate frame range based on conversation timing
-            if conversation:
-                # Convert to frame indices (2fps = 0.5 second per frame)
-                start_frame = max(0, int(start_time * 2))
-                end_frame = min(all_frames.shape[0], int(end_time * 2) + 1)
-                
-                # Extract conversation-specific frames
-                frames = all_frames[start_frame:end_frame]
-                
-                # Limit to max_num_frames
-                if frames.shape[0] > self.max_num_frames:
-                    frames = frames[:self.max_num_frames]
-            else:
-                # No timing info, use first few frames
-                frames = all_frames[:min(100, all_frames.shape[0])]
-                
-        except Exception as e:
-            print(f"Warning: Could not load frames for {video_uid}: {e}")
-            # Fallback to dummy frames if loading fails
-            frames = torch.zeros((100, 10, 1024))
+        # Since we process videos directly, we don't need to load pre-computed features
+        # The frames will be processed on-the-fly during evaluation
+        frames = None  # No pre-computed frames needed
         
         load_ranges = {}
         sample_idx = idx
@@ -2488,16 +2473,6 @@ class EventDrivenConversationContext:
         self.video_frames = None
         self.completed = True
 
-def get_videos_with_features():
-    """Get list of video UIDs that have extracted features"""
-    metadata_path = "datasets/ego4d/v2/full_scale_2fps_384_1+3x3_google--siglip-large-patch16-384_metadata.json"
-    try:
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-        return set(metadata.keys())
-    except Exception as e:
-        print(f"Error loading metadata: {e}")
-        return set()
 
 def process_conversation(model, tokenizer, conversation_data, video_path, dataset, device, data_source='goalstep', custom_threshold=None, conversation_start_time=0.0, liveinfer=None, model_memory_mb=None):
     """Prepare conversation context and register its events."""
@@ -3019,7 +2994,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             arrival_time = conversation_data.get('arrival_time', current_time)
         arrival_time = max(0.0, arrival_time)
         video_uid = conversation_data['video_uid']
-        video_path = f"datasets/ego4d/v2/full_scale_2fps_384/{video_uid}.mp4"
+        video_path = f"{Config.DATASET_BASE_PATH}/{video_uid}.mp4"
 
         context = process_conversation(
             model,
