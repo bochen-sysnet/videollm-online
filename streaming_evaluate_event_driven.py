@@ -486,7 +486,7 @@ def create_frame_features_vs_response_length_visualization(frame_features_data, 
 # print(df['bytes_sec'].mean()*8/1024/1024,df['bytes_sec'].std()*8/1024/1024)
 
 
-def trace2bwlist(N=4000, file_path='/home/ryan/bo/network_traces/curr_httpgetmt.csv'):
+def trace2bwlist(N=4000, file_path='../network_traces/curr_httpgetmt.csv'):
     # Read the entire file into a DataFrame
     df = pd.read_csv(file_path)
 
@@ -1992,6 +1992,8 @@ class EventDrivenConversationContext:
         self.total_visual_embedding_time = 0.0
         self.total_model_forward_time = 0.0
         self.total_generation_time = 0.0
+        self.total_kv_offload_time = 0.0
+        self.total_kv_reload_time = 0.0
         self.frame_processing_times = []
         self.frame_timing_data = []
         self.generated_turns = []
@@ -2174,7 +2176,6 @@ class EventDrivenConversationContext:
         if self.oom_occurred:
             # print(f"⏭️ Skipping frame {frame_idx} for conversation {self.conversation_id} due to previous OOM")
             return {
-                'frame_compute_time': 0.0,
                 'frame_processing_time': 0.0,
                 'generation_time': 0.0,
                 'prompt_count': 0,
@@ -2183,7 +2184,6 @@ class EventDrivenConversationContext:
         frame_start_time = time.time()
         frame_processing_time = 0.0
         generation_time = 0.0
-        frame_compute_time = 0.0
         global_time = self.conversation_start_time + relative_time
         
         liveinfer.input_video_stream(relative_time)
@@ -2193,7 +2193,6 @@ class EventDrivenConversationContext:
             self.handle_oom(frame_idx, global_time)
             liveinfer.oom_occurred = False
             return {
-                'frame_compute_time': 0.0,
                 'frame_processing_time': time.time() - frame_start_time,
                 'generation_time': 0.0,
                 'prompt_count': 0,
@@ -2218,7 +2217,6 @@ class EventDrivenConversationContext:
             self.handle_oom(frame_idx, global_time)
             liveinfer.oom_occurred = False
             return {
-                'frame_compute_time': 0.0,
                 'frame_processing_time': time.time() - frame_start_time,
                 'generation_time': 0.0,
                 'prompt_count': 1 if query else 0,
@@ -2235,25 +2233,13 @@ class EventDrivenConversationContext:
 
         visual_embedding_time = timing_data.get('visual_embedding_time', 0.0)
         streaming_time = timing_data.get('streaming_time', 0.0)
-        # in case nothing is generated, use generation_time
         chunk_generation_time = timing_data.get('generation_chunk_time', timing_data.get('generation_time', 0.0))
-        decode_time = timing_data.get('decode_time', 0.0)
-        frame_compute_time = max(
-            0.0,
-            (visual_embedding_time or 0.0)
-            + (streaming_time or 0.0)
-            + (kv_reload_time or 0.0)
-            + (kv_offload_time or 0.0)
-        )
-        # print("streaming_time", streaming_time, "chunk_generation_time", chunk_generation_time, \
-        # "visual_embedding_time", visual_embedding_time, "frame_processing_time", frame_processing_time, "frame_compute_time", frame_compute_time,\
-        # "kv_reload_time", kv_reload_time, "kv_offload_time", kv_offload_time, "decode_time", decode_time)
-        assert frame_compute_time > 0.0, f"frame_compute_time: {frame_compute_time}, frame_processing_time: {frame_processing_time}, chunk_generation_time: {chunk_generation_time}, visual_embedding_time: {visual_embedding_time}, streaming_time: {streaming_time}, kv_reload_time: {kv_reload_time}, kv_offload_time: {kv_offload_time}"
-        if frame_compute_time <= 0.0 and frame_processing_time > 0.0:
-            frame_compute_time = max(0.0, frame_processing_time - chunk_generation_time)
-
+        
         self.total_visual_embedding_time += visual_embedding_time
         self.total_model_forward_time += streaming_time
+        self.total_generation_time += chunk_generation_time - kv_reload_time
+        self.total_kv_offload_time += kv_offload_time
+        self.total_kv_reload_time += kv_reload_time
 
         self.frame_processing_times.append(frame_processing_time)
 
@@ -2262,7 +2248,6 @@ class EventDrivenConversationContext:
             'video_time': relative_time,
             'visual_embedding_time': visual_embedding_time, # from video (cpu) to embedding (gpu) (input_video_stream)
             'model_forward_time': streaming_time, # from embedding to KV cache (call for streaming); kv cache offload involved
-            'compute_time': frame_compute_time,
             'generation_time': chunk_generation_time, # a chunk from KV cache to response (call for response) (gpu); kv cache offload involved
             'total_processing_time': frame_processing_time,
             'response_time': frame_processing_time if query else 0, # only count for frames that have prompts
@@ -2281,7 +2266,6 @@ class EventDrivenConversationContext:
 
         assert frame_processing_time > 0, f"frame_processing_time: {frame_processing_time}, frame_idx: {frame_idx}, start_time: {start_time}, relative_time: {relative_time}"
         if frame_processing_time > 0:
-            self.total_generation_time += frame_processing_time
             self.event_log.append({
                 'time': start_time + frame_processing_time,
                 'type': 'response',
@@ -2308,23 +2292,21 @@ class EventDrivenConversationContext:
 
         self.frames_processed += 1
         return {
-            'frame_compute_time': frame_compute_time,
             'frame_processing_time': frame_processing_time,
             'generation_time': generation_time
         }
 
     def handle_generation(self, liveinfer, relative_time, start_time):
-        video_time = liveinfer.timing_data.get('generation_video_time', 0.0)
+        video_time = self.frame_timing_data[-1]['video_time']
         
         # Track memory during generation chunks (use video_time as pseudo frame index for tracking)
         # Convert video time to frame index for consistency
-        pseudo_frame_idx = int(video_time * Config.FRAME_FPS)
+        frame_idx = self.frame_timing_data[-1]['frame_idx']
             
         # Skip processing if OOM has already occurred
         if self.oom_occurred:
             # print(f"⏭️ Skipping generation for conversation {self.conversation_id} due to previous OOM")
             return {
-                'frame_compute_time': 0.0,
                 'frame_processing_time': 0.0,
                 'generation_time': 0.0,
             }
@@ -2332,8 +2314,8 @@ class EventDrivenConversationContext:
         chunk_start = time.time()
         liveinfer.texts_generated_previous = ""
         query, response = liveinfer()
-        if pseudo_frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
-            self.track_memory_snapshot(liveinfer, pseudo_frame_idx, start_time + time.time() - chunk_start)
+        if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
+            self.track_memory_snapshot(liveinfer, frame_idx, start_time + time.time() - chunk_start)
         liveinfer.offload_kv_cache()
         chunk_duration = time.time() - chunk_start
         
@@ -2342,16 +2324,21 @@ class EventDrivenConversationContext:
             self.handle_oom(-1, start_time + chunk_duration)  # Use -1 for generation events
             liveinfer.oom_occurred = False
             return {
-                'frame_compute_time': 0.0,
                 'frame_processing_time': 0.0,
                 'generation_time': chunk_duration,
             }
+
+        # update frame timing data for the same frame
+        
+        self.total_generation_time += chunk_duration - liveinfer.timing_data.get('kv_reload_time', 0.0)
+        self.total_kv_reload_time += liveinfer.timing_data.get('kv_reload_time', 0.0)
+        self.total_kv_offload_time += liveinfer.timing_data.get('kv_offload_time', 0.0)
+        self.frame_processing_times[-1] += chunk_duration
 
         # Reset pending flag so the scheduler can decide whether to queue another chunk
         self.generation_event_pending = False
         liveinfer.generation_event_pending = False
 
-        self.total_generation_time += chunk_duration
         # print(f"========== chunk_duration: {chunk_duration}, total_generation_time: {self.total_generation_time}")
         
         texts_generated_previous = liveinfer.texts_generated_previous
@@ -2380,7 +2367,7 @@ class EventDrivenConversationContext:
             })
             if len(texts_generated_previous) > 0:
                 word_count = len(re.findall(r"\b\w+\b", texts_generated_previous))
-                liveinfer.update_frame_response_length(pseudo_frame_idx, word_count, self.conversation_id)
+                liveinfer.update_frame_response_length(frame_idx, word_count, self.conversation_id)
             if response:
                 self.response_generated += 1
             #     print(f"[t={video_time:.2f}s] Response: {response}")
@@ -2390,7 +2377,6 @@ class EventDrivenConversationContext:
             #     print(f"[t={video_time:.2f}s] Query: {query}")
             # print(f"  └─ Generation time: {chunk_duration:.3f}s\t start_time: {start_time:.3f}\t prompt_idx: {self.response_generated}")
         return {
-            'frame_compute_time': 0.0,
             'frame_processing_time': 0.0,
             'generation_time': chunk_duration,
             'query': query,
@@ -2404,6 +2390,8 @@ class EventDrivenConversationContext:
         visual_embedding_time = self.total_visual_embedding_time
         model_forward_time = self.total_model_forward_time
         generation_time = self.total_generation_time
+        kv_offload_time = self.total_kv_offload_time
+        kv_reload_time = self.total_kv_reload_time
         num_processed_frames = len(self.frame_processing_times)
 
         content_metrics = calculate_metrics(
@@ -2468,6 +2456,8 @@ class EventDrivenConversationContext:
             'visual_embedding_time': visual_embedding_time,
             'model_forward_time': model_forward_time,
             'generation_time': generation_time,
+            'kv_offload_time': kv_offload_time,
+            'kv_reload_time': kv_reload_time,
             'total_processing_time': total_processing_time,
             'response_time': response_time,
             'processing_span': self.processing_span,
@@ -3341,17 +3331,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     heapq.heappush(tmp_events, (0, score, event_time, priority, sequence_counter, payload))
             cached_events = tmp_events
 
-        # print(f"Events to be scheduled: {len(cached_events)}")
-        # for event in cached_events:
-        #     if Config.SCHEDULING_METHOD == 'round_robin' or Config.SCHEDULING_METHOD == 'random':
-        #         event_time, priority, sequence_counter, payload, buffer_level = event
-        #         print(event_time, payload[1][:12], buffer_level)
-        #     elif Config.SCHEDULING_METHOD == 'lowest_buffer':
-        #         buffer_level, score, event_time, priority, sequence_counter, payload = event
-        #         print("buffer_level", buffer_level, "score", score, "event_time", event_time, "payload", payload[1][:12])
-        #     else:
-        #         raise ValueError(f"Invalid scheduling method: {Config.SCHEDULING_METHOD}")
-        
         scheduled_event = False
         
         if unprocessed_prompt_event is not None:
@@ -3464,10 +3443,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             buffer_state['buffer'] = 0
             buffer_state['times'].append(processor_clock)
             buffer_state['values'].append(0)
-            # buffer_state['rebuffer_times'].append(processor_clock)
-            # buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-            # buffer_state['processing_delays'].append(buffer_state['total_processing_delay'])
-            # buffer_state['queuing_delays'].append(buffer_state['total_queuing_delay'])
             
             context.handle_prompt(shared_liveinfer, relative_time, payload_data)
             shared_liveinfer.generation_event_pending = context.generation_event_pending
@@ -3487,9 +3462,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             
             segment_info = context.handle_frame(shared_liveinfer, relative_time, payload_data, start_time)
             
-            # Skip assertion if OOM occurred (frame_compute_time will be 0.0)
-            if not context.oom_occurred:
-                assert segment_info.get('frame_compute_time', 0.0) > 0.0, f"frame_compute_time: {segment_info.get('frame_compute_time', 0.0)}, frame_processing_time: {segment_info.get('frame_processing_time', 0.0)}"
             generation_duration = segment_info.get('generation_time', 0.0)
             segment_label = context.conversation_id
             frame_idx = payload_data
@@ -3557,10 +3529,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 # Record buffer state after adding words
                 buffer_state['times'].append(processor_clock)
                 buffer_state['values'].append(buffer_state['buffer'])
-                # buffer_state['rebuffer_times'].append(processor_clock)
-                # buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-                # buffer_state['processing_delays'].append(buffer_state['total_processing_delay'])
-                # buffer_state['queuing_delays'].append(buffer_state['total_queuing_delay'])
 
                 if not is_last_chunk:
                     # update age of conversation if not finished
@@ -3652,10 +3620,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     # Record buffer state after adding words
                     buffer_state['times'].append(processor_clock)
                     buffer_state['values'].append(buffer_state['buffer'])
-                    # buffer_state['rebuffer_times'].append(processor_clock)
-                    # buffer_state['rebuffer_values'].append(buffer_state['total_rebuffer'])
-                    # buffer_state['processing_delays'].append(buffer_state['total_processing_delay'])
-                    # buffer_state['queuing_delays'].append(buffer_state['total_queuing_delay'])
 
                 if not is_last_chunk:
                     # update age of conversation if not finished
@@ -4065,8 +4029,6 @@ class SimpleLiveInfer:
     
     def input_video_stream(self, video_time):
         """Process video frame and add to queue like benchmark with timing."""
-        start_time = time.time()
-        
         # Measure visual embedding time: RGB frames → Visual token embeddings
         visual_start = time.time()
         frame_idx = int(video_time * self.frame_fps)
@@ -4143,7 +4105,6 @@ class SimpleLiveInfer:
         
         # Store timing data
         self.timing_data['visual_embedding_time'] = visual_embedding_time
-        self.timing_data['input_video_stream_time'] = time.time() - start_time
 
         # print("input_video_stream", len(self.frame_embeds_queue), video_time, frame_idx, self.last_frame_idx)
     
@@ -4164,7 +4125,6 @@ class SimpleLiveInfer:
             response_tokens, oom_occurred = result
             if oom_occurred:
                 self.oom_occurred = True
-                # print(f"🚨 OOM detected in SimpleLiveInfer for conversation {self.current_conversation_id}")
         else:
             # Fallback for old format
             response_tokens = result
@@ -4272,6 +4232,7 @@ class SimpleLiveInfer:
             start = time.time()
             target = move_kv_cache_to_device(target, 'cpu')
             self._kv_offload_time += time.time() - start
+            self.timing_data['kv_offload_time'] = self._kv_offload_time
             
         return target
 
@@ -4467,10 +4428,10 @@ class SimpleLiveInfer:
 
     def __call__(self):
         """Main call method that processes video and generates responses with timing."""
-        start_time = time.time()
         self._kv_reload_time = 0.0
         self._kv_offload_time = 0.0
         self.timing_data['generation_chunk_time'] = 0.0
+        self.timing_data['model_forward_time'] = 0.0
         video_time = None
         query = None
         response = None
@@ -4480,6 +4441,7 @@ class SimpleLiveInfer:
             streaming_start = time.time()
             result = self._call_for_streaming()
             streaming_time = time.time() - streaming_start
+            self.timing_data['streaming_time'] = streaming_time
             
             if result is None or result == (None, None):
                 return None, None
@@ -4488,7 +4450,6 @@ class SimpleLiveInfer:
         elif self.generation_state is None and self.query_queue:
             video_time, query = self.query_queue.popleft()
 
-        self.timing_data['streaming_time'] = streaming_time
 
         needs_generation = (
             query is not None
@@ -4514,7 +4475,6 @@ class SimpleLiveInfer:
         self.timing_data['kv_cache_mb'] = kv_cache_mb
         self.timing_data['kv_offload_time'] = self._kv_offload_time
         self.timing_data['kv_reload_time'] = self._kv_reload_time
-        self.timing_data['total_call_time'] = time.time() - start_time
 
         return query, response
 
@@ -5860,8 +5820,8 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, schedulin
         'grid.linewidth': 0.5
     })
     
-    # Create figure with 4 subplots in 2x2 grid
-    fig, axes = plt.subplots(1, 4, figsize=(20, 6))
+    # Create figure with 5 subplots in 1 row
+    fig, axes = plt.subplots(1, 5, figsize=(25, 6))
     fig.suptitle(f'Aggregated Performance Metrics - {data_source.title()}', fontsize=14, fontweight='bold', y=0.95)
     
     # Define colors and positions
@@ -5869,8 +5829,74 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, schedulin
     x_pos = [0, 1, 2, 3]
     labels = ['VLM PPL', 'Rebuffering', 'Fluency', 'Latency']
     
-    # 1. VLM Perplexity with GT reference (top-left)
-    ax1 = axes[2]
+    # 3. Frame Timing Analysis (3rd position)
+    ax_timing = axes[2]
+    
+    # Calculate frame timing statistics from results
+    visual_embedding_times = []
+    model_forward_times = []
+    generation_times = []
+    kv_offload_times = []
+    kv_reload_times = []
+    total_processing_times = []
+
+    # Create timing analysis
+    conversation_timings = [r for r in results if 'visual_embedding_time' in r]
+
+    for conversation_timing in conversation_timings:
+        frame_count = len(conversation_timing['frame_processing_times'])
+        visual_per_frame = conversation_timing['visual_embedding_time'] / frame_count
+        model_per_frame = conversation_timing['model_forward_time'] / frame_count
+        generation_per_response = conversation_timing['generation_time'] / frame_count
+        kv_offload_time = conversation_timing['kv_offload_time'] / frame_count
+        kv_reload_time = conversation_timing['kv_reload_time'] / frame_count
+        total_processing_time = conversation_timing['total_processing_time'] / frame_count
+
+        visual_embedding_times.append(visual_per_frame*1000)
+        model_forward_times.append(model_per_frame*1000)
+        generation_times.append(generation_per_response*1000)
+        total_processing_times.append(total_processing_time*1000)
+        kv_offload_times.append(kv_offload_time*1000)
+        kv_reload_times.append(kv_reload_time*1000)
+    
+    # Calculate means and standard deviations
+    visual_embedding_mean = np.mean(visual_embedding_times) if visual_embedding_times else 0.0
+    visual_embedding_std = np.std(visual_embedding_times) if visual_embedding_times else 0.0
+    model_forward_mean = np.mean(model_forward_times) if model_forward_times else 0.0
+    model_forward_std = np.std(model_forward_times) if model_forward_times else 0.0
+    generation_mean = np.mean(generation_times) if generation_times else 0.0
+    generation_std = np.std(generation_times) if generation_times else 0.0
+    total_processing_mean = np.mean(total_processing_times) if total_processing_times else 0.0
+    total_processing_std = np.std(total_processing_times) if total_processing_times else 0.0
+    kv_offload_mean = np.mean(kv_offload_times) if kv_offload_times else 0.0
+    kv_offload_std = np.std(kv_offload_times) if kv_offload_times else 0.0
+    kv_reload_mean = np.mean(kv_reload_times) if kv_reload_times else 0.0
+    kv_reload_std = np.std(kv_reload_times) if kv_reload_times else 0.0
+    
+    # Create grouped bars for frame timing metrics
+    x_positions = [0, 1, 2, 3, 4, 5]
+    values = [visual_embedding_mean, model_forward_mean, generation_mean, total_processing_mean, kv_offload_mean, kv_reload_mean]
+    errors = [visual_embedding_std, model_forward_std, generation_std, total_processing_std, kv_offload_std, kv_reload_std]
+    labels_timing = ['Prefilling', 'Scoring', 'Generation', 'Total', 'KV Offload', 'KV Reload']
+    colors_timing = ['#ff9999', '#66b3ff', '#99ff99', '#ffcc99', '#9999ff', '#ff99ff']
+    
+    bars_timing = ax_timing.bar(x_positions, values, yerr=errors,
+                               color=colors_timing, alpha=0.8, capsize=4, width=0.6,
+                               edgecolor='black', linewidth=0.5)
+    ax_timing.set_ylabel('Time (ms)')
+    ax_timing.set_xticks(x_positions)
+    ax_timing.set_xticklabels(labels_timing, fontsize=8)
+    ax_timing.grid(True, alpha=0.3, axis='y')
+    ax_timing.spines['top'].set_visible(False)
+    ax_timing.spines['right'].set_visible(False)
+    
+    # Add value labels
+    for i, (val, err) in enumerate(zip(values, errors)):
+        ax_timing.text(i, val + err + 0.01, f'{val:.1f}±{err:.1f}', 
+                      ha='center', va='bottom', fontsize=7, fontweight='bold')
+    
+    # 4. VLM Perplexity with GT reference (4th position)
+    ax1 = axes[3]
     bars1 = ax1.bar([0], [vlm_ppl_mean], yerr=[vlm_ppl_std], 
                     color=colors[0], alpha=0.8, capsize=4, width=0.4, 
                     edgecolor='black', linewidth=0.5)
@@ -5929,8 +5955,8 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, schedulin
         ax2.text(i, val + err + 0.05, f'{val:.2f}±{err:.2f}', 
                 ha='center', va='bottom', fontsize=8, fontweight='bold')
     
-    # 3. Fluency (bottom-left)
-    ax3 = axes[3]
+    # 5. Fluency (5th position)
+    ax3 = axes[4]
     bars3 = ax3.bar([0], [fluency_mean], yerr=[fluency_std],
                     color=colors[2], alpha=0.8, capsize=4, width=0.4,
                     edgecolor='black', linewidth=0.5)
