@@ -78,7 +78,6 @@ class Config:
     
     # File paths
     DATASET_BASE_PATH = "datasets/ego4d/v2/full_scale_2fps_384"
-    FEATURES_BASE_PATH = "datasets/ego4d/v2/full_scale_2fps_384_1+3x3_google--siglip-large-patch16-384"
     METADATA_PATH = "datasets/ego4d/v2/full_scale_2fps_384_1+3x3_google--siglip-large-patch16-384_metadata.json"
     
     # Model configuration
@@ -97,22 +96,20 @@ class Config:
     STREAMING_THRESHOLD_NARRATION = 0.725  # Threshold for narration dataset (testing higher threshold)
 
     # Scheduling
-    USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
     RL_WEIGHT = 0 # discount factor for remaining length compared to the age
     EWMA_FACTOR = 0.9
-    # 'round_robin' or 'random' or 'lowest_buffer' 
-    SCHEDULING_METHOD = 'lowest_buffer' 
     AGE_WEIGHT = 1 # discount factor for age compared to the remaining length
+    
+
+    # configurable parameters
+    SCHEDULING_METHOD = 'lowest_buffer' # 'round_robin' or 'random' or 'lowest_buffer' 
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
     GENERATION_CHUNK_SIZE = 2
-    # it controls the aggressiveness to select gen events
-    # higher means more aggressive, which is likely to ignore frame events that have lower buffer level
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
     BUFFER_URGENT_VALUE = GENERATION_CHUNK_SIZE * BUFFER_URGENT_FACTOR # higher means easier to select gen events
-
-    # video settings
     MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
-    DEFAULT_NUM_VIDEOS = 8             # Default number of videos for evaluation
+    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
+    USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
 
 # =============================================================================
 # IMAGE DIFFERENCE FEATURE CALCULATION
@@ -5960,10 +5957,10 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, schedulin
         selected_ending = scheduling_data.get('selected_ending', [])
     
     # Calculate means and standard deviations
-    scheduling_score_mean = scheduling_scores[-1] if scheduling_scores else 0.0
-    selected_lowest_mean = selected_lowest_buffer[-1] if selected_lowest_buffer else 0.0
-    selected_nonzero_mean = selected_nonzero[-1] if selected_nonzero else 0.0
-    selected_ending_mean = selected_ending[-1] if selected_ending else 0.0
+    scheduling_score_mean = np.mean(scheduling_scores) if scheduling_scores else 0.0
+    selected_lowest_mean = np.mean(selected_lowest_buffer) if selected_lowest_buffer else 0.0
+    selected_nonzero_mean = np.mean(selected_nonzero) if selected_nonzero else 0.0
+    selected_ending_mean = np.mean(selected_ending) if selected_ending else 0.0
     
     # Create grouped bars for scheduling metrics
     x_positions = [0, 1, 2, 3]
