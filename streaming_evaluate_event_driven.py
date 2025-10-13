@@ -28,6 +28,7 @@ from scipy.stats import spearmanr
 from collections import defaultdict
 import cv2
 from transformers.cache_utils import DynamicCache
+import pandas as pd
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -103,12 +104,13 @@ class Config:
     # configurable parameters
     SCHEDULING_METHOD = 'lowest_buffer' # 'round_robin' or 'random' or 'lowest_buffer' 
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
-    GENERATION_CHUNK_SIZE = 2
+    GENERATION_CHUNK_SIZE = 2      # chunk size for generation
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
-    BUFFER_URGENT_VALUE = GENERATION_CHUNK_SIZE * BUFFER_URGENT_FACTOR # higher means easier to select gen events
     MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
     DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
+
+    BUFFER_URGENT_VALUE = GENERATION_CHUNK_SIZE * BUFFER_URGENT_FACTOR # higher means easier to select gen events
 
 # =============================================================================
 # IMAGE DIFFERENCE FEATURE CALCULATION
@@ -477,6 +479,34 @@ def create_frame_features_vs_response_length_visualization(frame_features_data, 
     plt.close()
     
     print(f"✅ Saved correlation summary bar chart to {summary_path}")
+
+
+# file_path='/mnt/data/network_traces/curr_httpgetmt.csv'
+# df = pd.read_csv(file_path)
+# print(df['bytes_sec'].mean()*8/1024/1024,df['bytes_sec'].std()*8/1024/1024)
+
+
+def trace2bwlist(N=4000, file_path='/home/ryan/bo/network_traces/curr_httpgetmt.csv'):
+    # Read the entire file into a DataFrame
+    df = pd.read_csv(file_path)
+
+    # Filter out rows where 'bytes_sec' is less than 1M
+    df_filtered = df[df['bytes_sec'] >= 1000000]
+
+    # Get the total number of rows in the filtered DataFrame
+    total_rows = df_filtered.shape[0]
+
+    # Ensure there are enough rows to sample 4000 consecutive rows
+    if total_rows < N:
+        raise ValueError("The filtered DataFrame does not contain enough rows to sample 4000 consecutive rows.")
+
+    # Randomly select a starting index such that you can get 4000 consecutive rows
+    start_index = np.random.randint(0, total_rows - N + 1)
+
+    # Extract 4000 consecutive rows starting from the selected index
+    consecutive_bw = df_filtered['bytes_sec'].iloc[start_index:start_index + N]
+
+    return consecutive_bw
 
 class FilteredEgo4DRefinedNarrationStream:
     """Ego4D Refined Narration Stream - processes videos directly without pre-computed features"""
