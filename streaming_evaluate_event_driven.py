@@ -106,7 +106,7 @@ class Config:
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
     GENERATION_CHUNK_SIZE = 2      # chunk size for generation
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
-    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 600            # Max frames for evaluation (use full video)
     DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
 
@@ -4739,16 +4739,16 @@ def main():
         print(f"   • Total Ground Truth Responses: {sum(r['ground_truth_turns'] for r in results)}")
 
         
-        # Create timing analysis
-        conversation_timings = [r for r in results if 'visual_embedding_time' in r]
+        # # Create timing analysis
+        # conversation_timings = [r for r in results if 'visual_embedding_time' in r]
         
-        if conversation_timings:
-            # Create individual conversation timing plots
-            create_individual_conversation_timing_plots(conversation_timings, data_source=data_source)
+        # if conversation_timings:
+        #     # Create individual conversation timing plots
+        #     create_individual_conversation_timing_plots(conversation_timings, data_source=data_source)
         
         # Create PPL analysis visualization (includes PPL over time visualization)
-        print(f"\n📊 Creating dual PPL analysis...")
-        create_dual_ppl_frame_visualization(results, data_source=data_source)
+        # print(f"\n📊 Creating dual PPL analysis...")
+        # create_dual_ppl_frame_visualization(results, data_source=data_source)
         
         # Create aggregated metrics visualization
         print(f"\n📊 Creating aggregated metrics visualization...")
