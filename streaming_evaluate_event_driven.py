@@ -106,7 +106,7 @@ class Config:
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
     GENERATION_CHUNK_SIZE = 2      # chunk size for generation
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
-    MAX_EVAL_FRAMES = 600            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
     DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
 
@@ -2243,6 +2243,8 @@ class EventDrivenConversationContext:
 
         self.frame_processing_times.append(frame_processing_time)
 
+        texts_generated_previous = liveinfer.texts_generated_previous
+
         self.frame_timing_data.append({
             'frame_idx': frame_idx,
             'video_time': relative_time,
@@ -2253,8 +2255,6 @@ class EventDrivenConversationContext:
             'response_time': frame_processing_time if query else 0, # only count for frames that have prompts
             'prompt_count': 1 if query else 0,
         })
-
-        texts_generated_previous = liveinfer.texts_generated_previous
         
         if response:
             self.generated_turns.append({
@@ -4665,7 +4665,7 @@ def main():
             print("✅ Threshold sweep analysis completed!")
             return
 
-        results, buffer_data, memory_data, scheduling_data = streaming_evaluate_conversations(
+        results, buffer_data, all_memory_data, scheduling_data = streaming_evaluate_conversations(
             model,
             tokenizer,
             dataset,
@@ -4752,7 +4752,7 @@ def main():
         
         # Create aggregated metrics visualization
         print(f"\n📊 Creating aggregated metrics visualization...")
-        create_aggregated_metrics_visualization(results, buffer_data=buffer_data, scheduling_data=scheduling_data, data_source=data_source)
+        create_aggregated_metrics_visualization(results, buffer_data=buffer_data, scheduling_data=scheduling_data, all_memory_data=all_memory_data, data_source=data_source)
         
         # Create time per token analysis (skipped for speed)
         # print(f"\n📊 Creating time per token analysis...")
@@ -5747,7 +5747,7 @@ def calculate_metrics(model, tokenizer, video_tensor, normalized_conversation, g
         }
     }
 
-def create_aggregated_metrics_visualization(results, buffer_data=None, scheduling_data=None, output_dir="timing_plots", data_source="goalstep"):
+def create_aggregated_metrics_visualization(results, buffer_data=None, scheduling_data=None, all_memory_data=None, output_dir="timing_plots", data_source="goalstep"):
     """Create aggregated metrics visualization with 4 vertical bar plots in scientific style."""
     
     os.makedirs(output_dir, exist_ok=True)
@@ -5820,8 +5820,8 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, schedulin
         'grid.linewidth': 0.5
     })
     
-    # Create figure with 5 subplots in 1 row
-    fig, axes = plt.subplots(1, 5, figsize=(25, 6))
+    # Create figure with 6 subplots in 1 row
+    fig, axes = plt.subplots(1, 6, figsize=(30, 6))
     fig.suptitle(f'Aggregated Performance Metrics - {data_source.title()}', fontsize=14, fontweight='bold', y=0.95)
     
     # Define colors and positions
@@ -5896,7 +5896,7 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, schedulin
                       ha='center', va='bottom', fontsize=7, fontweight='bold')
     
     # 4. VLM Perplexity with GT reference (4th position)
-    ax1 = axes[3]
+    ax1 = axes[4]
     bars1 = ax1.bar([0], [vlm_ppl_mean], yerr=[vlm_ppl_std], 
                     color=colors[0], alpha=0.8, capsize=4, width=0.4, 
                     edgecolor='black', linewidth=0.5)
@@ -5955,8 +5955,79 @@ def create_aggregated_metrics_visualization(results, buffer_data=None, schedulin
         ax2.text(i, val + err + 0.05, f'{val:.2f}±{err:.2f}', 
                 ha='center', va='bottom', fontsize=8, fontweight='bold')
     
-    # 5. Fluency (5th position)
-    ax3 = axes[4]
+    # 5. Memory Usage Analysis (5th position)
+    ax_memory = axes[3]
+    
+    # Calculate memory statistics from all_memory_data
+    total_gpu_memory = []
+    model_memory = []
+    kv_cache_memory = []
+    activation_memory = []
+    other_memory = []
+    cpu_memory_growth = []
+    
+    # Extract memory data from all conversations
+    for conversation_key, memory_data in all_memory_data.items():
+        if 'memory_usage' in memory_data and memory_data['memory_usage']:
+            # Peak memory usage (like in memory_usage_analysis and memory_comparison)
+            total_gpu_memory.append(max(memory_data['memory_usage']))
+            model_memory.append(max(memory_data['model_memory']))
+            kv_cache_memory.append(max(memory_data['kv_cache_memory']))
+            activation_memory.append(max(memory_data['activation_memory']))
+            other_memory.append(max(memory_data['other_memory']))
+            # CPU memory growth (peak growth)
+            cpu_growth_data = memory_data.get('cpu_memory_growth', [])
+            cpu_memory_growth.append(max(cpu_growth_data) if cpu_growth_data else 0.0)
+    
+    # Calculate means and standard deviations
+    total_gpu_mean = np.mean(total_gpu_memory) if total_gpu_memory else 0.0
+    total_gpu_std = np.std(total_gpu_memory) if total_gpu_memory else 0.0
+    model_memory_mean = np.mean(model_memory) if model_memory else 0.0
+    model_memory_std = np.std(model_memory) if model_memory else 0.0
+    kv_cache_memory_mean = np.mean(kv_cache_memory) if kv_cache_memory else 0.0
+    kv_cache_memory_std = np.std(kv_cache_memory) if kv_cache_memory else 0.0
+    activation_memory_mean = np.mean(activation_memory) if activation_memory else 0.0
+    activation_memory_std = np.std(activation_memory) if activation_memory else 0.0
+    other_memory_mean = np.mean(other_memory) if other_memory else 0.0
+    other_memory_std = np.std(other_memory) if other_memory else 0.0
+    cpu_memory_growth_mean = np.mean(cpu_memory_growth) if cpu_memory_growth else 0.0
+    cpu_memory_growth_std = np.std(cpu_memory_growth) if cpu_memory_growth else 0.0
+    
+    # Calculate combined memory (KV cache + activation + other)
+    combined_memory = []
+    for i in range(len(kv_cache_memory)):
+        combined = kv_cache_memory[i] + activation_memory[i] + other_memory[i]
+        combined_memory.append(combined)
+    combined_memory_mean = np.mean(combined_memory) if combined_memory else 0.0
+    combined_memory_std = np.std(combined_memory) if combined_memory else 0.0
+    
+    # Create grouped bars for memory metrics
+    x_positions = [0, 1, 2, 3, 4, 5, 6]
+    values = [total_gpu_mean, model_memory_mean, kv_cache_memory_mean, activation_memory_mean, other_memory_mean, combined_memory_mean, cpu_memory_growth_mean]
+    errors = [total_gpu_std, model_memory_std, kv_cache_memory_std, activation_memory_std, other_memory_std, combined_memory_std, cpu_memory_growth_std]
+    labels_memory = ['Total\nGPU', 'Model\nParams', 'KV\nCache', 'Activations', 'Other\nGPU', 'Combined\nDynamic', 'CPU\nGrowth']
+    colors_memory = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#feca57', '#ff9500', '#ff9ff3']
+    
+    bars_memory = ax_memory.bar(x_positions, values, yerr=errors,
+                               color=colors_memory, alpha=0.8, capsize=4, width=0.6,
+                               edgecolor='black', linewidth=0.5)
+    ax_memory.set_ylabel('Memory (MB)')
+    ax_memory.set_yscale('log')  # Use log scale for better visualization of wide range
+    ax_memory.set_xticks(x_positions)
+    ax_memory.set_xticklabels(labels_memory, fontsize=8)
+    ax_memory.grid(True, alpha=0.3, axis='y')
+    ax_memory.spines['top'].set_visible(False)
+    ax_memory.spines['right'].set_visible(False)
+    
+    # Add value labels (adjusted for log scale)
+    for i, (val, err) in enumerate(zip(values, errors)):
+        # For log scale, multiply by a small factor instead of adding
+        label_y = val * 1.1 if val > 0 else 1.0
+        ax_memory.text(i, label_y, f'{val:.0f}±{err:.0f}', 
+                      ha='center', va='bottom', fontsize=7, fontweight='bold')
+    
+    # 6. Fluency (6th position)
+    ax3 = axes[5]
     bars3 = ax3.bar([0], [fluency_mean], yerr=[fluency_std],
                     color=colors[2], alpha=0.8, capsize=4, width=0.4,
                     edgecolor='black', linewidth=0.5)
