@@ -953,8 +953,39 @@ def defragment_gpu_memory():
 # simulate_text_buffer_trajectories function removed - using on-the-fly buffer tracking instead
 
 
-def create_processor_timeline(processor_segments, conversation_summaries=None, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
-    """Visualize processor usage timeline and buffer evolution using on-the-fly buffer tracking."""
+def create_serializable_timeline_data(processor_segments, contexts=None):
+    """Create serializable data structure for processor timeline visualization."""
+    timeline_data = {
+        'processor_segments': processor_segments,
+        'prompt_data': {}
+    }
+    
+    if contexts:
+        for cid, context in contexts.items():
+            if hasattr(context, 'user_prompts') and context.user_prompts:
+                timeline_data['prompt_data'][cid] = context.user_prompts
+    
+    return timeline_data
+
+def save_timeline_data(timeline_data, filepath):
+    """Save timeline data to JSON file."""
+    import json
+    with open(filepath, 'w') as f:
+        json.dump(timeline_data, f, indent=2)
+    print(f"💾 Timeline data saved to: {filepath}")
+
+def load_timeline_data(filepath):
+    """Load timeline data from JSON file."""
+    import json
+    with open(filepath, 'r') as f:
+        timeline_data = json.load(f)
+    print(f"📂 Timeline data loaded from: {filepath}")
+    return timeline_data
+
+def create_processor_timeline(overall_summary, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
+    """Visualize processor usage timeline showing when the processor was busy processing frames."""
+
+    processor_segments, prompt_data = overall_summary['timeline_data']['processor_segments'], overall_summary['timeline_data']['prompt_data']
 
     if not processor_segments:
         return None, None
@@ -965,113 +996,60 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
     unique_conversations = list(dict.fromkeys(conversation_ids))
     conversation_levels = {cid: idx for idx, cid in enumerate(unique_conversations)}
 
-    summary_lookup = {}
-    if conversation_summaries:
-        for summary in conversation_summaries:
-            label = summary.get('label', summary.get('conversation_id', ''))
-            summary_lookup[label] = summary
-
     base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
     colors = {cid: base_colors[i % len(base_colors)] for i, cid in enumerate(unique_conversations)}
 
+    # Extract timing information directly from processor segments
     conversation_data = {}
     for cid in unique_conversations:
-        summary = summary_lookup.get(cid)
-        if not summary:
+        cid_segments = [seg for seg in processor_segments if seg['conversation_id'] == cid]
+        if not cid_segments:
             continue
-        start_time = summary.get('start', 0.0)
-        end_time = summary.get('end', start_time)
+            
+        start_time = min(seg['start'] for seg in cid_segments)
+        end_time = max(seg['end'] for seg in cid_segments)
         duration = max(0.0, end_time - start_time)
-        events = summary.get('events', []) or []
-        frame_events = sorted(
-            (event for event in events if event.get('type') == 'frame'),
-            key=lambda event: (event.get('time', 0.0), event.get('detail', {}).get('frame_idx', 0))
-        )
-        prompt_rel_times = [
-            max(0.0, event.get('time', 0.0) - start_time)
-            for event in events
-            if event.get('type') == 'prompt'
-        ]
+        
+        # Calculate total processing time
+        total_processing = sum(max(0.0, seg['end'] - seg['start']) for seg in cid_segments)
+        
         conversation_data[cid] = {
             'original_start': start_time,
             'duration': duration,
-            'frames': [],
-            'frame_events': collections.deque(frame_events),
-            'prompts_relative': prompt_rel_times,
-            'processing_time': 0.0,
-            'completion_time': 0.0,
+            'processing_time': total_processing,
+            'completion_time': end_time,
         }
 
-    sorted_segments = sorted(processor_segments, key=lambda segment: (segment['start'], segment['end']))
-
-    for segment in sorted_segments:
-        cid = segment['conversation_id']
-        data = conversation_data.get(cid)
-        if not data:
-            continue
-
-        duration = max(0.0, segment['end'] - segment['start'])
-        if segment.get('type') != 'frame' or duration <= 0.0:
-            continue
-
-        if data['frame_events']:
-            frame_event = data['frame_events'].popleft()
-            relative_time = max(0.0, frame_event.get('time', data['original_start']) - data['original_start'])
-            frame_idx = frame_event.get('detail', {}).get('frame_idx', segment.get('frame_idx', len(data['frames'])))
-        else:
-            frame_event = None
-            frame_idx = segment.get('frame_idx', len(data['frames']))
-            relative_time = frame_idx / max(Config.FRAME_FPS, 1.0)
-
-        frame_info = {
-            'frame_idx': frame_idx,
-            'relative_time': relative_time,
-            'frame_duration': segment.get('frame_duration', duration),
-            'generation_duration': segment.get('generation_duration', 0.0),
-        }
-        data['frames'].append(frame_info)
-
-    for data in conversation_data.values():
-        data.pop('frame_events', None)
-
-    for cid, data in conversation_data.items():
-        total_processing = sum(
-            max(0.0, frame.get('frame_duration', 0.0)) +
-            max(0.0, frame.get('generation_duration', 0.0))
-            for frame in data['frames']
-        )
-        if total_processing <= 0.0:
-            fallback = data['duration'] if data['duration'] > 0.0 else len(data['frames']) / max(Config.FRAME_FPS, 1.0)
-            total_processing = max(0.0, fallback)
-        data['processing_time'] = total_processing
-
-        completion_time = 0.0
-        for frame in data['frames']:
-            completion_time = max(
-                completion_time,
-                frame.get('relative_time', 0.0)
-                + max(0.0, frame.get('frame_duration', 0.0))
-                + max(0.0, frame.get('generation_duration', 0.0))
-            )
-        if completion_time <= 0.0:
-            completion_time = max(data['duration'], total_processing)
-        data['completion_time'] = completion_time
-
+    # Create timeline data directly from processor segments and contexts
     actual_starts = []
     actual_ends = []
     actual_prompts = []
     actual_last_arrivals = []
+    
     for cid in unique_conversations:
         data = conversation_data.get(cid)
         if not data:
             continue
+            
+        # Video start time
         actual_starts.append({'time': data['original_start'], 'conversation_id': cid})
-        actual_ends.append({'time': data['original_start'] + data['completion_time'], 'conversation_id': cid})
-        if data['frames']:
-            last_rel_time = max(frame.get('relative_time', 0.0) for frame in data['frames'])
-            actual_last_arrivals.append({'time': data['original_start'] + last_rel_time, 'conversation_id': cid})
-        for rel in data['prompts_relative']:
-            actual_prompts.append({'time': data['original_start'] + rel, 'conversation_id': cid})
+        
+        # Video end time (when processing completed)
+        actual_ends.append({'time': data['completion_time'], 'conversation_id': cid})
+        
+        # Last frame arrival time (when the last frame was processed)
+        cid_segments = [seg for seg in processor_segments if seg['conversation_id'] == cid]
+        if cid_segments:
+            last_segment = max(cid_segments, key=lambda seg: seg['start'])
+            actual_last_arrivals.append({'time': last_segment['start'], 'conversation_id': cid})
+        
+        # Extract prompt timing from serializable prompt_data if available
+        if prompt_data and cid in prompt_data:
+            user_prompts = prompt_data[cid]
+            for prompt_time, prompt_content in user_prompts:
+                # Convert relative time to absolute time
+                absolute_time = data['original_start'] + prompt_time
+                actual_prompts.append({'time': absolute_time, 'conversation_id': cid})
 
     def compute_completion_markers(segments):
         last_by_conversation = {}
@@ -1084,6 +1062,8 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
                 last_by_conversation[cid] = end_time
         return [{'conversation_id': cid, 'time': end_time} for cid, end_time in last_by_conversation.items()]
 
+    sorted_segments = sorted(processor_segments, key=lambda segment: (segment['start'], segment['end']))
+    
     scenario_results = [{
         'title': 'Processor Utilization: Concurrent Conversations',
         'ylabel': 'Actual',
@@ -1104,6 +1084,7 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
         completion_flag = False
         last_arrival_flag = False
 
+        # Draw processor utilization bars
         for segment in timeline_data['segments'] or []:
             start = segment['start']
             end = segment['end']
@@ -1117,18 +1098,9 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
                 edgecolors='none',
                 zorder=2
             )
-        for marker in timeline_data['starts'] or []:
-            cid = marker['conversation_id']
-            start_time = marker['time']
-            ax.axvline(start_time, color=colors.get(cid, '#333333'), linestyle='--', linewidth=1.0, alpha=0.75, zorder=3)
-            start_flag = True
-
-        for marker in timeline_data['ends'] or []:
-            cid = marker['conversation_id']
-            end_time = marker['time']
-            ax.axvline(end_time, color=colors.get(cid, '#333333'), linestyle=':', linewidth=1.0, alpha=0.6, zorder=3)
-
-        for prompt in timeline_data['prompts'] or []:
+        
+        # Draw prompt markers (triangles)
+        for prompt in timeline_data.get('prompts', []) or []:
             cid = prompt['conversation_id']
             prompt_time = prompt['time']
             level = conversation_levels.get(cid, 0)
@@ -1144,7 +1116,21 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
                 zorder=4
             )
             prompt_flag = True
+        
+        # Draw video start markers (dashed vertical lines)
+        for marker in timeline_data['starts'] or []:
+            cid = marker['conversation_id']
+            start_time = marker['time']
+            ax.axvline(start_time, color=colors.get(cid, '#333333'), linestyle='--', linewidth=1.0, alpha=0.75, zorder=3)
+            start_flag = True
 
+        # Draw video end markers (dotted vertical lines)
+        for marker in timeline_data['ends'] or []:
+            cid = marker['conversation_id']
+            end_time = marker['time']
+            ax.axvline(end_time, color=colors.get(cid, '#333333'), linestyle=':', linewidth=1.0, alpha=0.6, zorder=3)
+
+        # Draw completion markers (empty circles)
         for marker in timeline_data.get('completion', []) or []:
             cid = marker['conversation_id']
             completion_time = marker['time']
@@ -1163,6 +1149,7 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
             )
             completion_flag = True
 
+        # Draw last frame arrival markers (stars)
         for marker in timeline_data.get('last_arrivals', []) or []:
             cid = marker['conversation_id']
             arrival_time = marker['time']
@@ -1203,7 +1190,7 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
 
         segment_max = max((segment['end'] for segment in timeline['segments'] or []), default=0.0)
         end_markers_max = max((marker['time'] for marker in timeline['ends'] or []), default=0.0)
-        prompt_max = max((marker['time'] for marker in timeline['prompts'] or []), default=0.0)
+        prompt_max = max((marker['time'] for marker in timeline.get('prompts', []) or []), default=0.0)
         overall_max = max(overall_max, segment_max, end_markers_max, prompt_max)
 
     axes[-1].set_xlabel('Processor Time (s)')
@@ -1220,14 +1207,14 @@ def create_processor_timeline(processor_segments, conversation_summaries=None, o
         legend_handles.append(plt.Line2D([], [], color='#444444', marker='v', linestyle='None', markersize=7, markeredgecolor='k'))
         legend_labels.append('Prompt')
     if start_present:
-        legend_handles.append(plt.Line2D([], [], color='#444444', marker='^', linestyle='None', markersize=8, markeredgecolor='k'))
+        legend_handles.append(plt.Line2D([], [], color='#444444', linestyle='--', linewidth=1.0))
         legend_labels.append('Video Start')
     if completion_present:
         legend_handles.append(plt.Line2D([], [], color='#444444', marker='o', linestyle='None', markersize=7, markerfacecolor='none', markeredgewidth=1.1))
-        legend_labels.append('Last Frame Done')
+        legend_labels.append('Processing Complete')
     if arrival_present:
         legend_handles.append(plt.Line2D([], [], color='#444444', marker='*', linestyle='None', markersize=8, markeredgecolor='k'))
-        legend_labels.append('Last Frame Arrived')
+        legend_labels.append('Last Frame Processed')
     if legend_handles:
         axes[0].legend(legend_handles, legend_labels, loc='upper right', fontsize=8, title='Legend')
 
@@ -3554,7 +3541,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         all_memory_data[unique_key] = context.memory_data
         if context.result.get('frame_scores_data'):
             all_frame_scores_data[unique_key] = context.result['frame_scores_data']
-    
+    timeline_data = create_serializable_timeline_data(processor_segments, contexts)
     shared_liveinfer.reset()
 
     # if all_frame_scores_data:
@@ -3570,9 +3557,9 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
     #     print(f"\n📊 Creating frame features vs response length visualization with {len(all_frame_features_data)} frames...")
     #     create_frame_features_vs_response_length_visualization(all_frame_features_data, data_source=data_source)
     
-    if processor_segments:
-        print("\n📊 Creating processor timeline...")
-        create_processor_timeline(processor_segments, conversation_summaries, data_source=data_source)
+        # Optionally save timeline data for later use
+        # timeline_file = os.path.join(Config.OUTPUT_DIR, f'processor_timeline_data_{data_source}.json')
+        # save_timeline_data(timeline_data, timeline_file)
 
     scheduling_data = {
         'times': scheduling_selection_times,
@@ -3600,7 +3587,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         'results': results,
         'onthefly_buffer_data': onthefly_buffer_data,
         'all_memory_data': all_memory_data,
-        'scheduling_data': scheduling_data
+        'scheduling_data': scheduling_data,
+        'timeline_data': timeline_data
     }
 
     return overall_summary
@@ -4432,6 +4420,9 @@ def main():
         # Create response length distribution analysis
         # print(f"\n📊 Creating response length distribution analysis...")
         # create_response_length_distribution_analysis(overall_summary, data_source=data_source)
+
+        print("\n📊 Creating processor timeline...")
+        create_processor_timeline(overall_summary, data_source=data_source)
 
         print("\n📊 Creating memory usage analysis...")
         create_memory_visualization(overall_summary, data_source=data_source)
