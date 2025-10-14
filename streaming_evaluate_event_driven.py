@@ -57,6 +57,9 @@ class Config:
     MAX_FRAMES_LIMIT = 5000              # Maximum frames to process
     MIN_FRAMES_LIMIT = 1000              # Minimum frames to process
     
+    # Asynchronous memory transfers
+    ASYNC_KV_OFFLOAD = True              # Use asynchronous KV cache offloading
+    
     # Visualization
     OUTPUT_DIR = "timing_plots"
     PLOT_DPI = 300
@@ -102,9 +105,9 @@ class Config:
     
 
     # configurable parameters
-    SCHEDULING_METHOD = 'lowest_buffer' # 'round_robin' or 'random' or 'lowest_buffer' 
+    SCHEDULING_METHOD = 'round_robin' # 'round_robin' or 'random' or 'lowest_buffer' 
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
-    GENERATION_CHUNK_SIZE = 2      # chunk size for generation
+    GENERATION_CHUNK_SIZE = 2000      # chunk size for generation
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
     MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
     DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
@@ -853,52 +856,56 @@ def calculate_inputs_embeds_memory_mb(inputs_embeds):
         return 0.0
     return _tensor_numel_bytes(inputs_embeds) / (1024**2)
 
-def move_dynamic_cache_to(cache: DynamicCache, device: str = "cpu"):
+def move_dynamic_cache_to(cache: DynamicCache, device: str = "cpu", non_blocking: bool = False):
     # Generic: traverse known structure (Cache -> layers -> attributes)
-    # print("move_dynamic_cache_to", device)
+    # print("move_dynamic_cache_to", device, "non_blocking:", non_blocking)
     if hasattr(cache, "layers"):
         for layer in cache.layers:
             # Move any tensor attributes on the layer
             for name, val in vars(layer).items():
                 if torch.is_tensor(val):
-                    setattr(layer, name, val.to(device))
+                    setattr(layer, name, val.to(device, non_blocking=non_blocking))
                 elif isinstance(val, (list, tuple)):
                     seq = []
                     changed = False
                     for x in val:
                         if torch.is_tensor(x):
-                            seq.append(x.to(device)); changed = True
+                            seq.append(x.to(device, non_blocking=non_blocking)); changed = True
                         else:
                             seq.append(x)
                     if changed:
                         setattr(layer, name, type(val)(seq))
     return cache
 
-def _move_cache_to_device(obj, device):
+def _move_cache_to_device(obj, device, non_blocking: bool = False):
     """Recursively move cache containers to a target device."""
     if obj is None:
         return None
     if isinstance(obj, DynamicCache):
-        return move_dynamic_cache_to(obj, device)
+        return move_dynamic_cache_to(obj, device, non_blocking=non_blocking)
     if torch.is_tensor(obj):
-        return obj.to(device, non_blocking=True)
+        return obj.to(device, non_blocking=non_blocking)
     if isinstance(obj, list):
-        return [_move_cache_to_device(item, device) for item in obj]
+        return [_move_cache_to_device(item, device, non_blocking=non_blocking) for item in obj]
     if isinstance(obj, tuple):
-        return tuple(_move_cache_to_device(list(obj), device))
+        return tuple(_move_cache_to_device(list(obj), device, non_blocking=non_blocking))
     if isinstance(obj, dict):
-        return {key: _move_cache_to_device(value, device) for key, value in obj.items()}
+        return {key: _move_cache_to_device(value, device, non_blocking=non_blocking) for key, value in obj.items()}
     # Handle objects with .to() method (like DynamicCache from transformers)
     if hasattr(obj, 'to') and callable(obj.to):
-        return obj.to(device)
+        # Try to pass non_blocking parameter if supported
+        try:
+            return obj.to(device, non_blocking=non_blocking)
+        except TypeError:
+            return obj.to(device)
     return obj
 
 
-def move_kv_cache_to_device(past_key_values, device):
+def move_kv_cache_to_device(past_key_values, device, non_blocking: bool = False):
     """Return KV cache moved to the target device while preserving structure."""
     if past_key_values is None:
         return None
-    return _move_cache_to_device(past_key_values, device)
+    return _move_cache_to_device(past_key_values, device, non_blocking=non_blocking)
 
 def canonical_device(device):
     """Normalize device inputs to torch.device."""
@@ -4218,11 +4225,15 @@ class SimpleLiveInfer:
                 self._kv_reload_time += time.time() - start
         return target
 
-    def _offload_kv_cache(self, past_key_values=None):
+    def _offload_kv_cache(self, past_key_values=None, non_blocking: bool = None):
         """Offload KV cache to CPU to save GPU memory."""
         target = past_key_values if past_key_values is not None else self.past_key_values
         if target is None:
             return target
+        
+        # Use configuration default if not specified
+        if non_blocking is None:
+            non_blocking = Config.ASYNC_KV_OFFLOAD
         
         # Get a sample tensor to check current device
         sample_tensor = self._get_sample_tensor_from_cache(target)
@@ -4230,7 +4241,9 @@ class SimpleLiveInfer:
         # Only move if we have a tensor and it's not already on CPU
         if sample_tensor is not None and sample_tensor.device != torch.device('cpu'):
             start = time.time()
-            target = move_kv_cache_to_device(target, 'cpu')
+            target = move_kv_cache_to_device(target, 'cpu', non_blocking=non_blocking)
+            # No synchronization here - let it complete asynchronously
+            torch.cuda.synchronize()
             self._kv_offload_time += time.time() - start
             self.timing_data['kv_offload_time'] = self._kv_offload_time
             
@@ -4478,8 +4491,9 @@ class SimpleLiveInfer:
 
         return query, response
 
-    def offload_kv_cache(self):
-        self.past_key_values = self._offload_kv_cache(self.past_key_values)
+    def offload_kv_cache(self, non_blocking: bool = None):
+        """Offload KV cache to CPU, using asynchronous transfer by default."""
+        self.past_key_values = self._offload_kv_cache(self.past_key_values, non_blocking=non_blocking)
         if self.generation_state is not None:
             self.generation_state['past_key_values_cpu'] = self.past_key_values
     
