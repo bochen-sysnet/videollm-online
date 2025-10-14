@@ -108,10 +108,10 @@ class Config:
     # configurable parameters
     SCHEDULING_METHOD = 'lowest_buffer' # 'round_robin' or 'random' or 'lowest_buffer' 
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
-    GENERATION_CHUNK_SIZE = 32      # chunk size for generation
+    GENERATION_CHUNK_SIZE = 2      # chunk size for generation
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
-    MAX_EVAL_FRAMES = 10            # Max frames for evaluation (use full video)
-    DEFAULT_NUM_VIDEOS = 2             # Default number of videos for evaluation
+    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
+    DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
 
     BUFFER_URGENT_VALUE = GENERATION_CHUNK_SIZE * BUFFER_URGENT_FACTOR # higher means easier to select gen events
@@ -2916,7 +2916,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             'rebuffer_times': [arrival_time],
             'rebuffer_values': [0.0],
             'total_rebuffer': 0.0,
-            'pending_responses': set(),
+            'pending_responses': [],
             'unanswered_prompts': 0,
             'processing_delays': [0.0],
             'total_processing_delay': 0.0,
@@ -3031,7 +3031,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 if last_rebuffering_start is None:
                     last_rebuffering_start = current_time
                 # Buffer is empty - accumulate rebuffering if there are pending prompts
-                if pending_responses and current_buffer <= 1e-9:
+                if len(pending_responses) > 0 and current_buffer <= 1e-9:
                     rebuffer_total += remaining
                     if is_queuing:
                         queuing_delay_total += remaining
@@ -3306,7 +3306,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred)
             
             # Skip buffer updates if OOM has occurred
-            buffer_state['pending_responses'].add(context.response_expected)
+            if context.response_expected not in buffer_state['pending_responses']:
+                buffer_state['pending_responses'].append(context.response_expected)
             context.response_expected += 1
             buffer_state['unanswered_prompts'] += 1
             context.received_prompt_cnt += 1
@@ -3387,11 +3388,13 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     buffer_state['buffer'] = 0
                     buffer_state['unanswered_prompts'] -= 1
                     if last_event.get('trigger_method') == 'score':
-                        buffer_state['pending_responses'].add(context.response_expected)
+                        if context.response_expected not in buffer_state['pending_responses']:
+                            buffer_state['pending_responses'].append(context.response_expected)
                         context.response_expected += 1
 
                 if is_last_chunk:
-                    buffer_state['pending_responses'].discard(response_idx)
+                    if response_idx in buffer_state['pending_responses']:
+                        buffer_state['pending_responses'].remove(response_idx)
                     assert shared_liveinfer.generation_state is None, f"generation_state: {shared_liveinfer.generation_state}"
 
                 # update buffer only if the latest prompt has been processed
@@ -3486,7 +3489,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 assert not is_first_chunk, f"is_first_chunk: {is_first_chunk}"
                 
                 if is_last_chunk:
-                    buffer_state['pending_responses'].discard(response_idx)
+                    if response_idx in buffer_state['pending_responses']:
+                        buffer_state['pending_responses'].remove(response_idx)
                     assert shared_liveinfer.generation_state is None, f"generation_state: {shared_liveinfer.generation_state}"
 
                     # Record buffer state after adding words
