@@ -58,7 +58,8 @@ class Config:
     MIN_FRAMES_LIMIT = 1000              # Minimum frames to process
     
     # Asynchronous memory transfers
-    ASYNC_KV_OFFLOAD = True              # Use asynchronous KV cache offloading
+    # set to False as it is working better for now
+    ASYNC_KV_OFFLOAD = False              # Use asynchronous KV cache offloading
     
     # Visualization
     OUTPUT_DIR = "timing_plots"
@@ -4243,7 +4244,7 @@ class SimpleLiveInfer:
             start = time.time()
             target = move_kv_cache_to_device(target, 'cpu', non_blocking=non_blocking)
             # No synchronization here - let it complete asynchronously
-            torch.cuda.synchronize()
+            # torch.cuda.synchronize()
             self._kv_offload_time += time.time() - start
             self.timing_data['kv_offload_time'] = self._kv_offload_time
             
@@ -4689,12 +4690,6 @@ def main():
             data_source=data_source,
             conversation_start_times=default_start_times
         )
-        
-        # Calculate aggregate metrics
-        avg_ppl = sum(r['lm_ppl'] for r in results) / len(results)
-        avg_fluency = sum(r['fluency'] for r in results) / len(results)
-        avg_responses_per_video = sum(len(r['generated_turns']) for r in results) / len(results)
-        
         # Calculate time diff metric: average latency per generated response
         # Sum the actual timing components for each response
         total_generated_responses = sum(len(r['generated_turns']) for r in results)
@@ -4713,11 +4708,6 @@ def main():
                         generation_time = r.get('generation_time', 0)
                         num_frames = r.get('num_frames', 1)
                         
-                        # For each response, the latency is:
-                        # - Visual time: total visual time / number of frames (per frame) 
-                        # - Model time: total model time / number of frames (per frame)
-                        # - Generation time: total generation time / number of responses (per response)
-                        
                         visual_per_frame = visual_time / num_frames if num_frames > 0 else 0
                         model_per_frame = model_time / num_frames if num_frames > 0 else 0
                         generation_per_response = generation_time / num_responses if num_responses > 0 else 0
@@ -4729,22 +4719,6 @@ def main():
                         # print(f"   📊 Response {len(response_timings)}: latency = {response_latency:.3f}s (vis={visual_per_frame:.3f}s + model={model_per_frame:.3f}s + gen={generation_per_response:.3f}s)")
                         # print(f"       Breakdown: {num_frames} frames, {num_responses} responses")
                         # print(f" visual_time: {visual_time:.3f}s, model_time: {model_time:.3f}s, generation_time: {generation_time:.3f}s")
-            
-            if response_timings:
-                avg_time_diff = sum(response_timings) / len(response_timings)
-                # print(f"   📊 Individual response latencies: {[f'{t:.3f}s' for t in response_timings]}")
-            else:
-                avg_time_diff = 0.0
-        else:
-            avg_time_diff = 0.0
-        
-        # print(f"\n🎯 AGGREGATE METRICS:")
-        # print(f"   • Average Perplexity: {avg_ppl:.3f}")
-        # print(f"   • Average Fluency: {avg_fluency:.3f}")
-        # print(f"   • Average Responses per Video: {avg_responses_per_video:.1f}")
-        # print(f"   • Average Time Diff (latency per response): {avg_time_diff:.3f}s")
-        # print(f"   • Average Rebuffering Time per Frame: {avg_rebuffering_time:.3f}s")
-        
         
         print(f"🎯 PERFORMANCE SUMMARY:")
         print(f"   • Conversations Processed: {len(results)}")
