@@ -105,6 +105,8 @@ class Config:
     EWMA_FACTOR = 0.9
     AGE_WEIGHT = 1 # discount factor for age compared to the remaining length
     
+    # network config
+    RTT = 0.04
 
     # configurable parameters
     SCHEDULING_METHOD = 'lowest_buffer' # 'round_robin' or 'random' or 'lowest_buffer' 
@@ -495,33 +497,88 @@ def create_frame_features_vs_response_length_visualization(frame_features_data, 
     print(f"✅ Saved correlation summary bar chart to {summary_path}")
 
 
-# file_path='/mnt/data/network_traces/curr_httpgetmt.csv'
-# df = pd.read_csv(file_path)
-# print(df['bytes_sec'].mean()*8/1024/1024,df['bytes_sec'].std()*8/1024/1024)
+def trace2bwlist(N, trace_type='fcc'):
+    """
+    Convert network trace to bandwidth list.
+    
+    Args:
+        N (int): Number of consecutive bandwidth samples to extract (default: 4000)
+        trace_type (str): Type of trace file - 'fcc' for FCC CSV format with 'bytes_sec' column,
+                         'hsdpa' for HSDPA log format with 6 columns
+    
+    Returns:
+        list: List of bandwidth values in bytes per second
+    """
+    
+    if trace_type == 'fcc':
+        file_path = '../network_traces/curr_httpgetmt.csv'
+        
+        # Read the entire file into a DataFrame
+        df = pd.read_csv(file_path)
 
+        # Filter out rows where 'bytes_sec' is less than 6Mbps and higher than 0.2Mbps
+        df_filtered = df[(df['bytes_sec'] <= 6000000) & (df['bytes_sec'] >= 200000)]
 
-def trace2bwlist(N=4000, file_path='../network_traces/curr_httpgetmt.csv'):
-    # Read the entire file into a DataFrame
-    df = pd.read_csv(file_path)
+        # Get the total number of rows in the filtered DataFrame
+        total_rows = df_filtered.shape[0]
 
-    # Filter out rows where 'bytes_sec' is less than 1M
-    df_filtered = df[df['bytes_sec'] >= 1000000]
+        # Ensure there are enough rows to sample N consecutive rows
+        if total_rows < N:
+            raise ValueError("The filtered DataFrame does not contain enough rows to sample 4000 consecutive rows.")
 
-    # Get the total number of rows in the filtered DataFrame
-    total_rows = df_filtered.shape[0]
+        # Randomly select a starting index such that you can get N consecutive rows
+        start_index = np.random.randint(0, total_rows - N + 1)
 
-    # Ensure there are enough rows to sample 4000 consecutive rows
-    if total_rows < N:
-        raise ValueError("The filtered DataFrame does not contain enough rows to sample 4000 consecutive rows.")
+        # Extract N consecutive rows starting from the selected index
+        consecutive_bw = df_filtered['bytes_sec'].iloc[start_index:start_index + N]
 
-    # Randomly select a starting index such that you can get 4000 consecutive rows
-    start_index = np.random.randint(0, total_rows - N + 1)
-
-    # Extract 4000 consecutive rows starting from the selected index
-    consecutive_bw = df_filtered['bytes_sec'].iloc[start_index:start_index + N]
-
-    # to list
-    consecutive_bw = consecutive_bw.tolist()
+        # to list
+        consecutive_bw = consecutive_bw.tolist()
+        
+    elif trace_type == 'hsdpa':
+        # List of all available HSDPA trace files
+        import glob
+        import os
+        
+        hsdpa_traces_dir = '../network_traces/2013/pathbandwidth'
+        trace_pattern = os.path.join(hsdpa_traces_dir, '**/*.log')
+        available_traces = glob.glob(trace_pattern, recursive=True)
+        
+        if not available_traces:
+            raise FileNotFoundError(f"No HSDPA trace files found in {hsdpa_traces_dir}")
+        
+        # Randomly select one trace file
+        file_path = np.random.choice(available_traces)
+        print(f"Selected HSDPA trace: {os.path.basename(file_path)}")
+        
+        # Read HSDPA trace file (space-separated format)
+        # Format: unix_timestamp monotonic_timestamp lat lon bytes_received time_elapsed_ms
+        data = []
+        with open(file_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line:  # Skip empty lines
+                    parts = line.split()
+                    if len(parts) >= 6:
+                        bytes_received = int(parts[4])
+                        time_elapsed_ms = int(parts[5])
+                        
+                        # Calculate bandwidth in bytes per second
+                        if time_elapsed_ms > 0:
+                            bandwidth_bps = (bytes_received * 1000) / time_elapsed_ms
+                            data.append(bandwidth_bps)
+        
+        # Get the total number of rows
+        total_rows = len(data)
+        
+        # Randomly select a starting index such that you can get N consecutive rows
+        start_index = np.random.randint(0, total_rows - N + 1)
+        
+        # Extract N consecutive bandwidth values
+        consecutive_bw = data[start_index:start_index + N]
+        
+    else:
+        raise ValueError(f"Unsupported trace_type: {trace_type}. Must be 'fcc' or 'hsdpa'")
 
     return consecutive_bw
 
@@ -646,13 +703,6 @@ class FilteredEgo4DRefinedNarrationStream:
                 self.filtered_video_uids.append(video_uid)
             else:
                 missing_videos.append(video_uid)
-        
-        if missing_videos:
-            print(f"⚠️  Found {len(missing_videos)} videos without corresponding video files:")
-            for video_uid in missing_videos[:5]:  # Show first 5 missing videos
-                print(f"   • {video_uid}")
-            if len(missing_videos) > 5:
-                print(f"   • ... and {len(missing_videos) - 5} more")
         
         print(f"📊 Dataset filtering: {len(self.filtered_video_uids)}/{total_videos} videos have available files")
         print(f"📊 Using {len(self.filtered_video_uids)} videos with available video files")
@@ -1887,16 +1937,14 @@ class EventDrivenConversationContext:
         self.video_frame_size = self.video_size / self.frame_count
 
         # calculate the transmission time of each video frame
-        self.transmission_times = [self.video_frame_size / self.bandwidth_trace[i] for i in range(self.test_frames)]
-
-
+        self.transmission_times = [self.video_frame_size / self.bandwidth_trace[i] + Config.RTT for i in range(self.test_frames)]
+        
         self.total_visual_embedding_time = 0.0
         self.total_model_forward_time = 0.0
         self.total_generation_time = 0.0
         self.total_kv_offload_time = 0.0
         self.total_kv_reload_time = 0.0
         self.total_sending_time = sum(self.transmission_times)
-        self.total_receiving_time = 0.0
         self.frame_processing_times = []
         self.frame_timing_data = []
         self.generated_turns = []
@@ -2025,15 +2073,14 @@ class EventDrivenConversationContext:
         prompt_cutoff = self.test_frames / Config.FRAME_FPS if Config.FRAME_FPS > 0 else float('inf')
         for prompt_time, prompt_content in self.user_prompts:
             if prompt_time <= prompt_cutoff:
-                heapq.heappush(event_queue, (self.conversation_start_time + max(0.0, prompt_time), 0, sequence_counter, ('prompt', self.conversation_id, prompt_content, None)))
+                heapq.heappush(event_queue, (self.conversation_start_time + max(0.0, prompt_time), 0, sequence_counter, ('prompt', self.conversation_id, prompt_content)))
                 sequence_counter += 1
             else:
                 print(f"🔕 Skipping prompt at {prompt_time:.2f}s for {self.conversation_id} (beyond frame budget)")
 
         for frame_idx in range(self.test_frames):
-            relative_time = frame_idx / Config.FRAME_FPS
-            frame_time = self.conversation_start_time + relative_time + self.transmission_times[frame_idx]
-            heapq.heappush(event_queue, (frame_time, 1, sequence_counter, ('frame', self.conversation_id, frame_idx, relative_time)))
+            frame_time = self.conversation_start_time + frame_idx / Config.FRAME_FPS
+            heapq.heappush(event_queue, (frame_time, 1, sequence_counter, ('frame', self.conversation_id, frame_idx)))
             sequence_counter += 1
 
         # Don't schedule finalize event - we'll finalize all conversations at once after event loop
@@ -2070,7 +2117,7 @@ class EventDrivenConversationContext:
         print("schedule_generation_event", self.conversation_id, event_time)
         if self.generation_event_pending:
             return sequence_counter
-        heapq.heappush(event_queue, (event_time, 1, sequence_counter, ('generation', self.conversation_id, None, None)))
+        heapq.heappush(event_queue, (event_time, 1, sequence_counter, ('generation', self.conversation_id, None)))
         self.generation_event_pending = True
         return sequence_counter + 1
 
@@ -2110,11 +2157,9 @@ class EventDrivenConversationContext:
         })
         liveinfer.texts_generated_previous = ""
         query, response = liveinfer()
+        frame_processing_time = time.time() - frame_start_time
         if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
             self.track_memory_snapshot(liveinfer, frame_idx, start_time + time.time() - frame_start_time)
-        # liveinfer.offload_kv_cache()
-
-        frame_processing_time = time.time() - frame_start_time
 
         # Check for OOM after liveinfer call
         if liveinfer.oom_occurred:
@@ -2144,10 +2189,7 @@ class EventDrivenConversationContext:
         self.total_model_forward_time += streaming_time
         self.total_generation_time += chunk_generation_time - kv_reload_time
         self.total_kv_reload_time += kv_reload_time
-        receiving_time = len(texts_generated_previous) / self.bandwidth_trace[frame_idx]
-        self.total_receiving_time += receiving_time
-        # the frame event includes the sending time and receiving time
-        frame_processing_time += receiving_time + self.transmission_times[frame_idx]
+        frame_processing_time += self.transmission_times[frame_idx]
 
         self.frame_processing_times.append(frame_processing_time)
 
@@ -2220,10 +2262,9 @@ class EventDrivenConversationContext:
         chunk_start = time.time()
         liveinfer.texts_generated_previous = ""
         query, response = liveinfer()
+        chunk_duration = time.time() - chunk_start
         if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
             self.track_memory_snapshot(liveinfer, frame_idx, start_time + time.time() - chunk_start)
-        # liveinfer.offload_kv_cache()
-        chunk_duration = time.time() - chunk_start
         
         # Check for OOM after liveinfer call
         if liveinfer.oom_occurred:
@@ -2240,10 +2281,6 @@ class EventDrivenConversationContext:
         
         self.total_generation_time += chunk_duration - liveinfer.timing_data.get('kv_reload_time', 0.0)
         self.total_kv_reload_time += liveinfer.timing_data.get('kv_reload_time', 0.0)
-        receiving_time = len(texts_generated_previous) / self.bandwidth_trace[frame_idx]
-        self.total_receiving_time += receiving_time
-        # the chunk event includes the receiving time, which affects the buffer increase time
-        chunk_duration += receiving_time
         self.frame_processing_times[-1] += chunk_duration
 
         # Reset pending flag so the scheduler can decide whether to queue another chunk
@@ -2302,7 +2339,6 @@ class EventDrivenConversationContext:
         kv_offload_time = self.total_kv_offload_time
         kv_reload_time = self.total_kv_reload_time
         total_sending_time = self.total_sending_time
-        total_receiving_time = self.total_receiving_time
         num_processed_frames = len(self.frame_processing_times)
 
         content_metrics = calculate_metrics(
@@ -2370,7 +2406,6 @@ class EventDrivenConversationContext:
             'kv_offload_time': kv_offload_time,
             'kv_reload_time': kv_reload_time,
             'total_sending_time': total_sending_time,
-            'total_receiving_time': total_receiving_time,
             'total_processing_time': total_processing_time,
             'response_time': response_time,
             'processing_span': self.processing_span,
@@ -3177,7 +3212,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         total_events = len(event_queue)
         while event_queue and event_queue[0][0] < processor_clock:
             event_time, priority, sequence_counter, payload = heapq.heappop(event_queue)
-            event_type, conversation_id, payload_data, _ = payload
+            event_type, conversation_id, payload_data = payload
 
             if event_type == 'prompt':
                 unprocessed_prompt_event = (event_time, priority, sequence_counter, payload)
@@ -3315,7 +3350,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
         assert len(event_queue) == total_events-1, f"event_queue: {len(event_queue)}, total_events: {total_events}"
             
-        event_type, conversation_id, payload_data, relative_time = payload
+        event_type, conversation_id, payload_data = payload
         context = contexts[conversation_id]
 
         # Skip event processing if OOM has occurred for this conversation
@@ -3339,13 +3374,12 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         if event_type == 'frame':
             # this is necessary to handle frames that arrive before the generation event is finished
             if shared_liveinfer.generation_state is not None or getattr(shared_liveinfer, 'generation_event_pending', False):
-                shared_liveinfer.pending_frame_events.append((event_time, priority, payload_data, relative_time))
+                shared_liveinfer.pending_frame_events.append((event_time, priority, payload_data))
                 # context.save_liveinfer_state(shared_liveinfer)
                 continue
 
         # make sure frame event has correct relative time
-        if relative_time is None:
-            relative_time = max(0.0, event_time - context.conversation_start_time)
+        relative_time = max(0.0, event_time - context.conversation_start_time)
         print("--------EVENT", event_type, event_time, processor_clock, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id[:12], "--------")
 
         if event_type == 'prompt':
@@ -3401,6 +3435,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     'generation_duration': max(0.0, total_duration)
                 })
                 # print(f"🔍 DEBUG: Created processor segment for {segment_label}: start={start_time:.2f}s, end={segment_end:.2f}s")
+            serve_completion_time = start_time + total_duration - Config.RTT/2
             processor_clock = start_time + total_duration
 
             if context.oom_occurred:
@@ -3421,7 +3456,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 buffer_state = onthefly_buffer_data[conversation_id]
                 response_idx = last_event.get('response_idx', 0)
                 
-                # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
                 update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred, is_queuing=False)
                 
                 is_last_chunk = last_event.get('is_last_chunk', False)
@@ -3469,7 +3503,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     crl_of_conversations[conversation_id] = 0
 
             if shared_liveinfer.generation_state is not None:
-                sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
+                sequence_counter = context.schedule_generation_event(event_queue, serve_completion_time, sequence_counter)
                 
 
             shared_liveinfer.generation_event_pending = context.generation_event_pending
@@ -3525,7 +3559,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 buffer_state = onthefly_buffer_data[conversation_id]
                 response_idx = last_event.get('response_idx', 0)
                 
-                # Advance to processor_clock as a 'chunk' event to capture prompt-to-chunk latency
                 update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred, is_queuing=False)
 
             # Add words to buffer (happens at chunk completion time)
@@ -3552,8 +3585,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 else:
                     # if finished, reset age of conversation
                     while shared_liveinfer.pending_frame_events:
-                        pending_time, pending_priority, pending_payload, pending_relative_time = shared_liveinfer.pending_frame_events.popleft()
-                        heapq.heappush(event_queue, (pending_time, pending_priority, sequence_counter, ('frame', conversation_id, pending_payload, pending_relative_time)))
+                        pending_time, pending_priority, pending_payload = shared_liveinfer.pending_frame_events.popleft()
+                        heapq.heappush(event_queue, (pending_time, pending_priority, sequence_counter, ('frame', conversation_id, pending_payload)))
                     sequence_counter += 1
                     # reset age of conversation
                     age_of_conversations[conversation_id] = 0
@@ -5153,7 +5186,6 @@ def create_aggregated_metrics_visualization(overall_summary, output_dir="timing_
         kv_reload_time = conversation_timing['kv_reload_time'] / frame_count
         total_processing_time = conversation_timing['total_processing_time'] / frame_count
         total_sending_time = conversation_timing['total_sending_time'] / frame_count
-        total_receiving_time = conversation_timing['total_receiving_time'] / frame_count
 
         visual_embedding_times.append(visual_per_frame*1000)
         model_forward_times.append(model_per_frame*1000)
@@ -5162,7 +5194,6 @@ def create_aggregated_metrics_visualization(overall_summary, output_dir="timing_
         kv_offload_times.append(kv_offload_time*1000)
         kv_reload_times.append(kv_reload_time*1000)
         total_sending_times.append(total_sending_time*1000)
-        total_receiving_times.append(total_receiving_time*1000)
 
     # Calculate means and standard deviations
     visual_embedding_mean = np.mean(visual_embedding_times) if visual_embedding_times else 0.0
@@ -5179,15 +5210,13 @@ def create_aggregated_metrics_visualization(overall_summary, output_dir="timing_
     kv_reload_std = np.std(kv_reload_times) if kv_reload_times else 0.0
     total_sending_mean = np.mean(total_sending_times) if total_sending_times else 0.0
     total_sending_std = np.std(total_sending_times) if total_sending_times else 0.0
-    total_receiving_mean = np.mean(total_receiving_times) if total_receiving_times else 0.0
-    total_receiving_std = np.std(total_receiving_times) if total_receiving_times else 0.0
 
     # Create grouped bars for frame timing metrics
-    x_positions = [0, 1, 2, 3, 4, 5, 6, 7]
-    values = [visual_embedding_mean, model_forward_mean, generation_mean, total_processing_mean, kv_offload_mean, kv_reload_mean, total_sending_mean, total_receiving_mean]
-    errors = [visual_embedding_std, model_forward_std, generation_std, total_processing_std, kv_offload_std, kv_reload_std, total_sending_std, total_receiving_std]
-    labels_timing = ['Prefilling', 'Scoring', 'Gen', 'Total', 'Offload', 'Reload', 'Send', 'Recv']
-    colors_timing = ['#ff9999', '#66b3ff', '#99ff99', '#ffcc99', '#9999ff', '#ff99ff', '#9999ff', '#ff99ff']
+    x_positions = [0, 1, 2, 3, 4, 5, 6]
+    values = [visual_embedding_mean, model_forward_mean, generation_mean, total_processing_mean, kv_offload_mean, kv_reload_mean, total_sending_mean]
+    errors = [visual_embedding_std, model_forward_std, generation_std, total_processing_std, kv_offload_std, kv_reload_std, total_sending_std]
+    labels_timing = ['Prefilling', 'Scoring', 'Gen', 'Total', 'Offload', 'Reload', 'Network']
+    colors_timing = ['#ff9999', '#66b3ff', '#99ff99', '#ffcc99', '#9999ff', '#ff99ff', '#9999ff']
     
     bars_timing = ax_timing.bar(x_positions, values, yerr=errors,
                                color=colors_timing, alpha=0.8, capsize=4, width=0.6,
