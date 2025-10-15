@@ -2080,7 +2080,7 @@ class EventDrivenConversationContext:
         query, response = liveinfer()
         if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
             self.track_memory_snapshot(liveinfer, frame_idx, start_time + time.time() - frame_start_time)
-        liveinfer.offload_kv_cache()
+        # liveinfer.offload_kv_cache()
 
         frame_processing_time = time.time() - frame_start_time
 
@@ -2110,7 +2110,7 @@ class EventDrivenConversationContext:
         self.total_visual_embedding_time += visual_embedding_time
         self.total_model_forward_time += streaming_time
         self.total_generation_time += chunk_generation_time - kv_reload_time
-        self.total_kv_offload_time += kv_offload_time
+        # self.total_kv_offload_time += kv_offload_time
         self.total_kv_reload_time += kv_reload_time
 
         self.frame_processing_times.append(frame_processing_time)
@@ -2188,7 +2188,7 @@ class EventDrivenConversationContext:
         query, response = liveinfer()
         if frame_idx % Config.MEMORY_CHECK_INTERVAL == 0:
             self.track_memory_snapshot(liveinfer, frame_idx, start_time + time.time() - chunk_start)
-        liveinfer.offload_kv_cache()
+        # liveinfer.offload_kv_cache()
         chunk_duration = time.time() - chunk_start
         
         # Check for OOM after liveinfer call
@@ -2204,7 +2204,7 @@ class EventDrivenConversationContext:
         
         self.total_generation_time += chunk_duration - liveinfer.timing_data.get('kv_reload_time', 0.0)
         self.total_kv_reload_time += liveinfer.timing_data.get('kv_reload_time', 0.0)
-        self.total_kv_offload_time += liveinfer.timing_data.get('kv_offload_time', 0.0)
+        # self.total_kv_offload_time += liveinfer.timing_data.get('kv_offload_time', 0.0)
         self.frame_processing_times[-1] += chunk_duration
 
         # Reset pending flag so the scheduler can decide whether to queue another chunk
@@ -3281,9 +3281,15 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         if context.oom_occurred:
             continue
 
+        # switch conversation
         if active_conversation_id != conversation_id:
-            # if active_conversation_id is not None:
-            #     contexts[active_conversation_id].save_liveinfer_state(shared_liveinfer)
+            if active_conversation_id is not None:
+                if contexts[active_conversation_id].frame_processing_times:
+                    shared_liveinfer.offload_kv_cache()
+                    kv_offload_time = shared_liveinfer.timing_data.get('kv_offload_time', 0.0)
+                    contexts[active_conversation_id].total_kv_offload_time += kv_offload_time
+                    contexts[active_conversation_id].frame_processing_times[-1] += kv_offload_time
+                contexts[active_conversation_id].save_liveinfer_state(shared_liveinfer)
             context.ensure_liveinfer_loaded(shared_liveinfer)
             shared_liveinfer.generation_event_pending = context.generation_event_pending
             active_conversation_id = conversation_id
@@ -3293,7 +3299,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             # this is necessary to handle frames that arrive before the generation event is finished
             if shared_liveinfer.generation_state is not None or getattr(shared_liveinfer, 'generation_event_pending', False):
                 shared_liveinfer.pending_frame_events.append((event_time, priority, payload_data))
-                context.save_liveinfer_state(shared_liveinfer)
+                # context.save_liveinfer_state(shared_liveinfer)
                 continue
 
         relative_time = max(0.0, event_time - context.conversation_start_time)
@@ -3319,7 +3325,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             
             context.handle_prompt(shared_liveinfer, relative_time, payload_data)
             shared_liveinfer.generation_event_pending = context.generation_event_pending
-            context.save_liveinfer_state(shared_liveinfer)
+            # context.save_liveinfer_state(shared_liveinfer)
             continue
 
         # now the event is at least frame or generation
@@ -3424,7 +3430,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 
 
             shared_liveinfer.generation_event_pending = context.generation_event_pending
-            context.save_liveinfer_state(shared_liveinfer)
+            # context.save_liveinfer_state(shared_liveinfer)
 
             if scheduled_event:
                 valid_scheduling = word_count > 0
@@ -3520,7 +3526,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 sequence_counter = context.schedule_generation_event(event_queue, processor_clock, sequence_counter)
 
             shared_liveinfer.generation_event_pending = context.generation_event_pending
-            context.save_liveinfer_state(shared_liveinfer)
+            # context.save_liveinfer_state(shared_liveinfer)
 
             if scheduled_event:
                 valid_scheduling = word_count > 0
@@ -4018,9 +4024,6 @@ class SimpleLiveInfer:
             inputs_embeds = self.model.get_input_embeddings()(self.last_ids)
             next_inputs_cpu = inputs_embeds.detach().cpu()
 
-        # Ensure KV cache resides on CPU while idle
-        # self.past_key_values = self._offload_kv_cache(self.past_key_values)
-
         self.generation_state = {
             'video_time': video_time,
             'formatted_query': formatted_query,
@@ -4085,9 +4088,6 @@ class SimpleLiveInfer:
                 state['next_inputs_embeds_cpu'] = next_inputs_embeds.detach().cpu()
             else:
                 state['next_inputs_embeds_cpu'] = None
-
-            # state['past_key_values_cpu'] = self._offload_kv_cache(past_key_values)
-            # self.past_key_values = state['past_key_values_cpu']
 
             if finished or state['tokens_generated'] >= Config.INPLACE_OUTPUT_SIZE:
                 state['finished'] = True
