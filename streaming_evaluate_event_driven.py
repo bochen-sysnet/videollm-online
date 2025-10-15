@@ -59,7 +59,7 @@ class Config:
     
     # Asynchronous memory transfers
     # set to False as it is working better for now
-    ASYNC_KV_OFFLOAD = False              # Use asynchronous KV cache offloading
+    ASYNC_KV_OFFLOAD = True              # Use asynchronous KV cache offloading
     
     # Visualization
     OUTPUT_DIR = "timing_plots"
