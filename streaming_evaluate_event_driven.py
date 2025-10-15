@@ -108,9 +108,9 @@ class Config:
     # configurable parameters
     SCHEDULING_METHOD = 'lowest_buffer' # 'round_robin' or 'random' or 'lowest_buffer' 
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
-    GENERATION_CHUNK_SIZE = 2      # chunk size for generation
+    GENERATION_CHUNK_SIZE = 8      # chunk size for generation
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
-    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 600            # Max frames for evaluation (use full video)
     DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
 
@@ -2168,7 +2168,7 @@ class EventDrivenConversationContext:
             'generation_time': generation_time
         }
 
-    def handle_generation(self, liveinfer, relative_time, start_time):
+    def handle_generation(self, liveinfer, start_time):
         video_time = self.frame_timing_data[-1]['video_time']
         
         # Track memory during generation chunks (use video_time as pseudo frame index for tracking)
@@ -3446,7 +3446,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 update_buffer_to_time(buffer_state, event_time, listening_speed, conversation_id, context.oom_occurred)
             start_time = max(processor_clock, event_time)
             
-            segment_info = context.handle_generation(shared_liveinfer, relative_time, start_time)
+            segment_info = context.handle_generation(shared_liveinfer, start_time)
             generation_duration = segment_info.get('generation_time', 0.0)
             segment_label = context.conversation_id
 
