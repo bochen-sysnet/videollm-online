@@ -29,6 +29,7 @@ from collections import defaultdict
 import cv2
 from transformers.cache_utils import DynamicCache
 import pandas as pd
+import av
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -108,9 +109,9 @@ class Config:
     # configurable parameters
     SCHEDULING_METHOD = 'lowest_buffer' # 'round_robin' or 'random' or 'lowest_buffer' 
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
-    GENERATION_CHUNK_SIZE = 8      # chunk size for generation
+    GENERATION_CHUNK_SIZE = 2      # chunk size for generation
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
-    MAX_EVAL_FRAMES = 600            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
     DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
 
@@ -236,6 +237,15 @@ def calculate_frame_diff_features(current_frame, prev_frame):
         'optical_flow_mag': optical_flow_mag,
         'motion_energy': motion_energy,
     }
+
+def get_frame_count_ffprobe(path):
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-count_frames", "-show_entries", "stream=nb_read_frames",
+        "-of", "default=nokey=1:noprint_wrappers=1", path
+    ]
+    out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
+    return int(out.strip())
 
 def create_frame_features_vs_response_length_visualization(frame_features_data, output_dir=Config.OUTPUT_DIR, data_source='goalstep'):
     """
@@ -509,6 +519,9 @@ def trace2bwlist(N=4000, file_path='../network_traces/curr_httpgetmt.csv'):
 
     # Extract 4000 consecutive rows starting from the selected index
     consecutive_bw = df_filtered['bytes_sec'].iloc[start_index:start_index + N]
+
+    # to list
+    consecutive_bw = consecutive_bw.tolist()
 
     return consecutive_bw
 
@@ -1860,6 +1873,22 @@ class EventDrivenConversationContext:
         # Only keep the frames we need for testing
         self.video_frames = video_frames
         print(f"📹 Loaded all {self.test_frames} frames for {self.conversation_id[0:12]} to CPU: {self.video_frames.shape} ({self.video_frames.device})")
+
+        # Load bandwidth trace with the same length as the video frames
+        self.bandwidth_trace = trace2bwlist(self.test_frames)
+
+        # calculate the size of video file in bytes
+        self.video_size = os.path.getsize(video_path)
+
+        # probe the number of frames in the video path
+        self.frame_count = get_frame_count_ffprobe(video_path)
+
+        # calculate the size of each video frame in bytes
+        self.video_frame_size = self.video_size / self.frame_count
+
+        # calculate the transmission time of each video frame
+        self.transmission_times = [self.video_frame_size / self.bandwidth_trace[i] for i in range(self.test_frames)]
+
 
         self.total_visual_embedding_time = 0.0
         self.total_model_forward_time = 0.0
