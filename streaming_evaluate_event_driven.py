@@ -2567,6 +2567,8 @@ class LiveBufferVisualizer:
                                                         label='Processing Delay', alpha=0.9)
         self.queuing_delay_line, = self.ax_delays.plot([], [], color='#17becf', linewidth=2, 
                                                      label='Queuing Delay', alpha=0.9)
+        self.networking_delay_line, = self.ax_delays.plot([], [], color='#1f77b4', linewidth=2, 
+                                                     label='Networking Delay', alpha=0.9)
         
         for cid in self.conversation_ids:
             color = self.colors[cid]
@@ -2639,7 +2641,8 @@ class LiveBufferVisualizer:
         self.delay_times = []
         self.avg_processing_delays = []
         self.avg_queuing_delays = []
-        
+        self.avg_networking_delays = []
+
         plt.tight_layout()
         
         # Save initial empty plot
@@ -2736,9 +2739,10 @@ class LiveBufferVisualizer:
             self.delay_times.append(delay_data['times'])
             self.avg_processing_delays.append(delay_data['avg_processing_delays'])
             self.avg_queuing_delays.append(delay_data['avg_queuing_delays'])
-            
+            self.avg_networking_delays.append(delay_data['avg_networking_delays'])
             self.processing_delay_line.set_data(self.delay_times, self.avg_processing_delays)
             self.queuing_delay_line.set_data(self.delay_times, self.avg_queuing_delays)
+            self.networking_delay_line.set_data(self.delay_times, self.avg_networking_delays)
             max_time = max(max_time, max(self.delay_times))
         
         # Update axis limits
@@ -2798,6 +2802,8 @@ class LiveBufferVisualizer:
             max_delay = max(max_delay, max(self.avg_processing_delays))
         if self.avg_queuing_delays:
             max_delay = max(max_delay, max(self.avg_queuing_delays))
+        if self.avg_networking_delays:
+            max_delay = max(max_delay, max(self.avg_networking_delays))
         if max_delay > 0:
             self.ax_delays.set_ylim(0, max_delay * 1.1)
         
@@ -2998,6 +3004,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             'total_processing_delay': 0.0,
             'queuing_delays': [0.0],
             'total_queuing_delay': 0.0,
+            'networking_delays': [0.0],
+            'total_networking_delay': 0.0,
         }
 
     # Initialize live visualization
@@ -3011,7 +3019,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
     active_conversation_id = None
     
     # Helper functions for on-the-fly buffer tracking (following simulate_text_buffer_trajectories logic)
-    def update_buffer_to_time(buffer_state, target_time, speed, conversation_id, oom_occurred=False, is_queuing=True):
+    def update_buffer_to_time(buffer_state, target_time, speed, conversation_id, oom_occurred=False, status=0):
         """Advance buffer simulation to target_time, consuming buffer at speed and accumulating rebuffering
         
         Args:
@@ -3020,6 +3028,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
             speed: Consumption speed (words/second)
             conversation_id: ID of the conversation
             oom_occurred: Whether OOM has occurred for this conversation
+            status: 0 for queuing, 1 for processing, 2 for networking
         """
         # Skip buffer updates if OOM has occurred
         if oom_occurred:
@@ -3029,6 +3038,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         rebuffer_total = buffer_state['total_rebuffer']
         processing_delay_total = buffer_state['total_processing_delay']
         queuing_delay_total = buffer_state['total_queuing_delay']
+        networking_delay_total = buffer_state['total_networking_delay']
         pending_responses = buffer_state['pending_responses']
         # print("update",conversation_id[:12],pending_responses,buffer_state['unanswered_prompts'])
         # if 'goalstep_4c6' in conversation_id:
@@ -3045,12 +3055,13 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 if buffer_state['unanswered_prompts'] > 0 and target_time < buffer_state['last_rebuffering_start']:
                     diff_rebuffering = buffer_state['last_rebuffering_start'] - target_time
                     rebuffer_total += diff_rebuffering
-                    assert is_queuing, f"is_queuing: {is_queuing}"
+                    assert status == 0, f"status: {status}"
                     queuing_delay_total += diff_rebuffering
                     buffer_state['last_rebuffering_start'] = target_time
             buffer_state['rebuffer_values'].append(rebuffer_total)
             buffer_state['processing_delays'].append(processing_delay_total)
             buffer_state['queuing_delays'].append(queuing_delay_total)
+            buffer_state['networking_delays'].append(networking_delay_total)
             return
 
         last_rebuffering_start = target_time # means no rebuffering
@@ -3071,10 +3082,14 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
                     if buffer_state['unanswered_prompts'] > 0:
                         rebuffer_total += time_to_empty
-                        if is_queuing:
+                        if status == 0:
                             queuing_delay_total += time_to_empty
-                        else:
+                        elif status == 1:
                             processing_delay_total += time_to_empty
+                        elif status == 2:
+                            networking_delay_total += time_to_empty
+                        else:
+                            raise ValueError(f"Invalid status: {status}")
                     
                     buffer_state['times'].append(empty_time)
                     buffer_state['values'].append(current_buffer)
@@ -3082,6 +3097,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     buffer_state['rebuffer_values'].append(rebuffer_total)
                     buffer_state['processing_delays'].append(processing_delay_total)
                     buffer_state['queuing_delays'].append(queuing_delay_total)
+                    buffer_state['networking_delays'].append(networking_delay_total)
                     continue
                 
                 # Buffer doesn't empty - consume and advance to target
@@ -3091,10 +3107,14 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
                 if buffer_state['unanswered_prompts'] > 0:
                     rebuffer_total += remaining
-                    if is_queuing:
+                    if status == 0:
                         queuing_delay_total += remaining
-                    else:
+                    elif status == 1:
                         processing_delay_total += remaining
+                    elif status == 2:
+                        networking_delay_total += remaining
+                    else:
+                        raise ValueError(f"Invalid status: {status}")
 
                 buffer_state['times'].append(target_time)
                 buffer_state['values'].append(current_buffer)
@@ -3102,6 +3122,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 buffer_state['rebuffer_values'].append(rebuffer_total)
                 buffer_state['processing_delays'].append(processing_delay_total)
                 buffer_state['queuing_delays'].append(queuing_delay_total)
+                buffer_state['networking_delays'].append(networking_delay_total)
                 break
             else:
                 if last_rebuffering_start is None:
@@ -3109,16 +3130,24 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 # Buffer is empty - accumulate rebuffering if there are pending prompts
                 if len(pending_responses) > 0 and current_buffer <= 1e-9:
                     rebuffer_total += remaining
-                    if is_queuing:
+                    if status == 0:
                         queuing_delay_total += remaining
-                    else:
+                    elif status == 1:
                         processing_delay_total += remaining
+                    elif status == 2:
+                        networking_delay_total += remaining
+                    else:
+                        raise ValueError(f"Invalid status: {status}")
                 elif buffer_state['unanswered_prompts'] > 0:
                     rebuffer_total += remaining
-                    if is_queuing:
+                    if status == 0:
                         queuing_delay_total += remaining
-                    else:
+                    elif status == 1:
                         processing_delay_total += remaining
+                    elif status == 2:
+                        networking_delay_total += remaining
+                    else:
+                        raise ValueError(f"Invalid status: {status}")
                 current_time = target_time
                 
                 buffer_state['times'].append(target_time)
@@ -3127,6 +3156,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 buffer_state['rebuffer_values'].append(rebuffer_total)
                 buffer_state['processing_delays'].append(processing_delay_total)
                 buffer_state['queuing_delays'].append(queuing_delay_total)
+                buffer_state['networking_delays'].append(networking_delay_total)
                 break
         
         buffer_state['last_update_time'] = current_time
@@ -3135,7 +3165,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         buffer_state['total_processing_delay'] = processing_delay_total
         buffer_state['total_queuing_delay'] = queuing_delay_total
         buffer_state['last_rebuffering_start'] = last_rebuffering_start
-
+        buffer_state['total_networking_delay'] = networking_delay_total
 
     scheduling_selected_lowest_buffer = [0]
     scheduling_selected_increment = [0]
@@ -3171,33 +3201,31 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 'erl': [erl_of_conversations[cid]],
             }
         
-        # Prepare delay data for live visualization (averaged across conversations)
-        delay_data = {
-            'times': [],
-            'avg_processing_delays': [],
-            'avg_queuing_delays': []
-        }
-        
         # Collect delay data from all conversations
         all_processing_delays = []
         all_queuing_delays = []
-        
+        all_networking_delays = []
+
         for cid, buffer_state in onthefly_buffer_data.items():
             if 'total_processing_delay' in buffer_state and 'total_queuing_delay' in buffer_state:
                 processing_delays = buffer_state['total_processing_delay']
                 queuing_delays = buffer_state['total_queuing_delay']
-                
+                networking_delays = buffer_state['total_networking_delay']
+
                 # Use rebuffer_times as the time base for delays
                 all_processing_delays.append(processing_delays)
                 all_queuing_delays.append(queuing_delays)
-        
+                all_networking_delays.append(networking_delays)
+
         avg_processing = sum(all_processing_delays) / len(all_processing_delays)
         avg_queuing = sum(all_queuing_delays) / len(all_queuing_delays)
-        
+        avg_networking = sum(all_networking_delays) / len(all_networking_delays)
+
         delay_data = {
             'times': processor_clock,
             'avg_processing_delays': avg_processing,
-            'avg_queuing_delays': avg_queuing
+            'avg_queuing_delays': avg_queuing,
+            'avg_networking_delays': avg_networking
         }
         
         live_viz.update(onthefly_buffer_data, current_time=processor_clock, scheduling_data=scheduling_data, age_erl_crl_data=age_erl_crl_data, delay_data=delay_data)
@@ -3435,6 +3463,8 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                     'generation_duration': max(0.0, total_duration)
                 })
                 # print(f"🔍 DEBUG: Created processor segment for {segment_label}: start={start_time:.2f}s, end={segment_end:.2f}s")
+            transmission_complete_time = start_time + context.transmission_times[frame_idx]
+            update_buffer_to_time(buffer_state, transmission_complete_time, listening_speed, conversation_id, context.oom_occurred, status=2)
             serve_completion_time = start_time + total_duration - Config.RTT/2
             processor_clock = start_time + total_duration
 
@@ -3456,7 +3486,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 buffer_state = onthefly_buffer_data[conversation_id]
                 response_idx = last_event.get('response_idx', 0)
                 
-                update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred, is_queuing=False)
+                update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred, status=1)
                 
                 is_last_chunk = last_event.get('is_last_chunk', False)
                 is_first_chunk = last_event.get('is_first_chunk', False)
@@ -3559,7 +3589,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 buffer_state = onthefly_buffer_data[conversation_id]
                 response_idx = last_event.get('response_idx', 0)
                 
-                update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred, is_queuing=False)
+                update_buffer_to_time(buffer_state, processor_clock, listening_speed, conversation_id, context.oom_occurred, status=1)
 
             # Add words to buffer (happens at chunk completion time)
             if not context.oom_occurred:
@@ -5081,6 +5111,7 @@ def create_aggregated_metrics_visualization(overall_summary, output_dir="timing_
                 'total_rebuffer': state['total_rebuffer'],
                 'processing_delays': state['processing_delays'],
                 'queuing_delays': state['queuing_delays'],
+                'networking_delays': state['networking_delays'],
             },
             'conversation_id': cid
         }
@@ -5233,6 +5264,51 @@ def create_aggregated_metrics_visualization(overall_summary, output_dir="timing_
         ax_timing.text(i, val + err + 0.01, f'{val:.1f}±{err:.1f}', 
                       ha='center', va='bottom', fontsize=7, fontweight='bold')
     
+    # 2. Time Metrics - Rebuffering, Processing, Queuing, and Latency (top-right)
+    ax2 = axes[0]
+    
+    # Calculate delay statistics from buffer_data
+    processing_delays = []
+    queuing_delays = []
+    networking_delays = []
+    if buffer_data:
+        for cid, conversation_buffer in buffer_data.items():
+            listening_traj = conversation_buffer.get('listening', {})
+            if 'processing_delays' in listening_traj and listening_traj['processing_delays']:
+                processing_delays.append(listening_traj['processing_delays'][-1])
+            if 'queuing_delays' in listening_traj and listening_traj['queuing_delays']:
+                queuing_delays.append(listening_traj['queuing_delays'][-1])
+            if 'networking_delays' in listening_traj and listening_traj['networking_delays']:
+                networking_delays.append(listening_traj['networking_delays'][-1])
+    processing_mean = np.mean(processing_delays) if processing_delays else 0.0
+    processing_std = np.std(processing_delays) if processing_delays else 0.0
+    queuing_mean = np.mean(queuing_delays) if queuing_delays else 0.0
+    queuing_std = np.std(queuing_delays) if queuing_delays else 0.0
+    networking_mean = np.mean(networking_delays) if networking_delays else 0.0
+    networking_std = np.std(networking_delays) if networking_delays else 0.0
+
+    # Create grouped bars for latency, rebuffering, processing, and queuing delays
+    x_positions = [0, 1, 2, 3, 4]
+    values = [latency_mean, listening_rebuffer_mean, processing_mean, queuing_mean, networking_mean]
+    errors = [latency_std, listening_rebuffer_std, processing_std, queuing_std, networking_std]
+    labels_delays = ['TTFT', 'Rebuffering', 'Processing', 'Queuing', 'Networking']
+    colors_delays = [colors[3], colors[1], '#e377c2', '#17becf', '#1f77b4']
+    
+    bars2 = ax2.bar(x_positions, values, yerr=errors,
+                    color=colors_delays, alpha=0.8, capsize=4, width=0.6,
+                    edgecolor='black', linewidth=0.5)
+    ax2.set_ylabel('Time (s)')
+    ax2.set_xticks(x_positions)
+    ax2.set_xticklabels(labels_delays)
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    
+    # Add value labels
+    for i, (val, err) in enumerate(zip(values, errors)):
+        ax2.text(i, val + err + 0.05, f'{val:.2f}±{err:.2f}', 
+                ha='center', va='bottom', fontsize=8, fontweight='bold')
+    
     # 4. VLM Perplexity with GT reference (4th position)
     ax1 = axes[4]
     bars1 = ax1.bar([0], [vlm_ppl_mean], yerr=[vlm_ppl_std], 
@@ -5251,47 +5327,6 @@ def create_aggregated_metrics_visualization(overall_summary, output_dir="timing_
     # Add value labels
     ax1.text(0, vlm_ppl_mean + vlm_ppl_std + 0.2, f'{vlm_ppl_mean:.2f}±{vlm_ppl_std:.2f}', 
              ha='center', va='bottom', fontsize=9, fontweight='bold')
-    
-    # 2. Time Metrics - Rebuffering, Processing, Queuing, and Latency (top-right)
-    ax2 = axes[0]
-    
-    # Calculate delay statistics from buffer_data
-    processing_delays = []
-    queuing_delays = []
-    if buffer_data:
-        for cid, conversation_buffer in buffer_data.items():
-            listening_traj = conversation_buffer.get('listening', {})
-            if 'processing_delays' in listening_traj and listening_traj['processing_delays']:
-                processing_delays.append(listening_traj['processing_delays'][-1])
-            if 'queuing_delays' in listening_traj and listening_traj['queuing_delays']:
-                queuing_delays.append(listening_traj['queuing_delays'][-1])
-    
-    processing_mean = np.mean(processing_delays) if processing_delays else 0.0
-    processing_std = np.std(processing_delays) if processing_delays else 0.0
-    queuing_mean = np.mean(queuing_delays) if queuing_delays else 0.0
-    queuing_std = np.std(queuing_delays) if queuing_delays else 0.0
-    
-    # Create grouped bars for latency, rebuffering, processing, and queuing delays
-    x_positions = [0, 1, 2, 3]
-    values = [latency_mean, listening_rebuffer_mean, processing_mean, queuing_mean]
-    errors = [latency_std, listening_rebuffer_std, processing_std, queuing_std]
-    labels_delays = ['Latency', 'Rebuffering', 'Processing', 'Queuing']
-    colors_delays = [colors[3], colors[1], '#e377c2', '#17becf']
-    
-    bars2 = ax2.bar(x_positions, values, yerr=errors,
-                    color=colors_delays, alpha=0.8, capsize=4, width=0.6,
-                    edgecolor='black', linewidth=0.5)
-    ax2.set_ylabel('Time (s)')
-    ax2.set_xticks(x_positions)
-    ax2.set_xticklabels(labels_delays)
-    ax2.grid(True, alpha=0.3, axis='y')
-    ax2.spines['top'].set_visible(False)
-    ax2.spines['right'].set_visible(False)
-    
-    # Add value labels
-    for i, (val, err) in enumerate(zip(values, errors)):
-        ax2.text(i, val + err + 0.05, f'{val:.2f}±{err:.2f}', 
-                ha='center', va='bottom', fontsize=8, fontweight='bold')
     
     # 5. Memory Usage Analysis (5th position)
     ax_memory = axes[3]
