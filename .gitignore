@@ -50,7 +50,7 @@ env/
 !demo/assets/*.json
 
 # Timing plots (generated files)
-/timing_plots/
+/figures/
 
 # Cache and temporary files
 *.cache
