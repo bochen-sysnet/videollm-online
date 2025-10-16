@@ -4483,7 +4483,7 @@ def main():
         # create_memory_visualization(overall_summary, data_source=data_source)
         
         # Create aggregated metrics visualization
-        print(f"\n📊 Creating aggregated metrics visualization...")
+        # print(f"\n📊 Creating aggregated metrics visualization...")
         create_aggregated_metrics_visualization(overall_summary, data_source=data_source)
         
         # Create time per token analysis (skipped for speed)
