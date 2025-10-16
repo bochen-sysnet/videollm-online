@@ -63,7 +63,7 @@ class Config:
     ASYNC_KV_OFFLOAD = True              # Use asynchronous KV cache offloading
     
     # Visualization
-    OUTPUT_DIR = "timing_plots"
+    OUTPUT_DIR = "figures"
     PLOT_DPI = 300
     PLOT_FIGSIZE_LARGE = (15, 10)
     PLOT_FIGSIZE_MEDIUM = (15, 6)
@@ -97,9 +97,8 @@ class Config:
     LENGTH_FACTOR_MAX = 2.0
     
     # Streaming thresholds for different dataset types
-    STREAMING_THRESHOLD_GOALSTEP = 0.725  # Threshold for goalstep dataset (works well with user queries)
-    STREAMING_THRESHOLD_NARRATION = 0.725  # Threshold for narration dataset (testing higher threshold)
-
+    STREAMING_THRESHOLD = 0.725  # Threshold for goalstep dataset (works well with user queries)
+    
     # Scheduling
     RL_WEIGHT = 0 # discount factor for remaining length compared to the age
     EWMA_FACTOR = 0.9
@@ -109,6 +108,7 @@ class Config:
     RTT = 0.04
 
     # configurable parameters
+    DATA_SOURCE = 'goalstep' # 'goalstep' or 'narration'
     SCHEDULING_METHOD = 'lowest_buffer' # 'round_robin' or 'random' or 'lowest_buffer' 
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
     GENERATION_CHUNK_SIZE = 2      # chunk size for generation
@@ -686,9 +686,9 @@ class FilteredEgo4DRefinedNarrationStream:
                                 "content": turn['content']
                             })
             
-            print(f"📊 Loaded goalstep data: {len(self.data)} videos")
-            print(f"📊 Extracted {len(all_user_prompts)} unique user prompts from goalstep conversations")
-            print(f"📊 Created normalized conversations with first user prompt at time 0")
+            # print(f"📊 Loaded goalstep data: {len(self.data)} videos")
+            # print(f"📊 Extracted {len(all_user_prompts)} unique user prompts from goalstep conversations")
+            # print(f"📊 Created normalized conversations with first user prompt at time 0")
         else:
             raise ValueError(f"Unknown data source: {data_source}")
         
@@ -704,7 +704,7 @@ class FilteredEgo4DRefinedNarrationStream:
             else:
                 missing_videos.append(video_uid)
         
-        print(f"📊 Dataset filtering: {len(self.filtered_video_uids)}/{total_videos} videos have available files")
+        # print(f"📊 Dataset filtering: {len(self.filtered_video_uids)}/{total_videos} videos have available files")
         print(f"📊 Using {len(self.filtered_video_uids)} videos with available video files")
         
         # Create conversation-level dataset instead of video-level
@@ -1922,7 +1922,7 @@ class EventDrivenConversationContext:
         
         # Only keep the frames we need for testing
         self.video_frames = video_frames
-        print(f"📹 Loaded all {self.test_frames} frames for {self.conversation_id[0:12]} to CPU: {self.video_frames.shape} ({self.video_frames.device})")
+        # print(f"📹 Loaded all {self.test_frames} frames for {self.conversation_id[0:12]} to CPU: {self.video_frames.shape} ({self.video_frames.device})")
 
         # Load bandwidth trace with the same length as the video frames
         self.bandwidth_trace = trace2bwlist(self.test_frames)
@@ -2075,8 +2075,8 @@ class EventDrivenConversationContext:
             if prompt_time <= prompt_cutoff:
                 heapq.heappush(event_queue, (self.conversation_start_time + max(0.0, prompt_time), 0, sequence_counter, ('prompt', self.conversation_id, prompt_content)))
                 sequence_counter += 1
-            else:
-                print(f"🔕 Skipping prompt at {prompt_time:.2f}s for {self.conversation_id} (beyond frame budget)")
+            # else:
+            #     print(f"🔕 Skipping prompt at {prompt_time:.2f}s for {self.conversation_id} (beyond frame budget)")
 
         for frame_idx in range(self.test_frames):
             frame_time = self.conversation_start_time + frame_idx / Config.FRAME_FPS
@@ -2114,7 +2114,7 @@ class EventDrivenConversationContext:
         })
 
     def schedule_generation_event(self, event_queue, event_time, sequence_counter):
-        print("schedule_generation_event", self.conversation_id, event_time)
+        # print("schedule_generation_event", self.conversation_id, event_time)
         if self.generation_event_pending:
             return sequence_counter
         heapq.heappush(event_queue, (event_time, 1, sequence_counter, ('generation', self.conversation_id, None)))
@@ -2906,7 +2906,7 @@ class LiveBufferVisualizer:
         # Save final high-quality version
         self.fig.savefig(self.output_path, dpi=Config.PLOT_DPI, bbox_inches='tight')
         plt.close(self.fig)
-        print(f"✅ Final live visualization saved: {self.output_path}")
+        # print(f"✅ Final live visualization saved: {self.output_path}")
     
 def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0', num_conversations=3, random_selection=False, specific_indices=None, data_source='goalstep', custom_threshold=None, conversation_start_times=None):
     """Evaluate multiple conversations using a shared event-driven LiveInfer instance."""
@@ -3251,10 +3251,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 buffer_state = onthefly_buffer_data[conversation_id]
                 buffer_level = buffer_state['buffer']
                 if Config.SCHEDULING_METHOD == 'round_robin' or Config.SCHEDULING_METHOD == 'random':
-                    if conversation_id not in cached_event_by_conversation or event_type == 'generation':
-                        if conversation_id in cached_event_by_conversation:
-                            event_time0, priority0, sequence_counter0, payload0, buffer_level0 = cached_event_by_conversation[conversation_id]
-                            unschedulable_events.append((event_time0, priority0, sequence_counter0, payload0))
+                    if conversation_id not in cached_event_by_conversation:
                         cached_event_by_conversation[conversation_id] = (event_time, priority, sequence_counter, payload, buffer_level)
                     else:
                         unschedulable_events.append((event_time, priority, sequence_counter, payload))
@@ -3408,7 +3405,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
 
         # make sure frame event has correct relative time
         relative_time = max(0.0, event_time - context.conversation_start_time)
-        print("--------EVENT", event_type, event_time, processor_clock, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id[:12], "--------")
+        # print("--------EVENT", event_type, event_time, processor_clock, shared_liveinfer.generation_state is not None, getattr(shared_liveinfer, 'generation_event_pending', False), active_conversation_id[:12], "--------")
 
         if event_type == 'prompt':
             processor_clock = max(processor_clock, event_time)
@@ -3685,19 +3682,11 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
         'selected_ending': scheduling_selected_ending
     }
 
-    print(f"🎯 PERFORMANCE SUMMARY:")
-    print(f"   • Conversations Processed: {len(results)}")
-    print(f"   • Total Frames: {sum(r['num_frames'] for r in results)}")
-    print(f"   • Total Generated Responses: {sum(len(r['generated_turns']) for r in results)}")
-    print(f"   • Total Ground Truth Responses: {sum(r['ground_truth_turns'] for r in results)}")
-
-    oom_conversations = [r for r in results if r.get('oom_occurred', False)]
-    if oom_conversations:
-        print(f"\n🚨 OOM Summary: {len(oom_conversations)}/{len(results)} conversations experienced OOM")
-        for result in oom_conversations:
-            print(f"   • {result['conversation_id']}: OOM at frame {result.get('oom_frame_idx', 'unknown')}")
-    else:
-        print(f"\n✅ No OOM occurrences in {len(results)} conversations")
+    # print(f"🎯 PERFORMANCE SUMMARY:")
+    # print(f"   • Conversations Processed: {len(results)}")
+    # print(f"   • Total Frames: {sum(r['num_frames'] for r in results)}")
+    # print(f"   • Total Generated Responses: {sum(len(r['generated_turns']) for r in results)}")
+    # print(f"   • Total Ground Truth Responses: {sum(r['ground_truth_turns'] for r in results)}")
 
     overall_summary = {
         'results': results,
@@ -3731,16 +3720,7 @@ class SimpleLiveInfer:
         self.system_prompt = ""  # Will be set dynamically based on dataset
         self.inplace_output_ids = torch.zeros(1, Config.INPLACE_OUTPUT_SIZE, device=device, dtype=torch.long)
         # Use custom threshold if provided, otherwise use dataset-specific thresholds
-        if custom_threshold is not None:
-            self.frame_token_interval_threshold = custom_threshold
-            print(f"🎯 Using custom threshold: {self.frame_token_interval_threshold}")
-        elif hasattr(dataset, 'data_source') and dataset.data_source == 'narration':
-            self.frame_token_interval_threshold = Config.STREAMING_THRESHOLD_NARRATION
-            print(f"🎯 Using narration threshold: {self.frame_token_interval_threshold}")
-        else:
-            # Default to goalstep threshold for goalstep and any other dataset types
-            self.frame_token_interval_threshold = Config.STREAMING_THRESHOLD_GOALSTEP
-            print(f"🎯 Using goalstep threshold: {self.frame_token_interval_threshold}")
+        self.frame_token_interval_threshold = Config.STREAMING_THRESHOLD
         self.eos_token_id = model.config.eos_token_id
         self._start_ids = tokenizer.apply_chat_template([{'role': 'system', 'content': self.system_prompt}], add_stream_prompt=True, return_tensors='pt').to(device)
         self._added_stream_prompt_ids = tokenizer.apply_chat_template([{}], add_stream_prompt=True, return_tensors='pt').to(device)
@@ -4391,7 +4371,7 @@ class SimpleLiveInfer:
 def main():
     
     # Extract custom arguments from command line args
-    data_source = 'narration'  # default
+    data_source = Config.DATA_SOURCE  # default
     num_videos = Config.DEFAULT_NUM_VIDEOS
     custom_start_times = None
 
@@ -4413,31 +4393,6 @@ def main():
                 print(f"⚠️  Invalid --num_videos value '{value}', falling back to {num_videos}")
             sys.argv.pop(idx)
             sys.argv.pop(idx)
-
-    if '--start_times' in sys.argv:
-        idx = sys.argv.index('--start_times')
-        if idx + 1 < len(sys.argv):
-            raw_value = sys.argv[idx + 1]
-            sys.argv.pop(idx)
-            sys.argv.pop(idx)
-
-            if raw_value.lower() == 'random':
-                custom_start_times = 'random'
-            else:
-                start_values = []
-                for part in raw_value.split(','):
-                    part = part.strip()
-                    if not part:
-                        continue
-                    try:
-                        start_values.append(float(part))
-                    except ValueError:
-                        print(f"⚠️  Ignoring invalid start time '{part}' in --start_times")
-                if start_values:
-                    custom_start_times = start_values
-                else:
-                    print("⚠️  No valid values found in --start_times; using defaults")
-
     
     # Parse the main args
     args = parse_args()
@@ -4458,16 +4413,6 @@ def main():
     print(f"🔧 Device: {device}")
     print(f"🤖 Model loaded successfully")
     
-    # Display streaming configuration
-    print(f"⚙️  STREAMING CONFIGURATION:")
-    print(f"   • Streaming Threshold: {Config.STREAMING_THRESHOLD_GOALSTEP}")
-    print(f"   • Frame Resolution: {Config.FRAME_RESOLUTION}")
-    print(f"   • Frame FPS: {Config.FRAME_FPS}")
-    print(f"   • Frame Num Tokens: {Config.FRAME_NUM_TOKENS}")
-    print(f"   • V Placeholder ID: {Config.V_PLACEHOLDER_ID}")
-    print(f"   • Default Num Videos: {Config.DEFAULT_NUM_VIDEOS}")
-    print(f"   • Debug Thresholds: {Config.DEBUG_THRESHOLDS}")
-    
     # Create filtered dataset with configurable data source
     data_source = getattr(args, 'data_source', 'narration')  # Default to narration
     print(f"📊 Using data source: {data_source}")
@@ -4485,7 +4430,7 @@ def main():
         data_source=data_source
     )
     
-    print(f"📊 Dataset loaded: {len(dataset)} conversation turn(s) from validation set")
+    # print(f"📊 Dataset loaded: {len(dataset)} conversation turn(s) from validation set")
     
     # Create ground truth word count analysis (skipped for speed)
     # print(f"\n📊 Creating ground truth word count analysis...")
@@ -4531,11 +4476,11 @@ def main():
         # print(f"\n📊 Creating response length distribution analysis...")
         # create_response_length_distribution_analysis(overall_summary, data_source=data_source)
 
-        print("\n📊 Creating processor timeline...")
-        create_processor_timeline(overall_summary, data_source=data_source)
+        # print("\n📊 Creating processor timeline...")
+        # create_processor_timeline(overall_summary, data_source=data_source)
 
-        print("\n📊 Creating memory usage analysis...")
-        create_memory_visualization(overall_summary, data_source=data_source)
+        # print("\n📊 Creating memory usage analysis...")
+        # create_memory_visualization(overall_summary, data_source=data_source)
         
         # Create aggregated metrics visualization
         print(f"\n📊 Creating aggregated metrics visualization...")
@@ -4693,12 +4638,7 @@ def calculate_ppl_for_response(model, tokenizer, conversation, video_tensor, dev
                 single_frame_gpu = single_frame_cpu.to(device)  # Move to GPU
             
                 # Use custom threshold if provided, otherwise use data source default
-                if custom_threshold is not None:
-                    threshold = custom_threshold
-                elif data_source == 'narration':
-                    threshold = Config.STREAMING_THRESHOLD_NARRATION
-                else:  # goalstep or default
-                    threshold = Config.STREAMING_THRESHOLD_GOALSTEP
+                threshold = Config.STREAMING_THRESHOLD
                 
                 # Call stream_evaluate for this response with visual context
                 raw_metrics = model.stream_evaluate(
@@ -4804,7 +4744,7 @@ def create_conversation_with_vlm_prefix(generated_turns, gt_time, user_prompt, g
     
     return conversation
 
-def create_dual_ppl_frame_visualization(results, output_dir="timing_plots", data_source="goalstep"):
+def create_dual_ppl_frame_visualization(results, output_dir="figures", data_source="goalstep"):
     """Create visualization showing how dual PPLs vary over frames in different videos."""
     
     os.makedirs(output_dir, exist_ok=True)
@@ -4934,7 +4874,7 @@ Responses: {len(all_gt_prefix_visual)}"""
     #     print(f"   • Average difference (VLM - GT): {mean_diff:.3f} ± {std_diff:.3f}")
     #     print(f"   • Correlation coefficient: {correlation:.3f}")
 
-def create_ppl_over_time_visualization(video_data, output_dir="timing_plots", data_source="goalstep"):
+def create_ppl_over_time_visualization(video_data, output_dir="figures", data_source="goalstep"):
     """Create visualization showing PPL variation over time for different videos."""
     
     if not video_data:
@@ -5089,7 +5029,7 @@ def calculate_metrics(model, tokenizer, video_tensor, normalized_conversation, g
         }
     }
 
-def create_aggregated_metrics_visualization(overall_summary, output_dir="timing_plots", data_source="goalstep"):
+def create_aggregated_metrics_visualization(overall_summary, output_dir="figures", data_source="goalstep"):
     """Create aggregated metrics visualization with 4 vertical bar plots in scientific style."""
     
     results = overall_summary['results']
@@ -5469,7 +5409,7 @@ def create_aggregated_metrics_visualization(overall_summary, output_dir="timing_
     print(f"📊 Aggregated metrics visualization saved to: {output_path}")
     
 
-def create_response_length_distribution_analysis(overall_summary, output_dir="timing_plots", data_source="goalstep"):
+def create_response_length_distribution_analysis(overall_summary, output_dir="figures", data_source="goalstep"):
     """Create analysis and visualization of response length distribution from generated_turns."""
 
     results = overall_summary['results']
