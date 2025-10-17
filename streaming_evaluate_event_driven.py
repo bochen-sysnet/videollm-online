@@ -104,7 +104,7 @@ class Config:
 
     # configurable parameters
     DATA_SOURCE = 'goalstep' # 'goalstep' or 'narration'
-    RL_WEIGHT = 0 # discount factor for remaining length compared to the age
+    RL_WEIGHT = 0.1 # discount factor for remaining length compared to the age
     EWMA_FACTOR = 0.9
     AGE_WEIGHT = 1 # discount factor for age compared to the remaining length
     SCHEDULING_METHOD = 'lowest_buffer' # 'round_robin' or 'random' or 'lowest_buffer' 
@@ -3249,6 +3249,7 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 buffer_state = onthefly_buffer_data[conversation_id]
                 buffer_level = buffer_state['buffer']
                 if Config.SCHEDULING_METHOD == 'round_robin' or Config.SCHEDULING_METHOD == 'random':
+                    # todo: may need to include event_type == 'generation' here
                     if conversation_id not in cached_event_by_conversation:
                         cached_event_by_conversation[conversation_id] = (event_time, priority, sequence_counter, payload, buffer_level)
                     else:
@@ -4423,11 +4424,25 @@ def main():
     if config_id == 'base':
         pass
     elif config_id == 'rl_ablation1':
-        Config.RL_WEIGHT = 1
+        Config.RL_WEIGHT = 0
     elif config_id == 'rl_ablation2':
-        Config.RL_WEIGHT = 0.1
+        Config.RL_WEIGHT = 1
     elif config_id == 'rl_ablation3':
         Config.RL_WEIGHT = 10
+    elif config_id == 'comp_ablation1':
+        Config.RL_WEIGHT = 0
+    elif config_id == 'comp_ablation2':
+        Config.RL_WEIGHT = 0
+        Config.AGE_WEIGHT = 0
+    elif config_id == 'comp_ablation3':
+        Config.RL_WEIGHT = 0
+        Config.AGE_WEIGHT = 0
+        Config.BUFFER_URGENT_VALUE = 0
+    elif config_id == 'comp_ablation4':
+        Config.RL_WEIGHT = 0
+        Config.AGE_WEIGHT = 0
+        Config.BUFFER_URGENT_VALUE = 0
+        Config.GENERATION_CHUNK_SIZE = 1000
     elif config_id == 'round_robin_m':
         Config.SCHEDULING_METHOD = 'round_robin'
     elif config_id == 'round_robin_2':

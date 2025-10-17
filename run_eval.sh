@@ -1,13 +1,16 @@
 #!/bin/bash
 
 # Define lists
-data_sources=("goalstep")
+data_sources=("goalstep" "narration")
 num_videos_list=(3 5 10)
 iterations=(1)
 
+# full evaluation
+config_ids=("round_robin_m" "round_robin_2" "random_m" "random_2")
 # ablation study on remaining length
-config_ids=("base" "rl_ablation1" "rl_ablation2" "rl_ablation3")
-# 
+# config_ids=("base" "rl_ablation1" "rl_ablation2" "rl_ablation3")
+# component ablation study
+# config_ids=("base" "comp_ablation1" "comp_ablation2" "comp_ablation3" "comp_ablation4")
 
 cd /home/ryan/bo/videollm-online
 source .venv/bin/activate
