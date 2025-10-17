@@ -111,7 +111,7 @@ class Config:
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
     GENERATION_CHUNK_SIZE = 2      # chunk size for generation
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
-    MAX_EVAL_FRAMES = 10            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
     DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
     
@@ -4416,11 +4416,18 @@ def main():
     args.data_source = data_source
     args.num_videos = num_videos
     args.iteration = iteration
+    args.config_id = config_id
     
     # modify config based on config_id
     config_id = getattr(args, 'config_id', 'base')
     if config_id == 'base':
         pass
+    elif config_id == 'rl_ablation1':
+        Config.RL_WEIGHT = 1
+    elif config_id == 'rl_ablation2':
+        Config.RL_WEIGHT = 0.1
+    elif config_id == 'rl_ablation3':
+        Config.RL_WEIGHT = 10
     elif config_id == 'round_robin_m':
         Config.SCHEDULING_METHOD = 'round_robin'
     elif config_id == 'round_robin_2':
@@ -4435,10 +4442,10 @@ def main():
         print(f"⚠️  Invalid --config_id value '{config_id}', falling back to {config_id}")
 
     # create output directory based on dataset, num_videos, config_id, and iteration
-    output_dir = f'figures/{data_source}/{num_videos}/{config_id}/iteration_{iteration}'
+    output_dir = f'figures/{data_source}/N{num_videos}/{config_id}/I{iteration}'
     os.makedirs(output_dir, exist_ok=True)
 
-    print("🚀 Starting Streaming Evaluation")
+    print("🚀 Starting Streaming Evaluation Saving to:", output_dir)
     print("=" * 50)
     
     # Build model and tokenizer
@@ -4447,8 +4454,8 @@ def main():
     model.to(device)
     model.eval()  # Explicitly set to eval mode to disable dropout, etc.
     
-    print(f"🔧 Device: {device}")
-    print(f"🤖 Model loaded successfully")
+    # print(f"🔧 Device: {device}")
+    # print(f"🤖 Model loaded successfully")
     
     # Create filtered dataset with configurable data source
     data_source = getattr(args, 'data_source', 'narration')  # Default to narration
