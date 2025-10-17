@@ -111,7 +111,7 @@ class Config:
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
     GENERATION_CHUNK_SIZE = 2      # chunk size for generation
     BUFFER_URGENT_FACTOR = 0.2          # the fraction of the chunk size to determine whether the buffer is urgent
-    MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
+    MAX_EVAL_FRAMES = 10            # Max frames for evaluation (use full video)
     DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
     
@@ -4400,6 +4400,14 @@ def main():
             sys.argv.pop(idx)
         else:
             print(f"⚠️  Invalid --config_id value '{config_id}', falling back to {config_id}")
+
+    if '--iteration' in sys.argv:
+        idx = sys.argv.index('--iteration')
+        if idx + 1 < len(sys.argv):
+            value = sys.argv[idx + 1]
+            iteration = max(1, int(value))
+            sys.argv.pop(idx)
+            sys.argv.pop(idx)
     
     # Parse the main args
     args = parse_args()
@@ -4407,6 +4415,7 @@ def main():
     # Add custom args to args object
     args.data_source = data_source
     args.num_videos = num_videos
+    args.iteration = iteration
     
     # modify config based on config_id
     config_id = getattr(args, 'config_id', 'base')
@@ -4425,6 +4434,9 @@ def main():
     else:
         print(f"⚠️  Invalid --config_id value '{config_id}', falling back to {config_id}")
 
+    # create output directory based on dataset, num_videos, config_id, and iteration
+    output_dir = f'figures/{data_source}/{num_videos}/{config_id}/iteration_{iteration}'
+    os.makedirs(output_dir, exist_ok=True)
 
     print("🚀 Starting Streaming Evaluation")
     print("=" * 50)
@@ -4473,7 +4485,7 @@ def main():
         # Use config default number of videos
         num_videos = getattr(args, 'num_videos', Config.DEFAULT_NUM_VIDEOS)
         print(f"💬 Processing {num_videos} conversation{'s' if num_videos > 1 else ''} for PPL analysis...")
-        random.seed(42)  # For reproducibility
+        random.seed(42 + args.iteration)  # For reproducibility
 
         overall_summary = streaming_evaluate_conversations(
             model,
@@ -4509,7 +4521,7 @@ def main():
         
         # Create aggregated metrics visualization
         # print(f"\n📊 Creating aggregated metrics visualization...")
-        create_aggregated_metrics_visualization(overall_summary, data_source=data_source)
+        create_aggregated_metrics_visualization(overall_summary, output_dir=output_dir, data_source=data_source)
         
         # Create time per token analysis (skipped for speed)
         # print(f"\n📊 Creating time per token analysis...")
@@ -4518,6 +4530,10 @@ def main():
         # Create generated word count analysis (skipped for speed)
         # print(f"\n📊 Creating generated word count analysis...")
         # create_generated_word_count_analysis(results, data_source=data_source)
+
+        # save overall_summary to json in output_dir
+        with open(os.path.join(output_dir, 'overall_summary.json'), 'w') as f:
+            json.dump(overall_summary, f)
         
     except Exception as e:
         print(f"❌ Error during evaluation: {e}")
