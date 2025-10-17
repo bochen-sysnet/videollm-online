@@ -99,16 +99,14 @@ class Config:
     # Streaming thresholds for different dataset types
     STREAMING_THRESHOLD = 0.725  # Threshold for goalstep dataset (works well with user queries)
     
-    # Scheduling
-    RL_WEIGHT = 0 # discount factor for remaining length compared to the age
-    EWMA_FACTOR = 0.9
-    AGE_WEIGHT = 1 # discount factor for age compared to the remaining length
-    
     # network config
     RTT = 0.04
 
     # configurable parameters
     DATA_SOURCE = 'goalstep' # 'goalstep' or 'narration'
+    RL_WEIGHT = 0 # discount factor for remaining length compared to the age
+    EWMA_FACTOR = 0.9
+    AGE_WEIGHT = 1 # discount factor for age compared to the remaining length
     SCHEDULING_METHOD = 'lowest_buffer' # 'round_robin' or 'random' or 'lowest_buffer' 
     SCORE_IMPACT = 1 # 0 means disable score and it becomes the same as lowest_buffer
     GENERATION_CHUNK_SIZE = 2      # chunk size for generation
@@ -116,7 +114,7 @@ class Config:
     MAX_EVAL_FRAMES = 100            # Max frames for evaluation (use full video)
     DEFAULT_NUM_VIDEOS = 3             # Default number of videos for evaluation
     USER_CONSUMPTION_SPEED = 2.7        # Words per second (fast listening)
-
+    
     BUFFER_URGENT_VALUE = GENERATION_CHUNK_SIZE * BUFFER_URGENT_FACTOR # higher means easier to select gen events
 
 # =============================================================================
@@ -4393,6 +4391,15 @@ def main():
                 print(f"⚠️  Invalid --num_videos value '{value}', falling back to {num_videos}")
             sys.argv.pop(idx)
             sys.argv.pop(idx)
+
+    if '--config_id' in sys.argv:
+        idx = sys.argv.index('--config_id')
+        if idx + 1 < len(sys.argv):
+            config_id = sys.argv[idx + 1]
+            sys.argv.pop(idx)
+            sys.argv.pop(idx)
+        else:
+            print(f"⚠️  Invalid --config_id value '{config_id}', falling back to {config_id}")
     
     # Parse the main args
     args = parse_args()
@@ -4400,6 +4407,24 @@ def main():
     # Add custom args to args object
     args.data_source = data_source
     args.num_videos = num_videos
+    
+    # modify config based on config_id
+    config_id = getattr(args, 'config_id', 'base')
+    if config_id == 'base':
+        pass
+    elif config_id == 'round_robin_m':
+        Config.SCHEDULING_METHOD = 'round_robin'
+    elif config_id == 'round_robin_2':
+        Config.SCHEDULING_METHOD = 'round_robin'
+        Config.GENERATION_CHUNK_SIZE = 2
+    elif config_id == 'random_m':
+        Config.SCHEDULING_METHOD = 'random'
+    elif config_id == 'random_2':
+        Config.SCHEDULING_METHOD = 'random'
+        Config.GENERATION_CHUNK_SIZE = 2
+    else:
+        print(f"⚠️  Invalid --config_id value '{config_id}', falling back to {config_id}")
+
 
     print("🚀 Starting Streaming Evaluation")
     print("=" * 50)
