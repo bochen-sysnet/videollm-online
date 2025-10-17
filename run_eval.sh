@@ -2,11 +2,11 @@
 
 # Define lists
 data_sources=("goalstep" "narration")
-num_videos_list=(3 5 10)
-iterations=(1)
+num_videos_list=(1 3 5 8 10)
+iterations=(1 2 3)
 
 # full evaluation
-config_ids=("round_robin_m" "round_robin_2" "random_m" "random_2")
+config_ids=("base" "random_m" "random_2" "round_robin_m" "round_robin_2")
 # ablation study on remaining length
 # config_ids=("base" "rl_ablation1" "rl_ablation2" "rl_ablation3")
 # component ablation study

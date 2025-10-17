@@ -3250,7 +3250,10 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 buffer_level = buffer_state['buffer']
                 if Config.SCHEDULING_METHOD == 'round_robin' or Config.SCHEDULING_METHOD == 'random':
                     # todo: may need to include event_type == 'generation' here
-                    if conversation_id not in cached_event_by_conversation:
+                    if conversation_id not in cached_event_by_conversation or event_type == 'generation':
+                        if conversation_id in cached_event_by_conversation:
+                            event_time0, priority0, sequence_counter0, payload0, buffer_level0 = cached_event_by_conversation[conversation_id]
+                            unschedulable_events.append((event_time0, priority0, sequence_counter0, payload0))
                         cached_event_by_conversation[conversation_id] = (event_time, priority, sequence_counter, payload, buffer_level)
                     else:
                         unschedulable_events.append((event_time, priority, sequence_counter, payload))
@@ -4455,6 +4458,12 @@ def main():
         Config.GENERATION_CHUNK_SIZE = 2
     else:
         print(f"⚠️  Invalid --config_id value '{config_id}', falling back to {config_id}")
+
+    # modify frame number based on data source
+    # if data_source == 'goalstep':
+    #     Config.MAX_NUM_FRAMES = 600
+    # elif data_source == 'narration':
+    #     Config.MAX_NUM_FRAMES = 100
 
     # create output directory based on dataset, num_videos, config_id, and iteration
     output_dir = f'figures/{data_source}/N{num_videos}/{config_id}/I{iteration}'
