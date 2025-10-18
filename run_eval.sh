@@ -2,8 +2,8 @@
 
 # Define lists
 data_sources=("goalstep" "narration")
-num_videos_list=(1 3 5 8 10)
-iterations=(1 2 3)
+num_videos_list=(1 3 5 8 10 15 20)
+iterations=(1 2 3 4 5)
 
 # full evaluation
 config_ids=("base" "random_m" "random_2" "round_robin_m" "round_robin_2")

@@ -526,6 +526,7 @@ def trace2bwlist(N, trace_type='fcc'):
 
         # Randomly select a starting index such that you can get N consecutive rows
         start_index = np.random.randint(0, total_rows - N + 1)
+        print(f"Selected starting index: {start_index}")
 
         # Extract N consecutive rows starting from the selected index
         consecutive_bw = df_filtered['bytes_sec'].iloc[start_index:start_index + N]
@@ -3249,7 +3250,6 @@ def streaming_evaluate_conversations(model, tokenizer, dataset, device='cuda:0',
                 buffer_state = onthefly_buffer_data[conversation_id]
                 buffer_level = buffer_state['buffer']
                 if Config.SCHEDULING_METHOD == 'round_robin' or Config.SCHEDULING_METHOD == 'random':
-                    # todo: may need to include event_type == 'generation' here
                     if conversation_id not in cached_event_by_conversation or event_type == 'generation':
                         if conversation_id in cached_event_by_conversation:
                             event_time0, priority0, sequence_counter0, payload0, buffer_level0 = cached_event_by_conversation[conversation_id]
@@ -4459,12 +4459,6 @@ def main():
     else:
         print(f"⚠️  Invalid --config_id value '{config_id}', falling back to {config_id}")
 
-    # modify frame number based on data source
-    # if data_source == 'goalstep':
-    #     Config.MAX_NUM_FRAMES = 600
-    # elif data_source == 'narration':
-    #     Config.MAX_NUM_FRAMES = 100
-
     # create output directory based on dataset, num_videos, config_id, and iteration
     output_dir = f'figures/{data_source}/N{num_videos}/{config_id}/I{iteration}'
     os.makedirs(output_dir, exist_ok=True)
@@ -4517,6 +4511,7 @@ def main():
         num_videos = getattr(args, 'num_videos', Config.DEFAULT_NUM_VIDEOS)
         print(f"💬 Processing {num_videos} conversation{'s' if num_videos > 1 else ''} for PPL analysis...")
         random.seed(42 + args.iteration)  # For reproducibility
+        np.random.seed(42 + args.iteration)
 
         overall_summary = streaming_evaluate_conversations(
             model,
