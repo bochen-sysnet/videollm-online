@@ -4446,13 +4446,25 @@ def main():
         Config.AGE_WEIGHT = 0
         Config.BUFFER_URGENT_VALUE = 0
         Config.GENERATION_CHUNK_SIZE = 1000
+    elif config_id == 'chunk_ablation1':
+        Config.GENERATION_CHUNK_SIZE = 1
+    elif config_id == 'chunk_ablation2':
+        Config.GENERATION_CHUNK_SIZE = 4
+    elif config_id == 'chunk_ablation3':
+        Config.GENERATION_CHUNK_SIZE = 8
+    elif config_id == 'chunk_ablation4':
+        Config.GENERATION_CHUNK_SIZE = 16
+    elif config_id == 'chunk_ablation5':
+        Config.GENERATION_CHUNK_SIZE = 32
     elif config_id == 'round_robin_m':
         Config.SCHEDULING_METHOD = 'round_robin'
+        Config.GENERATION_CHUNK_SIZE = 1000
     elif config_id == 'round_robin_2':
         Config.SCHEDULING_METHOD = 'round_robin'
         Config.GENERATION_CHUNK_SIZE = 2
     elif config_id == 'random_m':
         Config.SCHEDULING_METHOD = 'random'
+        Config.GENERATION_CHUNK_SIZE = 1000
     elif config_id == 'random_2':
         Config.SCHEDULING_METHOD = 'random'
         Config.GENERATION_CHUNK_SIZE = 2
