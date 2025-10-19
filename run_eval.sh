@@ -6,7 +6,8 @@ num_videos_list=(1 3 5 8 10 15 20)
 iterations=(1 2 3 4 5)
 
 # full evaluation
-config_ids=("base" "random_m" "random_2" "round_robin_m" "round_robin_2")
+config_ids=("random_m" "round_robin_m")
+# config_ids=("base" "random_m" "random_2" "round_robin_m" "round_robin_2")
 # ablation study on remaining length
 # config_ids=("base" "rl_ablation1" "rl_ablation2" "rl_ablation3")
 # component ablation study

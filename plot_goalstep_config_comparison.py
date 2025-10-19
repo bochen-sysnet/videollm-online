@@ -60,6 +60,12 @@ SCHEDULING_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
     ("ending_score", "Ending", "ending"),
 )
 
+MEMORY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
+    ("model_params_memory", "Model Params", "model_params"),
+    ("combined_dynamic_memory", "Combined Dynamic", "combined_dynamic"),
+    ("cpu_memory_growth_peak", "CPU Growth", "cpu_growth"),
+)
+
 
 # ------------------------------------------------------------------------------
 # Data loading and aggregation helpers
@@ -195,6 +201,27 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     nonzero_score = float(increment_series[-1]) if increment_series else float("nan")
     ending_score = float(ending_series[-1]) if ending_series else float("nan")
 
+    # Memory metrics aggregated across conversations
+    all_memory_data = summary.get("all_memory_data") or {}
+    model_params_values: List[float] = []
+    combined_dynamic_values: List[float] = []
+    cpu_growth_values: List[float] = []
+    for memory_data in all_memory_data.values():
+        model_mem = memory_data.get("model_memory") or []
+        kv_mem = memory_data.get("kv_cache_memory") or []
+        activation_mem = memory_data.get("activation_memory") or []
+        other_mem = memory_data.get("other_memory") or []
+        cpu_mem_growth = memory_data.get("cpu_memory_growth") or []
+
+        if model_mem:
+            model_params_values.append(float(max(model_mem)))
+        if kv_mem and activation_mem and other_mem:
+            combined_dynamic_values.append(
+                float(max(kv_mem)) + float(max(activation_mem)) + float(max(other_mem))
+            )
+        if cpu_mem_growth:
+            cpu_growth_values.append(float(max(cpu_mem_growth)))
+
     processing_delay = float(np.mean(processing_delays)) if processing_delays else float("nan")
     queuing_delay = float(np.mean(queuing_delays)) if queuing_delays else float("nan")
     networking_delay = float(np.mean(networking_delays)) if networking_delays else float("nan")
@@ -218,6 +245,9 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
             "lowest_buffer_score": lowest_buffer_score,
             "nonzero_score": nonzero_score,
             "ending_score": ending_score,
+            "model_params_memory": float(np.mean(model_params_values)) if model_params_values else float("nan"),
+            "combined_dynamic_memory": float(np.mean(combined_dynamic_values)) if combined_dynamic_values else float("nan"),
+            "cpu_memory_growth_peak": float(np.mean(cpu_growth_values)) if cpu_growth_values else float("nan"),
         }
     )
     metrics.update(component_means)
@@ -776,6 +806,137 @@ def plot_scheduling_components_base_vs_videos(
     return True
 
 
+def plot_memory_components_by_config(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_ids: List[str],
+    output_path: Path,
+) -> bool:
+    """Grouped bar chart comparing memory components across configs (log scale)."""
+    configure_plot_style()
+    colors = _scientific_colors()
+    component_keys = [key for key, _, _ in MEMORY_COMPONENTS]
+    component_labels = [label for _, label, _ in MEMORY_COMPONENTS]
+
+    means_matrix: List[List[float]] = []
+    std_matrix: List[List[float]] = []
+    valid_configs: List[str] = []
+
+    for config_id in config_ids:
+        config_means = []
+        config_stds = []
+        has_data = False
+        for key in component_keys:
+            num_map = summary_stats.get(key, {}).get(config_id, {})
+            collected: List[float] = []
+            for stats in num_map.values():
+                collected.extend(stats.get("values", []))
+            if collected:
+                mean, std = safe_mean_std(collected)
+                has_data = True
+            else:
+                mean, std = float("nan"), float("nan")
+            config_means.append(mean)
+            config_stds.append(std)
+        if has_data:
+            valid_configs.append(config_id)
+            means_matrix.append(config_means)
+            std_matrix.append(config_stds)
+
+    if not means_matrix:
+        return False
+
+    x = np.arange(len(valid_configs))
+    bar_width = min(0.8 / len(component_keys), 0.2)
+    fig, ax = plt.subplots(figsize=(3.6, 2.6))
+
+    for idx, (label, color) in enumerate(zip(component_labels, colors)):
+        means_arr = np.asarray([row[idx] for row in means_matrix], dtype=float)
+        stds_arr = np.asarray([row[idx] for row in std_matrix], dtype=float)
+        if np.all(~np.isfinite(means_arr)):
+            continue
+        offset = (idx - (len(component_keys) - 1) / 2) * bar_width
+        ax.bar(
+            x + offset,
+            means_arr,
+            width=bar_width * 0.95,
+            yerr=stds_arr,
+            capsize=2.5,
+            color=color,
+            edgecolor="black",
+            linewidth=0.4,
+            label=label,
+        )
+
+    ax.set_title("Memory Components by Config")
+    ax.set_ylabel("Peak Memory (MB)")
+    ax.set_yscale("log")
+    ax.set_xticks(x)
+    ax.set_xticklabels(valid_configs, rotation=20, ha="right")
+    ax.set_xlabel("Config ID")
+    ax.legend(frameon=False)
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def plot_memory_components_base_vs_videos(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    num_videos: List[int],
+    output_path: Path,
+) -> bool:
+    """Line plot of memory components vs number of videos for the base config (log scale)."""
+    configure_plot_style()
+    base_stats = {
+        key: summary_stats.get(key, {}).get(BASE_CONFIG_ID, {})
+        for key, _, _ in MEMORY_COMPONENTS
+    }
+    if not any(base_stats.values()):
+        return False
+
+    colors = _scientific_colors()
+    markers = ["o", "s", "^"]
+    fig, ax = plt.subplots(figsize=(3.6, 2.4))
+    has_data = False
+
+    for idx, (key, label, _) in enumerate(MEMORY_COMPONENTS):
+        stats_for_base = base_stats.get(key, {})
+        means = []
+        for n in num_videos:
+            entry = stats_for_base.get(n, {})
+            means.append(entry.get("mean", float("nan")))
+        means_arr = np.asarray(means, dtype=float)
+        if np.all(~np.isfinite(means_arr)):
+            continue
+        has_data = True
+        ax.plot(
+            num_videos,
+            means_arr,
+            marker=markers[idx % len(markers)],
+            color=colors[idx % len(colors)],
+            linewidth=1.6,
+            markersize=4,
+            label=label,
+        )
+
+    if not has_data:
+        plt.close(fig)
+        return False
+
+    ax.set_title(f"{BASE_CONFIG_ID.title()} Memory Components vs Number of Videos")
+    ax.set_xlabel("Number of Videos")
+    ax.set_ylabel("Peak Memory (MB)")
+    ax.set_yscale("log")
+    ax.set_xticks(num_videos)
+    ax.legend(frameon=False)
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 # ------------------------------------------------------------------------------
 # Main execution
 # ------------------------------------------------------------------------------
@@ -793,6 +954,7 @@ def main() -> None:
         + [key for key, *_ in LATENCY_COMPONENTS]
         + [key for key, *_ in DELAY_METRICS]
         + [key for key, *_ in SCHEDULING_COMPONENTS]
+        + [key for key, *_ in MEMORY_COMPONENTS]
     )
 
     all_metrics_storage: Dict[str, Dict[str, Dict[str, Dict[int, List[float]]]]] = {}
@@ -981,6 +1143,20 @@ def main() -> None:
             print(f"[{data_source}] Saved scheduling components (base) vs videos plot to {scheduling_base_path}")
         else:
             print(f"[{data_source}] Skipped scheduling components (base) vs videos plot; no valid data.")
+
+        # Memory components across configs
+        memory_config_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_memory_components_by_config.pdf"
+        if plot_memory_components_by_config(summary_stats, configs_for_ds, memory_config_path):
+            print(f"[{data_source}] Saved memory components by config plot to {memory_config_path}")
+        else:
+            print(f"[{data_source}] Skipped memory components by config plot; no valid data.")
+
+        # Memory components vs number of videos (base config)
+        memory_base_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_memory_components_base_vs_videos.pdf"
+        if plot_memory_components_base_vs_videos(summary_stats, ds_numbers, memory_base_path):
+            print(f"[{data_source}] Saved memory components (base) vs videos plot to {memory_base_path}")
+        else:
+            print(f"[{data_source}] Skipped memory components (base) vs videos plot; no valid data.")
 
         # Latency components across configs
         latency_config_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_latency_components_by_config.pdf"
