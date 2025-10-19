@@ -38,10 +38,26 @@ METRIC_ORDER: Tuple[Tuple[str, str, str, str], ...] = (
     ("perplexity", "Average VLM Perplexity", "Perplexity", "perplexity"),
 )
 
+LATENCY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
+    ("visual_embedding_time", "Prefilling", "prefilling"),
+    ("model_forward_time", "Scoring", "scoring"),
+    ("generation_time", "Generation", "generation"),
+    ("kv_offload_time", "KV Offload", "kv_offload"),
+    ("kv_reload_time", "KV Reload", "kv_reload"),
+    ("total_sending_time", "Network", "network_time"),
+    ("total_processing_time", "Total Processing", "total_processing"),
+)
+
 DELAY_METRICS: Tuple[Tuple[str, str, str], ...] = (
-    ("processing_delay", "Processing Delay (s)", "Processing Delay"),
-    ("queuing_delay", "Queuing Delay (s)", "Queuing Delay"),
-    ("network_delay", "Networking Delay (s)", "Networking Delay"),
+    ("processing_delay", "Processing Delay", "processing_delay"),
+    ("queuing_delay", "Queuing Delay", "queuing_delay"),
+    ("network_delay", "Networking Delay", "network_delay"),
+)
+
+SCHEDULING_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
+    ("lowest_buffer_score", "Lowest Buffer", "lowest_buffer"),
+    ("nonzero_score", "Nonzero", "nonzero"),
+    ("ending_score", "Ending", "ending"),
 )
 
 
@@ -149,6 +165,7 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     rebuffer_time = float(np.mean(rebuffer_values)) if rebuffer_values else float("nan")
 
     # TTFT: average per conversation response latency when prompts exist.
+    component_samples: Dict[str, List[float]] = {key: [] for key, _, _ in LATENCY_COMPONENTS}
     results = summary.get("results", []) or []
     ttft_samples: List[float] = []
     ppl_samples: List[float] = []
@@ -160,6 +177,10 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
         ppl_data = result.get("ppl_data") or {}
         ppl_values = ppl_data.get("gt_ppls_vlm_prefix_visual") or []
         ppl_samples.extend(float(p) for p in ppl_values if p is not None)
+        for key, _, _ in LATENCY_COMPONENTS:
+            value = result.get(key)
+            if value is not None:
+                component_samples[key].append(float(value))
     ttft = float(np.mean(ttft_samples)) if ttft_samples else float("nan")
     perplexity = float(np.mean(ppl_samples)) if ppl_samples else float("nan")
 
@@ -167,12 +188,23 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     scheduling = summary.get("scheduling_data") or {}
     score_series = scheduling.get("selected_score") or []
     scheduling_score = float(score_series[-1]) if score_series else float("nan")
+    lowest_series = scheduling.get("selected_lowest") or []
+    increment_series = scheduling.get("selected_increment") or []
+    ending_series = scheduling.get("selected_ending") or []
+    lowest_buffer_score = float(lowest_series[-1]) if lowest_series else float("nan")
+    nonzero_score = float(increment_series[-1]) if increment_series else float("nan")
+    ending_score = float(ending_series[-1]) if ending_series else float("nan")
 
     processing_delay = float(np.mean(processing_delays)) if processing_delays else float("nan")
     queuing_delay = float(np.mean(queuing_delays)) if queuing_delays else float("nan")
     networking_delay = float(np.mean(networking_delays)) if networking_delays else float("nan")
 
-    return {
+    component_means = {
+        key: float(np.mean(values)) if values else float("nan")
+        for key, values in component_samples.items()
+    }
+
+    metrics = {
         "rebuffer_time": rebuffer_time,
         "ttft": ttft,
         "scheduling_score": scheduling_score,
@@ -181,6 +213,15 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
         "queuing_delay": queuing_delay,
         "network_delay": networking_delay,
     }
+    metrics.update(
+        {
+            "lowest_buffer_score": lowest_buffer_score,
+            "nonzero_score": nonzero_score,
+            "ending_score": ending_score,
+        }
+    )
+    metrics.update(component_means)
+    return metrics
 
 
 # ------------------------------------------------------------------------------
@@ -461,6 +502,280 @@ def plot_delay_comparison_by_config(
     return True
 
 
+def plot_latency_components_by_config(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_ids: List[str],
+    output_path: Path,
+) -> bool:
+    """Compare latency components averaged across all videos for each config."""
+    configure_plot_style()
+    colors = _scientific_colors()
+    component_keys = [key for key, _, _ in LATENCY_COMPONENTS]
+    component_labels = [label for _, label, _ in LATENCY_COMPONENTS]
+    num_components = len(component_keys)
+    num_configs = len(config_ids)
+    bar_width = min(0.8 / max(num_configs, 1), 0.18)
+    x = np.arange(num_components)
+
+    fig, ax = plt.subplots(figsize=(3.8, 2.6))
+    has_data = False
+
+    for idx, config_id in enumerate(config_ids):
+        means = []
+        stds = []
+        for key in component_keys:
+            num_map = summary_stats.get(key, {}).get(config_id, {})
+            collected: List[float] = []
+            for stats in num_map.values():
+                collected.extend(stats.get("values", []))
+            if collected:
+                mean, std = safe_mean_std(collected)
+            else:
+                mean, std = (float("nan"), float("nan"))
+            means.append(mean)
+            stds.append(std)
+
+        means_arr = np.asarray(means, dtype=float)
+        if np.all(~np.isfinite(means_arr)):
+            continue
+
+        has_data = True
+        offset = (idx - (num_configs - 1) / 2) * bar_width
+        ax.bar(
+            x + offset,
+            means_arr,
+            width=bar_width * 0.95,
+            yerr=stds,
+            capsize=2.5,
+            color=colors[idx % len(colors)],
+            edgecolor="black",
+            linewidth=0.4,
+            label=config_id,
+        )
+
+    ax.set_title("Latency Components by Config")
+    ax.set_ylabel("Time (s)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(component_labels, rotation=25, ha="right")
+    ax.set_xlabel("Component")
+    if has_data:
+        ax.legend(frameon=False, ncol=2)
+        fig.tight_layout(pad=0.6)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return has_data
+
+
+def plot_latency_components_vs_videos(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_ids: List[str],
+    num_videos: List[int],
+    output_path: Path,
+) -> bool:
+    """Show how latency components evolve as the number of videos increases."""
+    configure_plot_style()
+    colors = _scientific_colors()
+    markers = ["o", "s", "^", "D", "P", "X", "v", "<", ">"]
+
+    component_entries = [(key, label) for key, label, _ in LATENCY_COMPONENTS]
+    if not component_entries:
+        return False
+
+    cols = min(4, len(component_entries))
+    rows = math.ceil(len(component_entries) / cols)
+    fig, axes = plt.subplots(
+        rows,
+        cols,
+        figsize=(3.2 * cols, 2.3 * rows),
+        sharex=True,
+        sharey=False,
+    )
+    axes = np.atleast_1d(axes).flatten()
+    plotted = False
+
+    for ax, (metric_key, comp_label) in zip(axes, component_entries):
+        for idx, config_id in enumerate(config_ids):
+            stats_for_config = summary_stats.get(metric_key, {}).get(config_id, {})
+            means = []
+            for n in num_videos:
+                entry = stats_for_config.get(n, {})
+                means.append(entry.get("mean", float("nan")))
+            means_arr = np.asarray(means, dtype=float)
+            if np.all(~np.isfinite(means_arr)):
+                continue
+            plotted = True
+            ax.plot(
+                num_videos,
+                means_arr,
+                marker=markers[idx % len(markers)],
+                color=colors[idx % len(colors)],
+                linewidth=1.6,
+                markersize=4,
+                label=config_id,
+            )
+        ax.set_title(comp_label)
+        ax.set_ylabel("Time (s)")
+        ax.set_xticks(num_videos)
+
+    for ax in axes[len(component_entries) :]:
+        ax.axis("off")
+
+    if plotted:
+        for ax in axes[-cols:]:
+            ax.set_xlabel("Number of Videos")
+        handles, labels = axes[0].get_legend_handles_labels()
+        if handles:
+            fig.legend(
+                handles,
+                labels,
+                loc="lower center",
+                ncol=min(3, len(config_ids)),
+                frameon=False,
+            )
+            fig.subplots_adjust(bottom=0.15)
+        fig.tight_layout(pad=0.7)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return plotted
+
+
+def plot_scheduling_components_by_config(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_ids: List[str],
+    output_path: Path,
+) -> bool:
+    """Grouped bar chart comparing scheduling components across configs."""
+    configure_plot_style()
+    colors = _scientific_colors()
+    component_keys = [key for key, _, _ in SCHEDULING_COMPONENTS]
+    component_labels = [label for _, label, _ in SCHEDULING_COMPONENTS]
+
+    means_matrix: List[List[float]] = []
+    std_matrix: List[List[float]] = []
+    valid_configs: List[str] = []
+
+    for config_id in config_ids:
+        config_means = []
+        config_stds = []
+        has_data = False
+        for key in component_keys:
+            num_map = summary_stats.get(key, {}).get(config_id, {})
+            collected: List[float] = []
+            for stats in num_map.values():
+                collected.extend(stats.get("values", []))
+            if collected:
+                mean, std = safe_mean_std(collected)
+                has_data = True
+            else:
+                mean, std = float("nan"), float("nan")
+            config_means.append(mean)
+            config_stds.append(std)
+        if has_data:
+            valid_configs.append(config_id)
+            means_matrix.append(config_means)
+            std_matrix.append(config_stds)
+
+    if not means_matrix:
+        return False
+
+    x = np.arange(len(valid_configs))
+    bar_width = min(0.8 / len(component_keys), 0.2)
+    fig, ax = plt.subplots(figsize=(3.6, 2.6))
+
+    for idx, (label, color) in enumerate(zip(component_labels, colors)):
+        means_arr = np.asarray([row[idx] for row in means_matrix], dtype=float)
+        stds_arr = np.asarray([row[idx] for row in std_matrix], dtype=float)
+        if np.all(~np.isfinite(means_arr)):
+            continue
+        offset = (idx - (len(component_keys) - 1) / 2) * bar_width
+        ax.bar(
+            x + offset,
+            means_arr,
+            width=bar_width * 0.95,
+            yerr=stds_arr,
+            capsize=2.5,
+            color=color,
+            edgecolor="black",
+            linewidth=0.4,
+            label=label,
+        )
+
+    ax.set_title("Scheduling Components by Config")
+    ax.set_ylabel("Cumulative Score")
+    ax.set_xticks(x)
+    ax.set_xticklabels(valid_configs, rotation=20, ha="right")
+    ax.set_xlabel("Config ID")
+    ax.legend(frameon=False)
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def plot_scheduling_components_base_vs_videos(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    num_videos: List[int],
+    output_path: Path,
+) -> bool:
+    """Line plot showing scheduling components over number of videos for base config."""
+    configure_plot_style()
+    base_components = {
+        key: summary_stats.get(key, {}).get(BASE_CONFIG_ID, {})
+        for key, _, _ in SCHEDULING_COMPONENTS
+    }
+
+    if not any(base_components.values()):
+        return False
+
+    colors = _scientific_colors()
+    markers = ["o", "s", "^"]
+    fig, ax = plt.subplots(figsize=(3.6, 2.4))
+    has_data = False
+
+    for idx, (key, label, _) in enumerate(SCHEDULING_COMPONENTS):
+        stats_for_base = base_components.get(key, {})
+        means = []
+        stds = []
+        for n in num_videos:
+            entry = stats_for_base.get(n, {})
+            means.append(entry.get("mean", float("nan")))
+            stds.append(entry.get("std", float("nan")))
+        means_arr = np.asarray(means, dtype=float)
+        stds_arr = np.asarray(stds, dtype=float)
+        if np.all(~np.isfinite(means_arr)):
+            continue
+        has_data = True
+        ax.errorbar(
+            num_videos,
+            means_arr,
+            yerr=stds_arr,
+            color=colors[idx % len(colors)],
+            marker=markers[idx % len(markers)],
+            linewidth=1.6,
+            markersize=4,
+            capsize=3,
+            label=label,
+        )
+
+    if not has_data:
+        plt.close(fig)
+        return False
+
+    ax.set_title(f"{BASE_CONFIG_ID.title()} Scheduling Components vs Number of Videos")
+    ax.set_xlabel("Number of Videos")
+    ax.set_ylabel("Cumulative Score")
+    ax.set_xticks(num_videos)
+    ax.legend(frameon=False)
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 # ------------------------------------------------------------------------------
 # Main execution
 # ------------------------------------------------------------------------------
@@ -473,7 +788,12 @@ def main() -> None:
     iterations: List[int] = list(args.iterations)
     data_sources: List[str] = list(dict.fromkeys(args.data_sources))
 
-    all_metric_keys = [key for key, *_ in METRIC_ORDER] + [key for key, *_ in DELAY_METRICS]
+    all_metric_keys = (
+        [key for key, *_ in METRIC_ORDER]
+        + [key for key, *_ in LATENCY_COMPONENTS]
+        + [key for key, *_ in DELAY_METRICS]
+        + [key for key, *_ in SCHEDULING_COMPONENTS]
+    )
 
     all_metrics_storage: Dict[str, Dict[str, Dict[str, Dict[int, List[float]]]]] = {}
     available_numbers: Dict[str, Set[int]] = defaultdict(set)
@@ -647,6 +967,34 @@ def main() -> None:
             print(f"[{data_source}] Saved delay comparison plot to {delay_compare_path}")
         else:
             print(f"[{data_source}] Skipped delay comparison plot; no valid data.")
+
+        # Scheduling components comparison across configs
+        scheduling_config_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_scheduling_components_by_config.pdf"
+        if plot_scheduling_components_by_config(summary_stats, configs_for_ds, scheduling_config_path):
+            print(f"[{data_source}] Saved scheduling components by config plot to {scheduling_config_path}")
+        else:
+            print(f"[{data_source}] Skipped scheduling components by config plot; no valid data.")
+
+        # Scheduling components vs number of videos (base config)
+        scheduling_base_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_scheduling_components_base_vs_videos.pdf"
+        if plot_scheduling_components_base_vs_videos(summary_stats, ds_numbers, scheduling_base_path):
+            print(f"[{data_source}] Saved scheduling components (base) vs videos plot to {scheduling_base_path}")
+        else:
+            print(f"[{data_source}] Skipped scheduling components (base) vs videos plot; no valid data.")
+
+        # Latency components across configs
+        latency_config_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_latency_components_by_config.pdf"
+        if plot_latency_components_by_config(summary_stats, configs_for_ds, latency_config_path):
+            print(f"[{data_source}] Saved latency components by config plot to {latency_config_path}")
+        else:
+            print(f"[{data_source}] Skipped latency components by config plot; no valid data.")
+
+        # Latency components over number of videos
+        latency_videos_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_latency_components_vs_videos.pdf"
+        if plot_latency_components_vs_videos(summary_stats, configs_for_ds, ds_numbers, latency_videos_path):
+            print(f"[{data_source}] Saved latency components vs videos plot to {latency_videos_path}")
+        else:
+            print(f"[{data_source}] Skipped latency components vs videos plot; no valid data.")
 
         # CSV summary
         csv_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}.csv"
