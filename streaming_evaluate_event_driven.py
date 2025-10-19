@@ -526,7 +526,6 @@ def trace2bwlist(N, trace_type='fcc'):
 
         # Randomly select a starting index such that you can get N consecutive rows
         start_index = np.random.randint(0, total_rows - N + 1)
-        print(f"Selected starting index: {start_index}")
 
         # Extract N consecutive rows starting from the selected index
         consecutive_bw = df_filtered['bytes_sec'].iloc[start_index:start_index + N]
