@@ -4425,6 +4425,18 @@ def main():
     config_id = getattr(args, 'config_id', 'base')
     if config_id == 'base':
         pass
+    elif config_id == 'round_robin_m':
+        Config.SCHEDULING_METHOD = 'round_robin'
+        Config.GENERATION_CHUNK_SIZE = 1000
+    elif config_id == 'round_robin_2':
+        Config.SCHEDULING_METHOD = 'round_robin'
+        Config.GENERATION_CHUNK_SIZE = 2
+    elif config_id == 'random_m':
+        Config.SCHEDULING_METHOD = 'random'
+        Config.GENERATION_CHUNK_SIZE = 1000
+    elif config_id == 'random_2':
+        Config.SCHEDULING_METHOD = 'random'
+        Config.GENERATION_CHUNK_SIZE = 2
     elif config_id == 'rl_ablation1':
         Config.RL_WEIGHT = 0
     elif config_id == 'rl_ablation2':
@@ -4455,18 +4467,6 @@ def main():
         Config.GENERATION_CHUNK_SIZE = 16
     elif config_id == 'chunk_ablation5':
         Config.GENERATION_CHUNK_SIZE = 32
-    elif config_id == 'round_robin_m':
-        Config.SCHEDULING_METHOD = 'round_robin'
-        Config.GENERATION_CHUNK_SIZE = 1000
-    elif config_id == 'round_robin_2':
-        Config.SCHEDULING_METHOD = 'round_robin'
-        Config.GENERATION_CHUNK_SIZE = 2
-    elif config_id == 'random_m':
-        Config.SCHEDULING_METHOD = 'random'
-        Config.GENERATION_CHUNK_SIZE = 1000
-    elif config_id == 'random_2':
-        Config.SCHEDULING_METHOD = 'random'
-        Config.GENERATION_CHUNK_SIZE = 2
     else:
         print(f"⚠️  Invalid --config_id value '{config_id}', falling back to {config_id}")
 
