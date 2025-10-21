@@ -26,7 +26,8 @@ DEFAULT_CONFIG_IDS: Tuple[str, ...] = (
     "round_robin_m",
     "round_robin_2",
 )
-DEFAULT_NUM_VIDEOS: Tuple[int, ...] = (1, 3, 5, 8, 10, 15, 20)
+TARGET_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15, 20)
+DEFAULT_NUM_VIDEOS: Tuple[int, ...] = TARGET_NUM_VIDEOS
 DEFAULT_ITERATIONS: Tuple[int, ...] = (1, 2, 3, 4, 5)
 DEFAULT_BASE_DIR = Path("figures")
 BASE_CONFIG_ID = "base"
@@ -66,6 +67,52 @@ MEMORY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
     ("cpu_memory_growth_peak", "CPU Growth", "cpu_growth"),
 )
 
+ABLATION_GROUPS = {
+    "rl": {
+        "title": "Running Length Weight Ablation",
+        "configs": [
+            ("base", "Default (0.1)"),
+            ("rl_ablation1", "Weight 0"),
+            ("rl_ablation2", "Weight 1"),
+            ("rl_ablation3", "Weight 10"),
+        ],
+        "num_videos": [5, 10, 15, 20],
+        "slug": "rl_ablation",
+    },
+    "comp": {
+        "title": "Computation Modules Ablation",
+        "configs": [
+            ("base", "Default"),
+            ("comp_ablation1", "No Comp 1"),
+            ("comp_ablation2", "No Comp 2"),
+            ("comp_ablation3", "No Comp 3"),
+            ("comp_ablation4", "No Comp 4"),
+        ],
+        "num_videos": [5, 10, 15, 20],
+        "slug": "comp_ablation",
+    },
+    "chunk": {
+        "title": "Chunk Size Ablation",
+        "configs": [
+            ("base", "Chunk 2 (Default)"),
+            ("chunk_ablation1", "Chunk 1"),
+            ("chunk_ablation2", "Chunk 4"),
+            ("chunk_ablation3", "Chunk 8"),
+            ("chunk_ablation4", "Chunk 16"),
+            ("chunk_ablation5", "Chunk 32"),
+        ],
+        "num_videos": [5, 10, 15, 20],
+        "slug": "chunk_ablation",
+    },
+}
+
+ABLATION_CONFIG_SET: Set[str] = {
+    cfg
+    for group in ABLATION_GROUPS.values()
+    for cfg, _ in group["configs"]
+    if cfg != "base"
+}
+
 
 # ------------------------------------------------------------------------------
 # Data loading and aggregation helpers
@@ -94,8 +141,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config-ids",
         nargs="+",
-        default=list(DEFAULT_CONFIG_IDS),
-        help="Config IDs to include in the comparison.",
+        default=None,
+        help="Config IDs to include in the comparison. When omitted, auto-detect all configs.",
     )
     parser.add_argument(
         "--num-videos",
@@ -937,6 +984,93 @@ def plot_memory_components_base_vs_videos(
     return True
 
 
+def plot_rebuffering_ablation_group(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    group_key: str,
+    available_configs: Set[str],
+    available_nums: List[int],
+    output_path: Path,
+) -> bool:
+    """Bar plot comparing rebuffering time across ablation configs with per-N differentiation."""
+    group_meta = ABLATION_GROUPS.get(group_key)
+    if not group_meta:
+        return False
+
+    rebuffer_stats = summary_stats.get("rebuffer_time", {})
+    if not rebuffer_stats:
+        return False
+
+    ablation_configs = [
+        (cfg, label)
+        for cfg, label in group_meta["configs"]
+        if cfg in available_configs
+    ]
+    if not ablation_configs:
+        return False
+
+    selected_nums = [
+        n for n in group_meta["num_videos"] if n in available_nums
+    ]
+    if not selected_nums:
+        return False
+
+    configure_plot_style()
+    colors = _scientific_colors()
+    num_videos = selected_nums
+    x_positions = np.arange(len(num_videos))
+    bar_width = min(0.75 / max(len(ablation_configs), 1), 0.18)
+
+    fig, ax = plt.subplots(figsize=(3.8, 2.8))
+    plotted = False
+
+    for idx, (cfg, label) in enumerate(ablation_configs):
+        means = []
+        stds = []
+        for n in num_videos:
+            entry = rebuffer_stats.get(cfg, {}).get(n, {})
+            mean = entry.get("mean", float("nan"))
+            std = entry.get("std", 0.0)
+            if std is None or math.isnan(std):
+                std = 0.0
+            means.append(mean)
+            stds.append(std)
+
+        means_arr = np.asarray(means, dtype=float)
+        stds_arr = np.asarray(stds, dtype=float)
+        if np.all(~np.isfinite(means_arr)):
+            continue
+        plotted = True
+
+        offset = (idx - (len(ablation_configs) - 1) / 2) * bar_width
+        ax.bar(
+            x_positions + offset,
+            means_arr,
+            width=bar_width * 0.95,
+            yerr=stds_arr,
+            capsize=2.5,
+            color=colors[idx % len(colors)],
+            edgecolor="black",
+            linewidth=0.4,
+            label=label,
+        )
+
+    if not plotted:
+        plt.close(fig)
+        return False
+
+    ax.set_title(group_meta["title"])
+    ax.set_ylabel("Total Rebuffering Time (s)")
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels([str(n) for n in num_videos])
+    ax.set_xlabel("Number of Videos")
+    ax.legend(frameon=False, fontsize=7, ncol=2)
+    fig.tight_layout(pad=0.8)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 # ------------------------------------------------------------------------------
 # Main execution
 # ------------------------------------------------------------------------------
@@ -977,15 +1111,16 @@ def main() -> None:
             continue
 
         # Determine number of videos to inspect
-        if requested_num_videos:
-            num_videos = sorted(set(requested_num_videos))
-        else:
-            detected = sorted(
-                int(p.name[1:])
-                for p in ds_root.glob("N*")
-                if p.is_dir() and len(p.name) > 1 and p.name[1:].isdigit()
-            )
-            num_videos = detected if detected else list(DEFAULT_NUM_VIDEOS)
+    if requested_num_videos:
+        num_videos = sorted(set(requested_num_videos))
+    else:
+        detected = sorted(
+            int(p.name[1:])
+            for p in ds_root.glob("N*")
+            if p.is_dir() and len(p.name) > 1 and p.name[1:].isdigit()
+        )
+        filtered = [n for n in detected if n in TARGET_NUM_VIDEOS]
+        num_videos = filtered if filtered else list(DEFAULT_NUM_VIDEOS)
 
         # Discover configs if not explicitly provided
         configs_for_ds: Set[str] = set(requested_config_ids or [])
@@ -1073,6 +1208,10 @@ def main() -> None:
         if not configs_for_ds:
             configs_for_ds = list(DEFAULT_CONFIG_IDS)
 
+        general_configs = [cfg for cfg in configs_for_ds if cfg not in ABLATION_CONFIG_SET]
+        if not general_configs:
+            general_configs = [cfg for cfg in configs_for_ds if cfg == BASE_CONFIG_ID]
+
         if args.output is None:
             plot_root_base = (base_dir / data_source / f"{data_source}_config_metrics")
         else:
@@ -1094,7 +1233,7 @@ def main() -> None:
                 slug,
                 summary_stats,
                 ds_numbers,
-                configs_for_ds,
+                general_configs,
                 per_video_path,
             )
             if per_video_saved:
@@ -1108,7 +1247,7 @@ def main() -> None:
                 y_label,
                 slug,
                 summary_stats,
-                configs_for_ds,
+                general_configs,
                 overall_path,
             )
             if overall_saved:
@@ -1125,14 +1264,14 @@ def main() -> None:
 
         # Delay comparison across configs
         delay_compare_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_delay_by_config.pdf"
-        if plot_delay_comparison_by_config(summary_stats, configs_for_ds, delay_compare_path):
+        if plot_delay_comparison_by_config(summary_stats, general_configs, delay_compare_path):
             print(f"[{data_source}] Saved delay comparison plot to {delay_compare_path}")
         else:
             print(f"[{data_source}] Skipped delay comparison plot; no valid data.")
 
         # Scheduling components comparison across configs
         scheduling_config_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_scheduling_components_by_config.pdf"
-        if plot_scheduling_components_by_config(summary_stats, configs_for_ds, scheduling_config_path):
+        if plot_scheduling_components_by_config(summary_stats, general_configs, scheduling_config_path):
             print(f"[{data_source}] Saved scheduling components by config plot to {scheduling_config_path}")
         else:
             print(f"[{data_source}] Skipped scheduling components by config plot; no valid data.")
@@ -1146,7 +1285,7 @@ def main() -> None:
 
         # Memory components across configs
         memory_config_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_memory_components_by_config.pdf"
-        if plot_memory_components_by_config(summary_stats, configs_for_ds, memory_config_path):
+        if plot_memory_components_by_config(summary_stats, general_configs, memory_config_path):
             print(f"[{data_source}] Saved memory components by config plot to {memory_config_path}")
         else:
             print(f"[{data_source}] Skipped memory components by config plot; no valid data.")
@@ -1158,16 +1297,34 @@ def main() -> None:
         else:
             print(f"[{data_source}] Skipped memory components (base) vs videos plot; no valid data.")
 
+        # Rebuffering ablation comparisons
+        available_config_set = set(configs_for_ds)
+        for group_key, group_meta in ABLATION_GROUPS.items():
+            ablation_path = (
+                plot_root_base.parent
+                / f"{plot_root_base.name}_{data_source}_{group_meta['slug']}_rebuffer.pdf"
+            )
+            if plot_rebuffering_ablation_group(
+                summary_stats,
+                group_key,
+                available_config_set,
+                ds_numbers,
+                ablation_path,
+            ):
+                print(f"[{data_source}] Saved rebuffering ablation plot ({group_key}) to {ablation_path}")
+            else:
+                print(f"[{data_source}] Skipped rebuffering ablation plot ({group_key}); no valid data.")
+
         # Latency components across configs
         latency_config_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_latency_components_by_config.pdf"
-        if plot_latency_components_by_config(summary_stats, configs_for_ds, latency_config_path):
+        if plot_latency_components_by_config(summary_stats, general_configs, latency_config_path):
             print(f"[{data_source}] Saved latency components by config plot to {latency_config_path}")
         else:
             print(f"[{data_source}] Skipped latency components by config plot; no valid data.")
 
         # Latency components over number of videos
         latency_videos_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_latency_components_vs_videos.pdf"
-        if plot_latency_components_vs_videos(summary_stats, configs_for_ds, ds_numbers, latency_videos_path):
+        if plot_latency_components_vs_videos(summary_stats, general_configs, ds_numbers, latency_videos_path):
             print(f"[{data_source}] Saved latency components vs videos plot to {latency_videos_path}")
         else:
             print(f"[{data_source}] Skipped latency components vs videos plot; no valid data.")
