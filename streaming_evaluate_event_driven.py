@@ -4489,14 +4489,78 @@ def main():
     elif config_id == 'factor_ablation5':
         Config.BUFFER_URGENT_FACTOR = 0.5
         Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
-    elif config_id == 'consumption_ablation1':
+    elif config_id == 'consumption_ablation1_base':
         Config.USER_CONSUMPTION_SPEED = 1
-    elif config_id == 'consumption_ablation2':
+    elif config_id == 'consumption_ablation1_rr_2':
+        Config.USER_CONSUMPTION_SPEED = 1
+        Config.SCHEDULING_METHOD = 'round_robin'
+        Config.GENERATION_CHUNK_SIZE = 2
+    elif config_id == 'consumption_ablation1_rr_m':
+        Config.USER_CONSUMPTION_SPEED = 1
+        Config.SCHEDULING_METHOD = 'round_robin'
+        Config.GENERATION_CHUNK_SIZE = 1000
+    elif config_id == 'consumption_ablation1_rand_2':
+        Config.USER_CONSUMPTION_SPEED = 1
+        Config.SCHEDULING_METHOD = 'random'
+        Config.GENERATION_CHUNK_SIZE = 2
+    elif config_id == 'consumption_ablation1_rand_m':
+        Config.USER_CONSUMPTION_SPEED = 1
+        Config.SCHEDULING_METHOD = 'random'
+        Config.GENERATION_CHUNK_SIZE = 1000
+    elif config_id == 'consumption_ablation2_base':
         Config.USER_CONSUMPTION_SPEED = 2
-    elif config_id == 'consumption_ablation3':
+    elif config_id == 'consumption_ablation2_rr_2':
+        Config.USER_CONSUMPTION_SPEED = 2
+        Config.SCHEDULING_METHOD = 'round_robin'
+        Config.GENERATION_CHUNK_SIZE = 2
+    elif config_id == 'consumption_ablation2_rr_m':
+        Config.USER_CONSUMPTION_SPEED = 2
+        Config.SCHEDULING_METHOD = 'round_robin'
+        Config.GENERATION_CHUNK_SIZE = 1000
+    elif config_id == 'consumption_ablation2_rand_2':
+        Config.USER_CONSUMPTION_SPEED = 2
+        Config.SCHEDULING_METHOD = 'random'
+        Config.GENERATION_CHUNK_SIZE = 2
+    elif config_id == 'consumption_ablation2_rand_m':
+        Config.USER_CONSUMPTION_SPEED = 2
+        Config.SCHEDULING_METHOD = 'random'
+        Config.GENERATION_CHUNK_SIZE = 1000
+    elif config_id == 'consumption_ablation3_base':
         Config.USER_CONSUMPTION_SPEED = 4
-    elif config_id == 'consumption_ablation4':
+    elif config_id == 'consumption_ablation3_rr_2':
+        Config.USER_CONSUMPTION_SPEED = 4
+        Config.SCHEDULING_METHOD = 'round_robin'
+        Config.GENERATION_CHUNK_SIZE = 2
+    elif config_id == 'consumption_ablation3_rr_m':
+        Config.USER_CONSUMPTION_SPEED = 4
+        Config.SCHEDULING_METHOD = 'round_robin'
+        Config.GENERATION_CHUNK_SIZE = 1000
+    elif config_id == 'consumption_ablation3_rand_2':
+        Config.USER_CONSUMPTION_SPEED = 4
+        Config.SCHEDULING_METHOD = 'random'
+        Config.GENERATION_CHUNK_SIZE = 2
+    elif config_id == 'consumption_ablation3_rand_m':
+        Config.USER_CONSUMPTION_SPEED = 4
+        Config.SCHEDULING_METHOD = 'random'
+        Config.GENERATION_CHUNK_SIZE = 1000
+    elif config_id == 'consumption_ablation4_base':
         Config.USER_CONSUMPTION_SPEED = 5
+    elif config_id == 'consumption_ablation4_rr_2':
+        Config.USER_CONSUMPTION_SPEED = 5
+        Config.SCHEDULING_METHOD = 'round_robin'
+        Config.GENERATION_CHUNK_SIZE = 2
+    elif config_id == 'consumption_ablation4_rr_m':
+        Config.USER_CONSUMPTION_SPEED = 5
+        Config.SCHEDULING_METHOD = 'round_robin'
+        Config.GENERATION_CHUNK_SIZE = 1000
+    elif config_id == 'consumption_ablation4_rand_2':
+        Config.USER_CONSUMPTION_SPEED = 5
+        Config.SCHEDULING_METHOD = 'random'
+        Config.GENERATION_CHUNK_SIZE = 2
+    elif config_id == 'consumption_ablation4_rand_m':
+        Config.USER_CONSUMPTION_SPEED = 5
+        Config.SCHEDULING_METHOD = 'random'
+        Config.GENERATION_CHUNK_SIZE = 1000
     else:
         print(f"⚠️  Invalid --config_id value '{config_id}', falling back to {config_id}")
         exit(1)
