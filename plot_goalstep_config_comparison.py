@@ -26,8 +26,8 @@ DEFAULT_CONFIG_IDS: Tuple[str, ...] = (
     "round_robin_m",
     "round_robin_2",
 )
-TARGET_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15, 20)
-DEFAULT_NUM_VIDEOS: Tuple[int, ...] = TARGET_NUM_VIDEOS
+DEFAULT_NUM_VIDEOS: Tuple[int, ...] = (1, 3, 5, 8, 10, 15, 20)
+DEFAULT_ABLATION_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15, 20)
 DEFAULT_ITERATIONS: Tuple[int, ...] = (1, 2, 3, 4, 5)
 DEFAULT_BASE_DIR = Path("figures")
 BASE_CONFIG_ID = "base"
@@ -104,6 +104,32 @@ ABLATION_GROUPS = {
         "num_videos": [5, 10, 15, 20],
         "slug": "chunk_ablation",
     },
+    "factor": {
+        "title": "Factor Ablation",
+        "configs": [
+            ("base", "Default"),
+            ("factor_ablation1", "Factor A1"),
+            ("factor_ablation2", "Factor A2"),
+            ("factor_ablation3", "Factor A3"),
+            ("factor_ablation4", "Factor A4"),
+            ("factor_ablation5", "Factor A5"),
+        ],
+        "num_videos": [5, 10, 15, 20],
+        "slug": "factor_ablation",
+    },
+    "consumption": {
+        "title": "Consumption Ablation",
+        "configs": [
+            ("base", "Default"),
+            ("consumption_ablation1", "Consumption A1"),
+            ("consumption_ablation2", "Consumption A2"),
+            ("consumption_ablation3", "Consumption A3"),
+            ("consumption_ablation4", "Consumption A4"),
+            ("consumption_ablation5", "Consumption A5"),
+        ],
+        "num_videos": [5, 10, 15, 20],
+        "slug": "consumption_ablation",
+    },
 }
 
 ABLATION_CONFIG_SET: Set[str] = {
@@ -128,7 +154,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-sources",
         nargs="+",
-        default=["goalstep"],
+        default=["narration"],
         choices=["goalstep", "narration"],
         help="Data sources to aggregate (default: goalstep).",
     )
@@ -142,14 +168,21 @@ def parse_args() -> argparse.Namespace:
         "--config-ids",
         nargs="+",
         default=["base", "random_m", "random_2", "round_robin_m", "round_robin_2"],
-        help="Config IDs to include in the comparison. When omitted, auto-detect all configs.",
+        help="Config IDs to include in the general (non-ablation) comparison.",
     )
     parser.add_argument(
-        "--num-videos",
+        "--general-num-videos",
         nargs="+",
         type=int,
         default=None,
-        help="Number of videos (N) buckets to plot; auto-detected if omitted.",
+        help="Number of videos for general (non-ablation) plots. Auto-detect when omitted.",
+    )
+    parser.add_argument(
+        "--ablation-num-videos",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Number of videos for ablation plots (default: 5 10 15 20).",
     )
     parser.add_argument(
         "--iterations",
@@ -989,6 +1022,7 @@ def plot_rebuffering_ablation_group(
     group_key: str,
     available_configs: Set[str],
     available_nums: List[int],
+    target_nums: List[int],
     output_path: Path,
 ) -> bool:
     """Bar plot comparing rebuffering time across ablation configs with per-N differentiation."""
@@ -1009,7 +1043,7 @@ def plot_rebuffering_ablation_group(
         return False
 
     selected_nums = [
-        n for n in group_meta["num_videos"] if n in available_nums
+        n for n in target_nums if n in available_nums
     ]
     if not selected_nums:
         return False
@@ -1078,8 +1112,16 @@ def plot_rebuffering_ablation_group(
 def main() -> None:
     args = parse_args()
     base_dir: Path = args.base_dir
-    requested_config_ids: Optional[List[str]] = list(args.config_ids) if args.config_ids else None
-    requested_num_videos: Optional[List[int]] = list(args.num_videos) if args.num_videos else None
+    general_config_ids: List[str] = list(args.config_ids) if args.config_ids else list(DEFAULT_CONFIG_IDS)
+    general_num_override: Optional[List[int]] = (
+        sorted(set(args.general_num_videos)) if args.general_num_videos else None
+    )
+    ablation_target_numbers: List[int] = (
+        sorted(set(args.ablation_num_videos))
+        if args.ablation_num_videos
+        else list(DEFAULT_ABLATION_NUM_VIDEOS)
+    )
+    ablation_num_set = set(ablation_target_numbers)
     iterations: List[int] = list(args.iterations)
     data_sources: List[str] = list(dict.fromkeys(args.data_sources))
 
@@ -1111,29 +1153,29 @@ def main() -> None:
             continue
 
         # Determine number of videos to inspect
-    if requested_num_videos:
-        num_videos = sorted(set(requested_num_videos))
-    else:
-        detected = sorted(
-            int(p.name[1:])
-            for p in ds_root.glob("N*")
-            if p.is_dir() and len(p.name) > 1 and p.name[1:].isdigit()
-        )
-        filtered = [n for n in detected if n in TARGET_NUM_VIDEOS]
-        num_videos = filtered if filtered else list(DEFAULT_NUM_VIDEOS)
+        if general_num_override:
+            num_videos = general_num_override
+        else:
+            detected = sorted(
+                int(p.name[1:])
+                for p in ds_root.glob("N*")
+                if p.is_dir() and len(p.name) > 1 and p.name[1:].isdigit()
+            )
+            num_videos = detected if detected else list(DEFAULT_NUM_VIDEOS)
+        num_videos = sorted(set(num_videos) | set(ablation_target_numbers))
 
-        # Discover configs if not explicitly provided
-        configs_for_ds: Set[str] = set(requested_config_ids or [])
+        # Discover configs present in this data source
+        configs_for_ds: Set[str] = set()
         for n in num_videos:
             n_dir = ds_root / f"N{n}"
             if not n_dir.exists():
                 continue
             for cfg_dir in n_dir.iterdir():
                 if cfg_dir.is_dir():
-                    if requested_config_ids is None or cfg_dir.name in requested_config_ids:
-                        configs_for_ds.add(cfg_dir.name)
+                    configs_for_ds.add(cfg_dir.name)
         if not configs_for_ds:
-            configs_for_ds.update(DEFAULT_CONFIG_IDS)
+            configs_for_ds.update(general_config_ids)
+        configs_for_ds = sorted(configs_for_ds)
 
         # Initialize storage for this data source
         metrics_storage = {
@@ -1142,6 +1184,8 @@ def main() -> None:
 
         for num in num_videos:
             for config_id in configs_for_ds:
+                if config_id in ABLATION_CONFIG_SET and num not in ablation_num_set:
+                    continue
                 for iteration in iterations:
                     summary_path = (
                         ds_root
@@ -1194,23 +1238,21 @@ def main() -> None:
     for data_source, summary_stats in all_summary_stats.items():
         # Determine numbers and configs for plotting
         ds_numbers = sorted(available_numbers.get(data_source, []))
-        if requested_num_videos:
-            ds_numbers = sorted(set(ds_numbers) | set(requested_num_videos))
+        if general_num_override:
+            ds_numbers = sorted(set(ds_numbers) | set(general_num_override))
         if not ds_numbers:
             ds_numbers = list(DEFAULT_NUM_VIDEOS)
 
         configs_for_ds_set: Set[str] = set()
         for configs in summary_stats.values():
             configs_for_ds_set.update(configs.keys())
-        configs_for_ds = sorted(configs_for_ds_set)
-        if requested_config_ids:
-            configs_for_ds = sorted(set(configs_for_ds) | set(requested_config_ids))
-        if not configs_for_ds:
-            configs_for_ds = list(DEFAULT_CONFIG_IDS)
-
-        general_configs = [cfg for cfg in configs_for_ds if cfg not in ABLATION_CONFIG_SET]
+        configs_for_ds = sorted(configs_for_ds_set | set(general_config_ids))
+        general_config_set = set(general_config_ids)
+        general_configs = [cfg for cfg in configs_for_ds if cfg in general_config_set]
         if not general_configs:
-            general_configs = [cfg for cfg in configs_for_ds if cfg == BASE_CONFIG_ID]
+            general_configs = [cfg for cfg in configs_for_ds if cfg not in ABLATION_CONFIG_SET]
+        if not general_configs:
+            general_configs = list(general_config_ids)
 
         if args.output is None:
             plot_root_base = (base_dir / data_source / f"{data_source}_config_metrics")
@@ -1309,6 +1351,7 @@ def main() -> None:
                 group_key,
                 available_config_set,
                 ds_numbers,
+                ablation_target_numbers,
                 ablation_path,
             ):
                 print(f"[{data_source}] Saved rebuffering ablation plot ({group_key}) to {ablation_path}")
