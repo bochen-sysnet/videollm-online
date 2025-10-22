@@ -4411,6 +4411,12 @@ def main():
             iteration = max(1, int(value))
             sys.argv.pop(idx)
             sys.argv.pop(idx)
+
+    if '--standalone' in sys.argv:
+        standalone = True
+        sys.argv.pop(sys.argv.index('--standalone'))
+    else:
+        standalone = False
     
     # Parse the main args
     args = parse_args()
@@ -4420,6 +4426,7 @@ def main():
     args.num_videos = num_videos
     args.iteration = iteration
     args.config_id = config_id
+    args.standalone = standalone
     
     # modify config based on config_id
     config_id = getattr(args, 'config_id', 'base')
@@ -4467,8 +4474,32 @@ def main():
         Config.GENERATION_CHUNK_SIZE = 16
     elif config_id == 'chunk_ablation5':
         Config.GENERATION_CHUNK_SIZE = 32
+    elif config_id == 'factor_ablation1':
+        Config.BUFFER_URGENT_FACTOR = 0
+        Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
+    elif config_id == 'factor_ablation2':
+        Config.BUFFER_URGENT_FACTOR = 0.1
+        Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
+    elif config_id == 'factor_ablation3':
+        Config.BUFFER_URGENT_FACTOR = 0.3
+        Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
+    elif config_id == 'factor_ablation4':
+        Config.BUFFER_URGENT_FACTOR = 0.4
+        Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
+    elif config_id == 'factor_ablation5':
+        Config.BUFFER_URGENT_FACTOR = 0.5
+        Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
+    elif config_id == 'consumption_ablation1':
+        Config.USER_CONSUMPTION_SPEED = 1
+    elif config_id == 'consumption_ablation2':
+        Config.USER_CONSUMPTION_SPEED = 2
+    elif config_id == 'consumption_ablation3':
+        Config.USER_CONSUMPTION_SPEED = 4
+    elif config_id == 'consumption_ablation4':
+        Config.USER_CONSUMPTION_SPEED = 5
     else:
         print(f"⚠️  Invalid --config_id value '{config_id}', falling back to {config_id}")
+        exit(1)
 
     # create output directory based on dataset, num_videos, config_id, and iteration
     output_dir = f'figures/{data_source}/N{num_videos}/{config_id}/I{iteration}'
@@ -4535,6 +4566,21 @@ def main():
             conversation_start_times=default_start_times
         )
         
+        # Create aggregated metrics visualization
+        # print(f"\n📊 Creating aggregated metrics visualization...")
+        create_aggregated_metrics_visualization(overall_summary, output_dir=output_dir, data_source=data_source)
+
+        if standalone:
+
+            print(f"\n📊 Creating response length distribution analysis...")
+            create_response_length_distribution_analysis(overall_summary, data_source=data_source)
+
+            print("\n📊 Creating processor timeline...")
+            create_processor_timeline(overall_summary, data_source=data_source)
+
+            print("\n📊 Creating memory usage analysis...")
+            create_memory_visualization(overall_summary, data_source=data_source)
+        
         # # Create timing analysis
         # conversation_timings = [r for r in results if 'visual_embedding_time' in r]
         
@@ -4545,28 +4591,6 @@ def main():
         # Create PPL analysis visualization (includes PPL over time visualization)
         # print(f"\n📊 Creating dual PPL analysis...")
         # create_dual_ppl_frame_visualization(results, data_source=data_source)
-
-        # Create response length distribution analysis
-        # print(f"\n📊 Creating response length distribution analysis...")
-        # create_response_length_distribution_analysis(overall_summary, data_source=data_source)
-
-        # print("\n📊 Creating processor timeline...")
-        # create_processor_timeline(overall_summary, data_source=data_source)
-
-        # print("\n📊 Creating memory usage analysis...")
-        # create_memory_visualization(overall_summary, data_source=data_source)
-        
-        # Create aggregated metrics visualization
-        # print(f"\n📊 Creating aggregated metrics visualization...")
-        create_aggregated_metrics_visualization(overall_summary, output_dir=output_dir, data_source=data_source)
-        
-        # Create time per token analysis (skipped for speed)
-        # print(f"\n📊 Creating time per token analysis...")
-        # create_time_per_token_analysis(results, data_source=data_source)
-        
-        # Create generated word count analysis (skipped for speed)
-        # print(f"\n📊 Creating generated word count analysis...")
-        # create_generated_word_count_analysis(results, data_source=data_source)
 
         # save overall_summary to json in output_dir
         with open(os.path.join(output_dir, 'overall_summary.json'), 'w') as f:

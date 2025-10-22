@@ -141,7 +141,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config-ids",
         nargs="+",
-        default=None,
+        default=["base", "random_m", "random_2", "round_robin_m", "round_robin_2"],
         help="Config IDs to include in the comparison. When omitted, auto-detect all configs.",
     )
     parser.add_argument(
