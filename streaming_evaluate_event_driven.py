@@ -4463,6 +4463,12 @@ def main():
         Config.RL_WEIGHT = 0
         Config.AGE_WEIGHT = 0
         Config.BUFFER_URGENT_VALUE = 0
+        Config.SCHEDULING_METHOD = 'round_robin'
+    elif config_id == 'comp_ablation5':
+        Config.RL_WEIGHT = 0
+        Config.AGE_WEIGHT = 0
+        Config.BUFFER_URGENT_VALUE = 0
+        Config.SCHEDULING_METHOD = 'round_robin'
         Config.GENERATION_CHUNK_SIZE = 1000
     elif config_id == 'chunk_ablation1':
         Config.GENERATION_CHUNK_SIZE = 1

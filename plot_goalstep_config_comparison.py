@@ -68,6 +68,7 @@ MEMORY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
 )
 GENERATION_SPEED_METRIC = "generation_speed"
 FRACTION_RESPONSE_FRAMES_METRIC = "fraction_response_frames"
+GENERATION_LENGTHS = "generation_lengths"
 
 ABLATION_GROUPS = {
     "rl": {
@@ -88,7 +89,8 @@ ABLATION_GROUPS = {
             ("comp_ablation1", "No RL Score"),
             ("comp_ablation2", "No Age Score"),
             ("comp_ablation3", "No Buffer Urgent Threshold"),
-            ("comp_ablation4", "No Slicing"),
+            ("comp_ablation4", "No Scheduling"),
+            ("comp_ablation5", "No Slicing"),
         ],
         "num_videos": [5, 10, 15, 20],
         "slug": "comp_ablation",
@@ -304,6 +306,7 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     total_generation_time = 0.0
     total_nonzero_turns = 0
     total_frames = 0
+    generation_lengths: List[int] = []
     for result in results:
         num_frames = int(result.get("num_frames", 0) or 0)
         total_frames += max(num_frames, 0)
@@ -328,6 +331,7 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
             total_generation_time += float(turn.get("generation_time", 0.0))
             if word_count > 0:
                 total_nonzero_turns += 1
+            generation_lengths.append(word_count)
     ttft = float(np.mean(ttft_samples)) if ttft_samples else float("nan")
     perplexity = float(np.mean(ppl_samples)) if ppl_samples else float("nan")
 
@@ -399,6 +403,7 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
         metrics[FRACTION_RESPONSE_FRAMES_METRIC] = total_nonzero_turns / total_frames
     else:
         metrics[FRACTION_RESPONSE_FRAMES_METRIC] = float("nan")
+    metrics[GENERATION_LENGTHS] = generation_lengths
     metrics.update(component_means)
     return metrics
 
@@ -1334,6 +1339,34 @@ def plot_fraction_response_distribution(
     return True
 
 
+def plot_generation_length_distribution(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_id: str,
+    output_path: Path,
+) -> bool:
+    length_stats = summary_stats.get(GENERATION_LENGTHS, {}).get(config_id, {})
+    values: List[int] = []
+    for num_map in length_stats.values():
+        raw = num_map.get("values", [])
+        values.extend(int(v) for v in raw if v is not None and math.isfinite(v))
+
+    if not values:
+        return False
+
+    configure_plot_style()
+    fig, ax = plt.subplots(figsize=(3.4, 2.6))
+    ax.hist(values, bins=min(30, max(10, len(values) // 2)), color="#A23B72", alpha=0.85, edgecolor="black")
+    ax.set_title("Generation Length Distribution (Base Config)")
+    ax.set_xlabel("Generated Words per Response")
+    ax.set_ylabel("Count")
+    ax.grid(alpha=0.3, axis="y")
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 def plot_rebuffering_ablation_group(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     group_key: str,
@@ -1539,7 +1572,7 @@ def main() -> None:
         + [key for key, *_ in DELAY_METRICS]
         + [key for key, *_ in SCHEDULING_COMPONENTS]
         + [key for key, *_ in MEMORY_COMPONENTS]
-        + [GENERATION_SPEED_METRIC, FRACTION_RESPONSE_FRAMES_METRIC]
+        + [GENERATION_SPEED_METRIC, FRACTION_RESPONSE_FRAMES_METRIC, GENERATION_LENGTHS]
     )
 
     all_metrics_storage: Dict[str, Dict[str, Dict[str, Dict[int, List[float]]]]] = {}
@@ -1613,9 +1646,13 @@ def main() -> None:
                     metrics = load_iteration_metrics(summary_path)
                     available_numbers[data_source].add(num)
                     for metric_key in all_metric_keys:
-                        metrics_storage[metric_key][config_id][num].append(
-                            metrics.get(metric_key, float("nan"))
-                        )
+                        value = metrics.get(metric_key, float("nan"))
+                        storage_list = metrics_storage[metric_key][config_id][num]
+                        if metric_key == GENERATION_LENGTHS:
+                            if isinstance(value, list):
+                                storage_list.extend(value)
+                            continue
+                        storage_list.append(value)
 
         all_metrics_storage[data_source] = metrics_storage
 
@@ -1791,6 +1828,12 @@ def main() -> None:
             print(f"[{data_source}] Saved generation speed plot to {generation_speed_path}")
         else:
             print(f"[{data_source}] Skipped generation speed plot; no valid data.")
+
+        generation_length_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_generation_length_distribution.pdf"
+        if plot_generation_length_distribution(summary_stats, BASE_CONFIG_ID, generation_length_path):
+            print(f"[{data_source}] Saved generation length distribution to {generation_length_path}")
+        else:
+            print(f"[{data_source}] Skipped generation length distribution plot; no valid data.")
 
         # Fraction of frames with nonzero responses (base config)
         fraction_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_response_fraction_distribution.pdf"
