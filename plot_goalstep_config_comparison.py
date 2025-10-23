@@ -154,7 +154,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-sources",
         nargs="+",
-        default=["narration"],
+        default=["goalstep"],
         choices=["goalstep", "narration"],
         help="Data sources to aggregate (default: goalstep).",
     )
@@ -703,6 +703,7 @@ def plot_latency_components_vs_videos(
     )
     axes = np.atleast_1d(axes).flatten()
     plotted = False
+    combined_nums: Set[int] = set()
 
     for ax, (metric_key, comp_label) in zip(axes, component_entries):
         for idx, config_id in enumerate(config_ids):
@@ -1009,6 +1010,78 @@ def plot_memory_components_base_vs_videos(
     ax.set_ylabel("Peak Memory (MB)")
     ax.set_yscale("log")
     ax.set_xticks(num_videos)
+    ax.legend(frameon=False)
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def plot_roundrobin_comparison(
+    general_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    data_sources: List[str],
+    available_numbers: Dict[str, Set[int]],
+    general_num_override: Optional[List[int]],
+    output_path: Path,
+) -> bool:
+    """Plot round_robin_m rebuffering vs number of videos for each data source."""
+    configure_plot_style()
+    colors = _scientific_colors()
+    markers = ["o", "s", "^", "D", "P", "X"]
+
+    fig, ax = plt.subplots(figsize=(3.6, 2.6))
+    plotted = False
+    combined_nums: Set[int] = set()
+
+    for idx, data_source in enumerate(data_sources):
+        summary_stats = general_stats.get(data_source)
+        if not summary_stats:
+            continue
+        rebuffer_stats = summary_stats.get("rebuffer_time", {}).get("round_robin_m", {})
+        if not rebuffer_stats:
+            continue
+        nums = sorted(available_numbers.get(data_source, []))
+        if general_num_override:
+            nums = [n for n in nums if n in general_num_override]
+        means = []
+        stds = []
+        valid_nums = []
+        for n in nums:
+            entry = rebuffer_stats.get(n, {})
+            mean = entry.get("mean")
+            if mean is None or not math.isfinite(mean):
+                continue
+            std = entry.get("std", 0.0)
+            if std is None or not math.isfinite(std):
+                std = 0.0
+            means.append(mean)
+            stds.append(std)
+            valid_nums.append(n)
+        if not means:
+            continue
+        plotted = True
+        combined_nums.update(valid_nums)
+        ax.errorbar(
+            valid_nums,
+            means,
+            yerr=stds,
+            marker=markers[idx % len(markers)],
+            color=colors[idx % len(colors)],
+            linewidth=1.6,
+            markersize=4,
+            capsize=3,
+            label=data_source.title(),
+        )
+
+    if not plotted or not combined_nums:
+        plt.close(fig)
+        return False
+
+    ax.set_title("RoundRobin_m Rebuffering vs Number of Videos")
+    ax.set_xlabel("Number of Videos")
+    ax.set_ylabel("Total Rebuffering Time (s)")
+    ax.set_xticks(sorted(combined_nums))
     ax.legend(frameon=False)
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1394,6 +1467,24 @@ def main() -> None:
                             ]
                         )
         print(f"[{data_source}] Wrote summary table to {csv_path}")
+
+    # Combined round_robin_m comparison across data sources
+    if data_sources:
+        if args.output:
+            base_output = Path(args.output)
+            combined_path = base_output.parent / f"{base_output.stem}_roundrobin_rebuffer.pdf"
+        else:
+            combined_path = base_dir / "roundrobin_m_rebuffer_across_sources.pdf"
+        if plot_roundrobin_comparison(
+            all_summary_stats,
+            data_sources,
+            available_numbers,
+            general_num_override,
+            combined_path,
+        ):
+            print(f"Saved round_robin_m comparison to {combined_path}")
+        else:
+            print("Skipped round_robin_m comparison plot; no valid data.")
 
 
 if __name__ == "__main__":
