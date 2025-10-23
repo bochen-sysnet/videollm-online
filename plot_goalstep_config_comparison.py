@@ -27,7 +27,7 @@ DEFAULT_CONFIG_IDS: Tuple[str, ...] = (
     "round_robin_2",
 )
 DEFAULT_NUM_VIDEOS: Tuple[int, ...] = (1, 3, 5, 8, 10, 15, 20)
-DEFAULT_ABLATION_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15, 20)
+DEFAULT_ABLATION_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15)
 DEFAULT_ITERATIONS: Tuple[int, ...] = (1, 2, 3, 4, 5)
 DEFAULT_BASE_DIR = Path("figures")
 BASE_CONFIG_ID = "base"
@@ -109,36 +109,79 @@ ABLATION_GROUPS = {
         "title": "Factor Ablation",
         "configs": [
             ("base", "Default"),
-            ("factor_ablation1", "Factor A1"),
-            ("factor_ablation2", "Factor A2"),
-            ("factor_ablation3", "Factor A3"),
-            ("factor_ablation4", "Factor A4"),
-            ("factor_ablation5", "Factor A5"),
+            ("factor_ablation1", "Factor 0"),
+            ("factor_ablation2", "Factor 0.1"),
+            ("factor_ablation3", "Factor 0.3"),
+            ("factor_ablation4", "Factor 0.4"),
+            ("factor_ablation5", "Factor 0.5"),
+            ("factor_ablation6", "Factor 0.6"),
+            ("factor_ablation7", "Factor 0.7"),
+            ("factor_ablation8", "Factor 0.8"),
+            ("factor_ablation9", "Factor 0.9"),
+            ("factor_ablation10", "Factor 1.0"),
         ],
         "num_videos": [5, 10, 15, 20],
         "slug": "factor_ablation",
     },
     "consumption": {
         "title": "Consumption Ablation",
-        "configs": [
-            ("base", "Default"),
-            ("consumption_ablation1", "Consumption A1"),
-            ("consumption_ablation2", "Consumption A2"),
-            ("consumption_ablation3", "Consumption A3"),
-            ("consumption_ablation4", "Consumption A4"),
-            ("consumption_ablation5", "Consumption A5"),
+        "grouped_configs": [
+            ("Speed 1", [
+                ("consumption_ablation1_base", "Base"),
+                ("consumption_ablation1_rr_2", "RR-2"),
+                ("consumption_ablation1_rr_m", "RR-m"),
+                ("consumption_ablation1_rand_2", "Rand-2"),
+                ("consumption_ablation1_rand_m", "Rand-m"),
+            ]),
+            ("Speed 2", [
+                ("consumption_ablation2_base", "Base"),
+                ("consumption_ablation2_rr_2", "RR-2"),
+                ("consumption_ablation2_rr_m", "RR-m"),
+                ("consumption_ablation2_rand_2", "Rand-2"),
+                ("consumption_ablation2_rand_m", "Rand-m"),
+            ]),
+            ("Speed 3", [
+                ("consumption_ablation3_base", "Base"),
+                ("consumption_ablation3_rr_2", "RR-2"),
+                ("consumption_ablation3_rr_m", "RR-m"),
+                ("consumption_ablation3_rand_2", "Rand-2"),
+                ("consumption_ablation3_rand_m", "Rand-m"),
+            ]),
+            ("Speed 4", [
+                ("consumption_ablation4_base", "Base"),
+                ("consumption_ablation4_rr_2", "RR-2"),
+                ("consumption_ablation4_rr_m", "RR-m"),
+                ("consumption_ablation4_rand_2", "Rand-2"),
+                ("consumption_ablation4_rand_m", "Rand-m"),
+            ]),
+            ("Speed 5", [
+                ("consumption_ablation5_base", "Base"),
+                ("consumption_ablation5_rr_2", "RR-2"),
+                ("consumption_ablation5_rr_m", "RR-m"),
+                ("consumption_ablation5_rand_2", "Rand-2"),
+                ("consumption_ablation5_rand_m", "Rand-m"),
+            ]),
         ],
-        "num_videos": [5, 10, 15, 20],
+        "num_videos": [5],
         "slug": "consumption_ablation",
     },
 }
 
-ABLATION_CONFIG_SET: Set[str] = {
-    cfg
-    for group in ABLATION_GROUPS.values()
-    for cfg, _ in group["configs"]
-    if cfg != "base"
-}
+ABLATION_CONFIG_SET: Set[str] = set()
+ABLATION_CONFIG_ALLOWED_NUMS: Dict[str, Set[int]] = {}
+for group_meta in ABLATION_GROUPS.values():
+    allowed_nums = set(group_meta.get("num_videos", []))
+    if "configs" in group_meta:
+        for cfg, _ in group_meta["configs"]:
+            if cfg != "base":
+                ABLATION_CONFIG_SET.add(cfg)
+                ABLATION_CONFIG_ALLOWED_NUMS[cfg] = allowed_nums.copy()
+    if "grouped_configs" in group_meta:
+        for _, cfgs in group_meta["grouped_configs"]:
+            for cfg, _ in cfgs:
+                if cfg != "base":
+                    ABLATION_CONFIG_SET.add(cfg)
+                    ABLATION_CONFIG_ALLOWED_NUMS[cfg] = allowed_nums.copy()
 
 
 # ------------------------------------------------------------------------------
@@ -155,7 +198,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-sources",
         nargs="+",
-        default=["goalstep"],
+        default=["goalstep", "narration"],
         choices=["goalstep", "narration"],
         help="Data sources to aggregate (default: goalstep).",
     )
@@ -1268,6 +1311,95 @@ def plot_rebuffering_ablation_group(
     if not rebuffer_stats:
         return False
 
+    # Handle grouped configs (e.g., consumption ablation)
+    if "grouped_configs" in group_meta:
+        grouped_cfgs = group_meta["grouped_configs"]
+        # Determine which number of videos to use (first available intersection)
+        single_num = None
+        for n in target_nums:
+            if n in available_nums:
+                single_num = n
+                break
+        if single_num is None:
+            return False
+
+        group_labels = []
+        baseline_labels: List[str] = []
+        baselines = []  # list of config names per baseline index (common across groups)
+
+        # Initialize from first group that has data
+        for group_label, configs_list in grouped_cfgs:
+            # On first valid group, capture baseline ordering
+            if not baseline_labels:
+                baseline_labels = [label for _, label in configs_list]
+                baselines = [cfg for cfg, _ in configs_list]
+            # Ensure group ordering is consistent even if some configs missing
+            group_labels.append(group_label)
+
+        if not baseline_labels:
+            return False
+
+        values = {label: [] for label in baseline_labels}
+        errors = {label: [] for label in baseline_labels}
+
+        for group_label, configs_list in grouped_cfgs:
+            label_to_cfg = {label: cfg for cfg, label in configs_list}
+            for baseline_label in baseline_labels:
+                cfg_name = label_to_cfg.get(baseline_label)
+                if cfg_name is None:
+                    values[baseline_label].append(float("nan"))
+                    errors[baseline_label].append(float("nan"))
+                    continue
+                entry = rebuffer_stats.get(cfg_name, {}).get(single_num, {})
+                mean = entry.get("mean")
+                std = entry.get("std", 0.0)
+                if mean is None or not math.isfinite(mean):
+                    values[baseline_label].append(float("nan"))
+                    errors[baseline_label].append(float("nan"))
+                else:
+                    if std is None or not math.isfinite(std):
+                        std = 0.0
+                    values[baseline_label].append(mean)
+                    errors[baseline_label].append(std)
+
+        # Remove baselines with no data at all
+        valid_baselines = [bl for bl in baseline_labels if any(math.isfinite(v) for v in values[bl])]
+        if not valid_baselines:
+            return False
+
+        configure_plot_style()
+        colors = _scientific_colors()
+        x = np.arange(len(group_labels))
+        bar_width = min(0.75 / max(len(valid_baselines), 1), 0.18)
+        fig, ax = plt.subplots(figsize=(3.8, 2.6))
+
+        for idx, baseline_label in enumerate(valid_baselines):
+            means_arr = np.asarray(values[baseline_label], dtype=float)
+            stds_arr = np.asarray(errors[baseline_label], dtype=float)
+            offset = (idx - (len(valid_baselines) - 1) / 2) * bar_width
+            ax.bar(
+                x + offset,
+                means_arr,
+                width=bar_width * 0.95,
+                yerr=stds_arr,
+                capsize=2.5,
+                color=colors[idx % len(colors)],
+                edgecolor="black",
+                linewidth=0.4,
+                label=baseline_label,
+            )
+
+        ax.set_title(group_meta["title"])
+        ax.set_ylabel("Total Rebuffering Time (s)")
+        ax.set_xticks(x)
+        ax.set_xticklabels(group_labels, rotation=20, ha="right")
+        ax.legend(frameon=False, fontsize=7)
+        fig.tight_layout(pad=0.8)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, bbox_inches="tight")
+        plt.close(fig)
+        return True
+
     ablation_configs = [
         (cfg, label)
         for cfg, label in group_meta["configs"]
@@ -1350,11 +1482,13 @@ def main() -> None:
     general_num_override: Optional[List[int]] = (
         sorted(set(args.general_num_videos)) if args.general_num_videos else None
     )
-    ablation_target_numbers: List[int] = (
-        sorted(set(args.ablation_num_videos))
-        if args.ablation_num_videos
-        else list(DEFAULT_ABLATION_NUM_VIDEOS)
-    )
+    if args.ablation_num_videos:
+        ablation_target_numbers: List[int] = sorted(set(args.ablation_num_videos))
+    else:
+        nums_union: Set[int] = set()
+        for group_meta in ABLATION_GROUPS.values():
+            nums_union.update(group_meta.get("num_videos", []))
+        ablation_target_numbers = sorted(nums_union) if nums_union else list(DEFAULT_ABLATION_NUM_VIDEOS)
     ablation_num_set = set(ablation_target_numbers)
     iterations: List[int] = list(args.iterations)
     data_sources: List[str] = list(dict.fromkeys(args.data_sources))
@@ -1419,7 +1553,11 @@ def main() -> None:
 
         for num in num_videos:
             for config_id in configs_for_ds:
-                if config_id in ABLATION_CONFIG_SET and num not in ablation_num_set:
+                allowed = ABLATION_CONFIG_ALLOWED_NUMS.get(config_id)
+                if allowed:
+                    if num not in allowed:
+                        continue
+                elif config_id in ABLATION_CONFIG_SET and num not in ablation_num_set:
                     continue
                 for iteration in iterations:
                     summary_path = (
@@ -1586,7 +1724,7 @@ def main() -> None:
                 group_key,
                 available_config_set,
                 ds_numbers,
-                ablation_target_numbers,
+                group_meta.get("num_videos", ablation_target_numbers),
                 ablation_path,
             ):
                 print(f"[{data_source}] Saved rebuffering ablation plot ({group_key}) to {ablation_path}")

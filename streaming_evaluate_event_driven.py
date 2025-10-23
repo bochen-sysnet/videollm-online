@@ -4489,6 +4489,21 @@ def main():
     elif config_id == 'factor_ablation5':
         Config.BUFFER_URGENT_FACTOR = 0.5
         Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
+    elif config_id == 'factor_ablation6':
+        Config.BUFFER_URGENT_FACTOR = 0.6
+        Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
+    elif config_id == 'factor_ablation7':
+        Config.BUFFER_URGENT_FACTOR = 0.7
+        Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
+    elif config_id == 'factor_ablation8':
+        Config.BUFFER_URGENT_FACTOR = 0.8
+        Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
+    elif config_id == 'factor_ablation9':
+        Config.BUFFER_URGENT_FACTOR = 0.9
+        Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
+    elif config_id == 'factor_ablation10':
+        Config.BUFFER_URGENT_FACTOR = 1.0
+        Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
     elif config_id == 'consumption_ablation1_base':
         Config.USER_CONSUMPTION_SPEED = 1
     elif config_id == 'consumption_ablation1_rr_2':
