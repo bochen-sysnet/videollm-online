@@ -27,7 +27,7 @@ DEFAULT_CONFIG_IDS: Tuple[str, ...] = (
     "round_robin_2",
 )
 DEFAULT_NUM_VIDEOS: Tuple[int, ...] = (1, 3, 5, 8, 10, 15, 20)
-DEFAULT_ABLATION_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15)
+DEFAULT_ABLATION_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15, 20)
 DEFAULT_ITERATIONS: Tuple[int, ...] = (1, 2, 3, 4, 5)
 DEFAULT_BASE_DIR = Path("figures")
 BASE_CONFIG_ID = "base"
@@ -67,6 +67,7 @@ MEMORY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
     ("cpu_memory_growth_peak", "CPU Growth", "cpu_growth"),
 )
 GENERATION_SPEED_METRIC = "generation_speed"
+FRACTION_RESPONSE_FRAMES_METRIC = "fraction_response_frames"
 
 ABLATION_GROUPS = {
     "rl": {
@@ -84,10 +85,10 @@ ABLATION_GROUPS = {
         "title": "Computation Modules Ablation",
         "configs": [
             ("base", "Default"),
-            ("comp_ablation1", "No Comp 1"),
-            ("comp_ablation2", "No Comp 2"),
-            ("comp_ablation3", "No Comp 3"),
-            ("comp_ablation4", "No Comp 4"),
+            ("comp_ablation1", "No RL Score"),
+            ("comp_ablation2", "No Age Score"),
+            ("comp_ablation3", "No Buffer Urgent Threshold"),
+            ("comp_ablation4", "No Slicing"),
         ],
         "num_videos": [5, 10, 15, 20],
         "slug": "comp_ablation",
@@ -301,7 +302,11 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     ppl_samples: List[float] = []
     total_generated_words = 0.0
     total_generation_time = 0.0
+    total_nonzero_turns = 0
+    total_frames = 0
     for result in results:
+        num_frames = int(result.get("num_frames", 0) or 0)
+        total_frames += max(num_frames, 0)
         if result.get("generated_turns"):
             resp_time = result.get("response_time")
             if resp_time is not None:
@@ -321,6 +326,8 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
             word_count = len([w for w in text.strip().split() if w])
             total_generated_words += word_count
             total_generation_time += float(turn.get("generation_time", 0.0))
+            if word_count > 0:
+                total_nonzero_turns += 1
     ttft = float(np.mean(ttft_samples)) if ttft_samples else float("nan")
     perplexity = float(np.mean(ppl_samples)) if ppl_samples else float("nan")
 
@@ -388,6 +395,10 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
         metrics[GENERATION_SPEED_METRIC] = total_generated_words / total_generation_time
     else:
         metrics[GENERATION_SPEED_METRIC] = float("nan")
+    if total_frames > 0:
+        metrics[FRACTION_RESPONSE_FRAMES_METRIC] = total_nonzero_turns / total_frames
+    else:
+        metrics[FRACTION_RESPONSE_FRAMES_METRIC] = float("nan")
     metrics.update(component_means)
     return metrics
 
@@ -1294,6 +1305,35 @@ def plot_generation_speed_single_video(
     return True
 
 
+def plot_fraction_response_distribution(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_id: str,
+    output_path: Path,
+) -> bool:
+    fraction_stats = summary_stats.get(FRACTION_RESPONSE_FRAMES_METRIC, {})
+    config_stats = fraction_stats.get(config_id, {})
+    values: List[float] = []
+    for num_map in config_stats.values():
+        raw = num_map.get("values", [])
+        values.extend(v for v in raw if v is not None and math.isfinite(v))
+
+    if not values:
+        return False
+
+    configure_plot_style()
+    fig, ax = plt.subplots(figsize=(3.4, 2.6))
+    ax.hist(values, bins=min(20, max(5, len(values))), color="#4E79A7", alpha=0.8, edgecolor="black")
+    ax.set_title("Fraction of Frames with Responses (Base Config)")
+    ax.set_xlabel("Fraction of Frames with Nonzero Response")
+    ax.set_ylabel("Run Count")
+    ax.grid(alpha=0.3, axis="y")
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 def plot_rebuffering_ablation_group(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     group_key: str,
@@ -1499,7 +1539,7 @@ def main() -> None:
         + [key for key, *_ in DELAY_METRICS]
         + [key for key, *_ in SCHEDULING_COMPONENTS]
         + [key for key, *_ in MEMORY_COMPONENTS]
-        + [GENERATION_SPEED_METRIC]
+        + [GENERATION_SPEED_METRIC, FRACTION_RESPONSE_FRAMES_METRIC]
     )
 
     all_metrics_storage: Dict[str, Dict[str, Dict[str, Dict[int, List[float]]]]] = {}
@@ -1751,6 +1791,13 @@ def main() -> None:
             print(f"[{data_source}] Saved generation speed plot to {generation_speed_path}")
         else:
             print(f"[{data_source}] Skipped generation speed plot; no valid data.")
+
+        # Fraction of frames with nonzero responses (base config)
+        fraction_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_response_fraction_distribution.pdf"
+        if plot_fraction_response_distribution(summary_stats, BASE_CONFIG_ID, fraction_path):
+            print(f"[{data_source}] Saved response fraction distribution to {fraction_path}")
+        else:
+            print(f"[{data_source}] Skipped response fraction distribution plot; no valid data.")
 
         # CSV summary
         csv_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}.csv"
