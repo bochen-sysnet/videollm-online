@@ -66,6 +66,7 @@ MEMORY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
     ("combined_dynamic_memory", "Combined Dynamic", "combined_dynamic"),
     ("cpu_memory_growth_peak", "CPU Growth", "cpu_growth"),
 )
+GENERATION_SPEED_METRIC = "generation_speed"
 
 ABLATION_GROUPS = {
     "rl": {
@@ -255,6 +256,8 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     results = summary.get("results", []) or []
     ttft_samples: List[float] = []
     ppl_samples: List[float] = []
+    total_generated_words = 0.0
+    total_generation_time = 0.0
     for result in results:
         if result.get("generated_turns"):
             resp_time = result.get("response_time")
@@ -267,6 +270,14 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
             value = result.get(key)
             if value is not None:
                 component_samples[key].append(float(value))
+
+        for turn in result.get("generated_turns", []):
+            text = turn.get("text", "")
+            if "Assistant:" in text:
+                text = text.split("Assistant:", 1)[-1]
+            word_count = len([w for w in text.strip().split() if w])
+            total_generated_words += word_count
+            total_generation_time += float(turn.get("generation_time", 0.0))
     ttft = float(np.mean(ttft_samples)) if ttft_samples else float("nan")
     perplexity = float(np.mean(ppl_samples)) if ppl_samples else float("nan")
 
@@ -330,6 +341,10 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
             "cpu_memory_growth_peak": float(np.mean(cpu_growth_values)) if cpu_growth_values else float("nan"),
         }
     )
+    if total_generation_time > 0:
+        metrics[GENERATION_SPEED_METRIC] = total_generated_words / total_generation_time
+    else:
+        metrics[GENERATION_SPEED_METRIC] = float("nan")
     metrics.update(component_means)
     return metrics
 
@@ -1105,6 +1120,7 @@ def plot_roundrobin_ratio(
     fig, ax = plt.subplots(figsize=(3.6, 2.6))
     plotted = False
     combined_nums: Set[int] = set()
+    combined_nums: Set[int] = set()
 
     for idx, data_source in enumerate(data_sources):
         summary_stats = general_stats.get(data_source)
@@ -1170,11 +1186,64 @@ def plot_roundrobin_ratio(
         plt.close(fig)
         return False
 
-    ax.set_title("Rebuffering Saving Ratio vs Number of Videos")
+    ax.set_title("RoundRobin_2 / RoundRobin_m Rebuffering Ratio")
     ax.set_xlabel("Number of Videos")
-    ax.set_ylabel("Rebuffering Saving Ratio")
+    ax.set_ylabel("Rebuffering Ratio")
     ax.set_xticks(sorted(combined_nums))
     ax.legend(frameon=False)
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def plot_generation_speed_single_video(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    configs: List[str],
+    output_path: Path,
+    single_video_num: int = 1,
+) -> bool:
+    """Bar plot comparing generation speed (words/s) for single-video experiments."""
+    speed_stats = summary_stats.get(GENERATION_SPEED_METRIC, {})
+    if not speed_stats:
+        return False
+
+    means = []
+    stds = []
+    labels = []
+    for cfg in configs:
+        entry = speed_stats.get(cfg, {}).get(single_video_num)
+        if not entry:
+            continue
+        mean = entry.get("mean")
+        if mean is None or not math.isfinite(mean):
+            continue
+        std = entry.get("std", 0.0) or 0.0
+        means.append(mean)
+        stds.append(std)
+        labels.append(cfg)
+
+    if not means:
+        return False
+
+    configure_plot_style()
+    colors = _scientific_colors()
+    x = np.arange(len(means))
+    fig, ax = plt.subplots(figsize=(3.4, 2.6))
+    ax.bar(
+        x,
+        means,
+        yerr=stds,
+        capsize=2.5,
+        color=[colors[i % len(colors)] for i in range(len(means))],
+        edgecolor="black",
+        linewidth=0.4,
+    )
+    ax.set_title(f"Generation Speed (N={single_video_num})")
+    ax.set_ylabel("Words per Second")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -1296,6 +1365,7 @@ def main() -> None:
         + [key for key, *_ in DELAY_METRICS]
         + [key for key, *_ in SCHEDULING_COMPONENTS]
         + [key for key, *_ in MEMORY_COMPONENTS]
+        + [GENERATION_SPEED_METRIC]
     )
 
     all_metrics_storage: Dict[str, Dict[str, Dict[str, Dict[int, List[float]]]]] = {}
@@ -1536,6 +1606,13 @@ def main() -> None:
             print(f"[{data_source}] Saved latency components vs videos plot to {latency_videos_path}")
         else:
             print(f"[{data_source}] Skipped latency components vs videos plot; no valid data.")
+
+        # Generation speed for single-video experiments
+        generation_speed_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_generation_speed_single_video.pdf"
+        if plot_generation_speed_single_video(summary_stats, general_configs, generation_speed_path):
+            print(f"[{data_source}] Saved generation speed plot to {generation_speed_path}")
+        else:
+            print(f"[{data_source}] Skipped generation speed plot; no valid data.")
 
         # CSV summary
         csv_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}.csv"
