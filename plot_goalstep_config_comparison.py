@@ -1090,6 +1090,98 @@ def plot_roundrobin_comparison(
     return True
 
 
+def plot_roundrobin_ratio(
+    general_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    data_sources: List[str],
+    available_numbers: Dict[str, Set[int]],
+    general_num_override: Optional[List[int]],
+    output_path: Path,
+) -> bool:
+    """Plot ratio of round_robin_2 to round_robin_m rebuffering vs number of videos for each data source."""
+    configure_plot_style()
+    colors = _scientific_colors()
+    markers = ["o", "s", "^", "D", "P", "X"]
+
+    fig, ax = plt.subplots(figsize=(3.6, 2.6))
+    plotted = False
+    combined_nums: Set[int] = set()
+
+    for idx, data_source in enumerate(data_sources):
+        summary_stats = general_stats.get(data_source)
+        if not summary_stats:
+            continue
+        m_stats = summary_stats.get("rebuffer_time", {}).get("round_robin_m", {})
+        rr2_stats = summary_stats.get("rebuffer_time", {}).get("round_robin_2", {})
+        if not m_stats or not rr2_stats:
+            continue
+        nums = sorted(available_numbers.get(data_source, []))
+        if general_num_override:
+            nums = [n for n in nums if n in general_num_override]
+        ratios = []
+        stds = []
+        valid_nums = []
+        for n in nums:
+            entry_m = m_stats.get(n, {})
+            entry_rr2 = rr2_stats.get(n, {})
+            mean_m = entry_m.get("mean")
+            mean_rr2 = entry_rr2.get("mean")
+            if (
+                mean_m is None
+                or mean_rr2 is None
+                or not math.isfinite(mean_m)
+                or not math.isfinite(mean_rr2)
+                or mean_m == 0
+            ):
+                continue
+
+            # compute ratio
+            ratio = mean_rr2 / mean_m
+            ratios.append(ratio)
+
+            # approximate std of ratio assuming independence
+            std_m = entry_m.get("std", 0.0) or 0.0
+            std_rr2 = entry_rr2.get("std", 0.0) or 0.0
+            # avoid division by zero
+            ratio_std = 0.0
+            if mean_m != 0:
+                ratio_std = ratio * math.sqrt(
+                    (std_rr2 / mean_rr2) ** 2 if mean_rr2 else 0.0
+                    + (std_m / mean_m) ** 2
+                )
+            stds.append(ratio_std)
+            valid_nums.append(n)
+        if not ratios:
+            continue
+        plotted = True
+        combined_nums.update(valid_nums)
+        ax.errorbar(
+            valid_nums,
+            ratios,
+            yerr=stds,
+            marker=markers[idx % len(markers)],
+            color=colors[idx % len(colors)],
+            linewidth=1.6,
+            markersize=4,
+            capsize=3,
+            label=data_source.title(),
+        )
+
+    if not plotted or not combined_nums:
+        plt.close(fig)
+        return False
+
+    ax.set_title("Rebuffering Saving Ratio vs Number of Videos")
+    ax.set_xlabel("Number of Videos")
+    ax.set_ylabel("Rebuffering Saving Ratio")
+    ax.set_xticks(sorted(combined_nums))
+    ax.legend(frameon=False)
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 def plot_rebuffering_ablation_group(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     group_key: str,
@@ -1485,6 +1577,24 @@ def main() -> None:
             print(f"Saved round_robin_m comparison to {combined_path}")
         else:
             print("Skipped round_robin_m comparison plot; no valid data.")
+
+    # Combined round_robin_2 / round_robin_m ratio comparison across data sources
+    if data_sources:
+        if args.output:
+            base_output = Path(args.output)
+            combined_path = base_output.parent / f"{base_output.stem}_roundrobin_ratio.pdf"
+        else:
+            combined_path = base_dir / "roundrobin_2_over_m_ratio_across_sources.pdf"
+        if plot_roundrobin_ratio(
+            all_summary_stats,
+            data_sources,
+            available_numbers,
+            general_num_override,
+            combined_path,
+        ):
+            print(f"Saved round_robin_2 / round_robin_m ratio comparison to {combined_path}")
+        else:
+            print("Skipped round_robin_2 / round_robin_m ratio comparison plot; no valid data.")
 
 
 if __name__ == "__main__":
