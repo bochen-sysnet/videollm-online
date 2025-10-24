@@ -71,11 +71,17 @@ FRACTION_RESPONSE_FRAMES_METRIC = "fraction_response_frames"
 GENERATION_LENGTHS = "generation_lengths"
 KV_OFFLOAD_SCATTER = "kv_offload_pairs"
 KV_RELOAD_SCATTER = "kv_reload_pairs"
+KV_SECONDARY_METRIC = "kv_transfer_per_second"
+KV_OFFLOAD_SLOPE = "kv_offload_slope"
+KV_RELOAD_SLOPE = "kv_reload_slope"
 
 EXTEND_METRICS = {
     GENERATION_LENGTHS,
     KV_OFFLOAD_SCATTER,
     KV_RELOAD_SCATTER,
+    KV_SECONDARY_METRIC,
+    KV_OFFLOAD_SLOPE,
+    KV_RELOAD_SLOPE,
 }
 GENERATION_LENGTHS = "generation_lengths"
 
@@ -318,6 +324,9 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     generation_lengths: List[int] = []
     kv_pairs_offload: List[Tuple[float, float]] = []
     kv_pairs_reload: List[Tuple[float, float]] = []
+    kv_per_second: List[List[Tuple[float, float]]] = []
+    offload_slopes: List[float] = []
+    reload_slopes: List[float] = []
     for result in results:
         num_frames = int(result.get("num_frames", 0) or 0)
         total_frames += max(num_frames, 0)
@@ -387,6 +396,32 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
         for size, reload_t in zip(transfer_sizes, reload_times):
             if reload_t and math.isfinite(reload_t):
                 kv_pairs_reload.append((float(size), float(reload_t)))
+        combined = []
+        frames = min(len(transfer_sizes), len(offload_times), len(reload_times))
+        for idx in range(frames):
+            size = float(transfer_sizes[idx])
+            total_time = float(offload_times[idx]) + float(reload_times[idx])
+            if math.isfinite(size) and math.isfinite(total_time):
+                combined.append((size, total_time))
+        if combined:
+            per_second = []
+            for i in range(0, len(combined) - 1, 2):
+                size_total = combined[i][0] + combined[i + 1][0]
+                time_total = (combined[i][1] + combined[i + 1][1]) * 1000.0
+                per_second.append((size_total, time_total))
+            if per_second:
+                kv_per_second.append(per_second)
+
+        if len(offload_times) > 1:
+            indices = np.arange(len(offload_times))
+            slope, _ = np.polyfit(indices, [float(t) * 1000.0 for t in offload_times], 1)
+            if math.isfinite(slope):
+                offload_slopes.append(float(slope))
+        if len(reload_times) > 1:
+            indices = np.arange(len(reload_times))
+            slope, _ = np.polyfit(indices, [float(t) * 1000.0 for t in reload_times], 1)
+            if math.isfinite(slope):
+                reload_slopes.append(float(slope))
 
     processing_delay = float(np.mean(processing_delays)) if processing_delays else float("nan")
     queuing_delay = float(np.mean(queuing_delays)) if queuing_delays else float("nan")
@@ -427,6 +462,12 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     metrics[GENERATION_LENGTHS] = generation_lengths
     metrics[KV_OFFLOAD_SCATTER] = kv_pairs_offload
     metrics[KV_RELOAD_SCATTER] = kv_pairs_reload
+    flattened_pairs = [pair for per_second in kv_per_second for pair in per_second]
+    metrics[KV_SECONDARY_METRIC] = flattened_pairs
+    # Debug for slopes
+    # print(f"[DEBUG] slopes collected off={len(offload_slopes)} reload={len(reload_slopes)}")
+    metrics[KV_OFFLOAD_SLOPE] = offload_slopes
+    metrics[KV_RELOAD_SLOPE] = reload_slopes
     metrics.update(component_means)
     return metrics
 
@@ -1467,6 +1508,63 @@ def plot_kv_transfer_scatter(
     return True
 
 
+def plot_kv_slope_comparison(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_id: str,
+    output_path: Path,
+) -> bool:
+    off_stats = summary_stats.get(KV_OFFLOAD_SLOPE, {}).get(config_id, {})
+    reload_stats = summary_stats.get(KV_RELOAD_SLOPE, {}).get(config_id, {})
+
+    labels = []
+    off_means = []
+    off_stds = []
+    reload_means = []
+    reload_stds = []
+
+    video_numbers = sorted(set(off_stats.keys()) | set(reload_stats.keys()))
+    for num in video_numbers:
+        off_entries = [2*v for v in off_stats.get(num, {}).get("values", []) if math.isfinite(v)]
+        reload_entries = [2*v for v in reload_stats.get(num, {}).get("values", []) if math.isfinite(v)]
+        if not off_entries and not reload_entries:
+            continue
+        labels.append(num)
+        if off_entries:
+            off_means.append(float(np.mean(off_entries)))
+            off_stds.append(float(np.std(off_entries)))
+        else:
+            off_means.append(0.0)
+            off_stds.append(0.0)
+        if reload_entries:
+            reload_means.append(float(np.mean(reload_entries)))
+            reload_stds.append(float(np.std(reload_entries)))
+        else:
+            reload_means.append(0.0)
+            reload_stds.append(0.0)
+
+    if not labels:
+        return False
+
+    configure_plot_style()
+    fig, ax = plt.subplots(figsize=(3.4, 2.6))
+    x = np.arange(len(labels))
+    bar_width = 0.65
+    ax.bar([0], off_means, bar_width, yerr=off_stds, capsize=2.5, color="#4E79A7", edgecolor="black", linewidth=0.4, label="Offload")
+    ax.bar([1], reload_means, bar_width, yerr=reload_stds, capsize=2.5, color="#F28E2B", edgecolor="black", linewidth=0.4, label="Reload")
+    # ax.set_xlabel("Number of Videos")
+    ax.set_ylabel("Switch Time Inc. Per Second (ms)")
+    # set x tick as "offload" and "reload"
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["Offload", "Reload"])
+    ax.grid(axis="y", alpha=0.3)
+    # ax.legend(frameon=False)
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 def plot_rebuffering_ablation_group(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     group_key: str,
@@ -1678,6 +1776,9 @@ def main() -> None:
             GENERATION_LENGTHS,
             KV_OFFLOAD_SCATTER,
             KV_RELOAD_SCATTER,
+            KV_SECONDARY_METRIC,
+            KV_OFFLOAD_SLOPE,
+            KV_RELOAD_SLOPE,
         ]
     )
 
@@ -1960,6 +2061,12 @@ def main() -> None:
             print(f"[{data_source}] Saved KV transfer scatter to {kv_scatter_path}")
         else:
             print(f"[{data_source}] Skipped KV transfer scatter plot; no valid data.")
+
+        kv_slope_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_kv_transfer_slope.pdf"
+        if plot_kv_slope_comparison(summary_stats, "round_robin_m", kv_slope_path):
+            print(f"[{data_source}] Saved KV transfer slope plot to {kv_slope_path}")
+        else:
+            print(f"[{data_source}] Skipped KV transfer slope plot; no valid data.")
 
         # CSV summary
         csv_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}.csv"
