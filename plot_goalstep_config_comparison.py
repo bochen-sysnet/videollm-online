@@ -74,6 +74,7 @@ KV_RELOAD_SCATTER = "kv_reload_pairs"
 KV_SECONDARY_METRIC = "kv_transfer_per_second"
 KV_OFFLOAD_SLOPE = "kv_offload_slope"
 KV_RELOAD_SLOPE = "kv_reload_slope"
+TIMING_BREAKDOWN_METRIC = "timing_breakdown"
 
 EXTEND_METRICS = {
     GENERATION_LENGTHS,
@@ -82,6 +83,7 @@ EXTEND_METRICS = {
     KV_SECONDARY_METRIC,
     KV_OFFLOAD_SLOPE,
     KV_RELOAD_SLOPE,
+    TIMING_BREAKDOWN_METRIC,
 }
 GENERATION_LENGTHS = "generation_lengths"
 
@@ -327,6 +329,7 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     kv_per_second: List[List[Tuple[float, float]]] = []
     offload_slopes: List[float] = []
     reload_slopes: List[float] = []
+    timing_breakdowns: List[Tuple[float, float, float, float, float, float, float]] = []
     for result in results:
         num_frames = int(result.get("num_frames", 0) or 0)
         total_frames += max(num_frames, 0)
@@ -468,6 +471,7 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     # print(f"[DEBUG] slopes collected off={len(offload_slopes)} reload={len(reload_slopes)}")
     metrics[KV_OFFLOAD_SLOPE] = offload_slopes
     metrics[KV_RELOAD_SLOPE] = reload_slopes
+    metrics[TIMING_BREAKDOWN_METRIC] = timing_breakdowns
     metrics.update(component_means)
     return metrics
 
@@ -1565,6 +1569,65 @@ def plot_kv_slope_comparison(
     return True
 
 
+def plot_timing_breakdown(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_id: str,
+    target_num_videos: int,
+    output_path: Path,
+) -> bool:
+    components = [
+        ("visual_embedding_time", "Prefilling"),
+        ("model_forward_time", "Scoring"),
+        ("generation_time", "Generation"),
+        ("kv_offload_time", "Offload"),
+        ("kv_reload_time", "Reload"),
+        ("total_sending_time", "Network"),
+        ("total_processing_time", "Total"),
+    ]
+
+    means = []
+    stds = []
+    labels = []
+    for metric_key, label in components:
+        metric_data = summary_stats.get(metric_key, {}).get(config_id, {}).get(target_num_videos, {})
+        mean = metric_data.get("mean")
+        std = metric_data.get("std")
+        if mean is None or not math.isfinite(mean):
+            means.append(float("nan"))
+            stds.append(0.0)
+        else:
+            means.append(float(mean))
+            stds.append(float(std) if std is not None and math.isfinite(std) else 0.0)
+        labels.append(label)
+
+    if not any(math.isfinite(m) for m in means):
+        return False
+
+    configure_plot_style()
+    fig, ax = plt.subplots(figsize=(3.6, 2.6))
+    x = np.arange(len(labels))
+    ax.bar(
+        x,
+        means,
+        yerr=stds,
+        capsize=2.5,
+        color="#4E79A7",
+        edgecolor="black",
+        linewidth=0.4,
+    )
+    ax.set_title(f"Timing Breakdown")
+    ax.set_ylabel("Time (s)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 def plot_rebuffering_ablation_group(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     group_key: str,
@@ -2067,6 +2130,12 @@ def main() -> None:
             print(f"[{data_source}] Saved KV transfer slope plot to {kv_slope_path}")
         else:
             print(f"[{data_source}] Skipped KV transfer slope plot; no valid data.")
+
+        timing_breakdown_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_timing_breakdown_round_robin_m.pdf"
+        if plot_timing_breakdown(summary_stats, "round_robin_m", 5, timing_breakdown_path):
+            print(f"[{data_source}] Saved timing breakdown plot to {timing_breakdown_path}")
+        else:
+            print(f"[{data_source}] Skipped timing breakdown plot; no valid data.")
 
         # CSV summary
         csv_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}.csv"
