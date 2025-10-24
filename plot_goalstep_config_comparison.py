@@ -129,40 +129,40 @@ ABLATION_GROUPS = {
     "consumption": {
         "title": "Consumption Ablation",
         "grouped_configs": [
-            ("Speed 1", [
+            ("1", [
                 ("consumption_ablation1_base", "Base"),
                 ("consumption_ablation1_rr_2", "RR-2"),
                 ("consumption_ablation1_rr_m", "RR-m"),
                 ("consumption_ablation1_rand_2", "Rand-2"),
                 ("consumption_ablation1_rand_m", "Rand-m"),
             ]),
-            ("Speed 2", [
+            ("2", [
                 ("consumption_ablation2_base", "Base"),
                 ("consumption_ablation2_rr_2", "RR-2"),
                 ("consumption_ablation2_rr_m", "RR-m"),
                 ("consumption_ablation2_rand_2", "Rand-2"),
                 ("consumption_ablation2_rand_m", "Rand-m"),
             ]),
-            ("Speed 3", [
+            ("3", [
+                ("base", "Base"),
+                ("round_robin_2", "RR-2"),
+                ("round_robin_m", "RR-m"),
+                ("random_2", "Rand-2"),
+                ("random_m", "Rand-m"),
+            ]),
+            ("4", [
                 ("consumption_ablation3_base", "Base"),
                 ("consumption_ablation3_rr_2", "RR-2"),
                 ("consumption_ablation3_rr_m", "RR-m"),
                 ("consumption_ablation3_rand_2", "Rand-2"),
                 ("consumption_ablation3_rand_m", "Rand-m"),
             ]),
-            ("Speed 4", [
+            ("5", [
                 ("consumption_ablation4_base", "Base"),
                 ("consumption_ablation4_rr_2", "RR-2"),
                 ("consumption_ablation4_rr_m", "RR-m"),
                 ("consumption_ablation4_rand_2", "Rand-2"),
                 ("consumption_ablation4_rand_m", "Rand-m"),
-            ]),
-            ("Speed 5", [
-                ("consumption_ablation5_base", "Base"),
-                ("consumption_ablation5_rr_2", "RR-2"),
-                ("consumption_ablation5_rr_m", "RR-m"),
-                ("consumption_ablation5_rand_2", "Rand-2"),
-                ("consumption_ablation5_rand_m", "Rand-m"),
             ]),
         ],
         "num_videos": [5],
