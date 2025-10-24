@@ -26,8 +26,8 @@ DEFAULT_CONFIG_IDS: Tuple[str, ...] = (
     "round_robin_m",
     "round_robin_2",
 )
-DEFAULT_NUM_VIDEOS: Tuple[int, ...] = (1, 3, 5, 8, 10, 15, 20)
-DEFAULT_ABLATION_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15, 20)
+DEFAULT_NUM_VIDEOS: Tuple[int, ...] = (1, 3, 5, 8, 10, 15)
+DEFAULT_ABLATION_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15)
 DEFAULT_ITERATIONS: Tuple[int, ...] = (1, 2, 3, 4, 5)
 DEFAULT_BASE_DIR = Path("figures")
 BASE_CONFIG_ID = "base"
@@ -96,7 +96,7 @@ ABLATION_GROUPS = {
             ("rl_ablation2", "Weight 1"),
             ("rl_ablation3", "Weight 10"),
         ],
-        "num_videos": [5, 10, 15, 20],
+        "num_videos": [5, 10, 15],
         "slug": "rl_ablation",
     },
     "comp": {
@@ -109,7 +109,7 @@ ABLATION_GROUPS = {
             ("comp_ablation4", "No Scheduling"),
             ("comp_ablation5", "No Slicing"),
         ],
-        "num_videos": [5, 10, 15, 20],
+        "num_videos": [5, 10, 15],
         "slug": "comp_ablation",
     },
     "chunk": {
@@ -122,7 +122,7 @@ ABLATION_GROUPS = {
             ("chunk_ablation4", "Chunk 16"),
             ("chunk_ablation5", "Chunk 32"),
         ],
-        "num_videos": [5, 10, 15, 20],
+        "num_videos": [5, 10, 15],
         "slug": "chunk_ablation",
     },
     "factor": {
@@ -140,7 +140,7 @@ ABLATION_GROUPS = {
             ("factor_ablation9", "Factor 0.9"),
             ("factor_ablation10", "Factor 1.0"),
         ],
-        "num_videos": [5, 10, 15, 20],
+        "num_videos": [5, 10, 15],
         "slug": "factor_ablation",
     },
     "consumption": {
@@ -191,15 +191,21 @@ ABLATION_CONFIG_SET: Set[str] = set()
 ABLATION_CONFIG_ALLOWED_NUMS: Dict[str, Set[int]] = {}
 for group_meta in ABLATION_GROUPS.values():
     allowed_nums = set(group_meta.get("num_videos", []))
+
+    def _is_true_ablation(config_id: str) -> bool:
+        """Treat entries containing 'ablation' as the ablation-specific configs."""
+        return "ablation" in config_id
+
     if "configs" in group_meta:
         for cfg, _ in group_meta["configs"]:
-            if cfg != "base":
+            if cfg != "base" and _is_true_ablation(cfg):
                 ABLATION_CONFIG_SET.add(cfg)
                 ABLATION_CONFIG_ALLOWED_NUMS[cfg] = allowed_nums.copy()
+
     if "grouped_configs" in group_meta:
         for _, cfgs in group_meta["grouped_configs"]:
             for cfg, _ in cfgs:
-                if cfg != "base":
+                if cfg != "base" and _is_true_ablation(cfg):
                     ABLATION_CONFIG_SET.add(cfg)
                     ABLATION_CONFIG_ALLOWED_NUMS[cfg] = allowed_nums.copy()
 
@@ -246,7 +252,7 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         type=int,
         default=None,
-        help="Number of videos for ablation plots (default: 5 10 15 20).",
+        help="Number of videos for ablation plots (default: 5 10 15).",
     )
     parser.add_argument(
         "--iterations",
@@ -1569,6 +1575,73 @@ def plot_kv_slope_comparison(
     return True
 
 
+def plot_buffering_components_comparison(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_ids: List[str],
+    target_num_videos: int,
+    output_path: Path,
+) -> bool:
+    metric_keys = [
+        ("rebuffer_time", "Total Rebuffering"),
+        ("processing_delay", "Processing"),
+        ("queuing_delay", "Queuing"),
+        ("network_delay", "Networking"),
+    ]
+
+    config_stats = []
+    for config in config_ids:
+        entry = []
+        for metric_key, _ in metric_keys:
+            metric_data = summary_stats.get(metric_key, {}).get(config, {}).get(target_num_videos, {})
+            mean = metric_data.get("mean")
+            std = metric_data.get("std")
+            if mean is None or not math.isfinite(mean):
+                entry.append((float("nan"), 0.0))
+            else:
+                entry.append((float(mean), float(std) if std is not None and math.isfinite(std) else 0.0))
+        config_stats.append(entry)
+
+    if not any(math.isfinite(val[0]) for stats in config_stats for val in stats):
+        return False
+
+    labels = [label for _, label in metric_keys]
+    x = np.arange(len(labels))
+    bar_width = 0.35
+
+    configure_plot_style()
+    fig, ax = plt.subplots(figsize=(3.6, 2.6))
+
+    colors = ["#4E79A7", "#F28E2B"]
+    methods = ["Monolithic", "Sliced"]
+    for idx, (config, stats) in enumerate(zip(config_ids, config_stats)):
+        means = [val[0] for val in stats]
+        stds = [val[1] for val in stats]
+        offset = (idx - (len(config_ids) - 1) / 2) * (bar_width + 0.02)
+        ax.bar(
+            x + offset,
+            means,
+            width=bar_width,
+            yerr=stds,
+            capsize=2.5,
+            color=colors[idx % len(colors)],
+            edgecolor="black",
+            linewidth=0.4,
+            label=methods[idx],
+        )
+
+    ax.set_ylabel("Time (s)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(frameon=False)
+
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 def plot_timing_breakdown(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     config_id: str,
@@ -2136,6 +2209,14 @@ def main() -> None:
             print(f"[{data_source}] Saved timing breakdown plot to {timing_breakdown_path}")
         else:
             print(f"[{data_source}] Skipped timing breakdown plot; no valid data.")
+
+        buffering_compare_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_buffering_components_comparison.pdf"
+        if plot_buffering_components_comparison(
+            summary_stats, ["round_robin_m", "round_robin_2"], 3, buffering_compare_path
+        ):
+            print(f"[{data_source}] Saved buffering components comparison to {buffering_compare_path}")
+        else:
+            print(f"[{data_source}] Skipped buffering components comparison plot; no valid data.")
 
         # CSV summary
         csv_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}.csv"
