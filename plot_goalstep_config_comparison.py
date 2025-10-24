@@ -1257,52 +1257,63 @@ def plot_roundrobin_ratio(
     return True
 
 
-def plot_generation_speed_single_video(
+def plot_generation_speed_vs_listening(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
-    configs: List[str],
+    config_id: str,
     output_path: Path,
-    single_video_num: int = 1,
 ) -> bool:
-    """Bar plot comparing generation speed (words/s) for single-video experiments."""
-    speed_stats = summary_stats.get(GENERATION_SPEED_METRIC, {})
-    if not speed_stats:
+    """Compare base generation speed with listening benchmarks."""
+    speed_stats = summary_stats.get(GENERATION_SPEED_METRIC, {}).get(config_id, {})
+    speeds: List[float] = []
+    for num_data in speed_stats.values():
+        speeds.extend(
+            v
+            for v in num_data.get("values", [])
+            if v is not None and math.isfinite(v)
+        )
+
+    if not speeds:
         return False
 
-    means = []
-    stds = []
-    labels = []
-    for cfg in configs:
-        entry = speed_stats.get(cfg, {}).get(single_video_num)
-        if not entry:
-            continue
-        mean = entry.get("mean")
-        if mean is None or not math.isfinite(mean):
-            continue
-        std = entry.get("std", 0.0) or 0.0
-        means.append(mean)
-        stds.append(std)
-        labels.append(cfg)
+    base_mean = float(np.mean(speeds))
+    base_std = float(np.std(speeds))
 
-    if not means:
-        return False
+    studies = [
+        ("Kuperman et al. 2021", 270 / 60.0),
+        ("Sommers et al. 2009", 240 / 60.0),
+        ("OAText 2017", 124 / 60.0),
+        ("Adams & Weber 2006", ((160 + 207) / 2) / 60.0),
+    ]
+
+    labels = [s[0] for s in studies] + ["VLM Generation"]
+    values = [s[1] for s in studies] + [base_mean]
+    colors = ["#4C72B0", "#55A868", "#C44E52", "#8172B3", "#F28E2B"]
 
     configure_plot_style()
-    colors = _scientific_colors()
-    x = np.arange(len(means))
-    fig, ax = plt.subplots(figsize=(3.4, 2.6))
-    ax.bar(
-        x,
-        means,
-        yerr=stds,
-        capsize=2.5,
-        color=[colors[i % len(colors)] for i in range(len(means))],
-        edgecolor="black",
-        linewidth=0.4,
-    )
-    ax.set_title(f"Generation Speed (N={single_video_num})")
-    ax.set_ylabel("Words per Second")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=20, ha="right")
+    fig, ax = plt.subplots(figsize=(6, 4))
+    bars = ax.barh(labels, values, color=colors, edgecolor="black", linewidth=0.6)
+
+    for bar, value, label in zip(bars, values, labels):
+        if label == "VLM Generation":
+            text = f"{value:.2f}±{base_std:.2f}"
+        else:
+            text = f"{value:.2f}"
+        ax.text(
+            value + 0.05,
+            bar.get_y() + bar.get_height() / 2,
+            text,
+            va="center",
+            fontsize=18,
+        )
+
+    ax.set_xlabel("Words Per Second", fontsize=18)
+    ax.set_ylabel("Listening Speed Study", fontsize=18)
+    max_val = max(values)
+    ax.set_xlim(0, max(max_val + 0.8, 5.5))
+    ax.grid(axis="x", linestyle="--", alpha=0.4)
+    # set ytick size to 18
+    ax.tick_params(axis='y', labelsize=18)
+    ax.tick_params(axis='x', labelsize=18)
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -1823,11 +1834,11 @@ def main() -> None:
             print(f"[{data_source}] Skipped latency components vs videos plot; no valid data.")
 
         # Generation speed for single-video experiments
-        generation_speed_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_generation_speed_single_video.pdf"
-        if plot_generation_speed_single_video(summary_stats, general_configs, generation_speed_path):
-            print(f"[{data_source}] Saved generation speed plot to {generation_speed_path}")
+        generation_speed_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_generation_speed_vs_listening.pdf"
+        if plot_generation_speed_vs_listening(summary_stats, BASE_CONFIG_ID, generation_speed_path):
+            print(f"[{data_source}] Saved generation speed vs listening plot to {generation_speed_path}")
         else:
-            print(f"[{data_source}] Skipped generation speed plot; no valid data.")
+            print(f"[{data_source}] Skipped generation speed vs listening plot; no valid data.")
 
         generation_length_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_generation_length_distribution.pdf"
         if plot_generation_length_distribution(summary_stats, BASE_CONFIG_ID, generation_length_path):
