@@ -69,6 +69,15 @@ MEMORY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
 GENERATION_SPEED_METRIC = "generation_speed"
 FRACTION_RESPONSE_FRAMES_METRIC = "fraction_response_frames"
 GENERATION_LENGTHS = "generation_lengths"
+KV_OFFLOAD_SCATTER = "kv_offload_pairs"
+KV_RELOAD_SCATTER = "kv_reload_pairs"
+
+EXTEND_METRICS = {
+    GENERATION_LENGTHS,
+    KV_OFFLOAD_SCATTER,
+    KV_RELOAD_SCATTER,
+}
+GENERATION_LENGTHS = "generation_lengths"
 
 ABLATION_GROUPS = {
     "rl": {
@@ -307,6 +316,8 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     total_nonzero_turns = 0
     total_frames = 0
     generation_lengths: List[int] = []
+    kv_pairs_offload: List[Tuple[float, float]] = []
+    kv_pairs_reload: List[Tuple[float, float]] = []
     for result in results:
         num_frames = int(result.get("num_frames", 0) or 0)
         total_frames += max(num_frames, 0)
@@ -357,6 +368,9 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
         activation_mem = memory_data.get("activation_memory") or []
         other_mem = memory_data.get("other_memory") or []
         cpu_mem_growth = memory_data.get("cpu_memory_growth") or []
+        transfer_sizes = memory_data.get("kv_transfer_size") or []
+        offload_times = memory_data.get("kv_offload_time") or []
+        reload_times = memory_data.get("kv_reload_time") or []
 
         if model_mem:
             model_params_values.append(float(max(model_mem)))
@@ -366,6 +380,13 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
             )
         if cpu_mem_growth:
             cpu_growth_values.append(float(max(cpu_mem_growth)))
+
+        for size, off_t in zip(transfer_sizes, offload_times):
+            if off_t and math.isfinite(off_t):
+                kv_pairs_offload.append((float(size), float(off_t)))
+        for size, reload_t in zip(transfer_sizes, reload_times):
+            if reload_t and math.isfinite(reload_t):
+                kv_pairs_reload.append((float(size), float(reload_t)))
 
     processing_delay = float(np.mean(processing_delays)) if processing_delays else float("nan")
     queuing_delay = float(np.mean(queuing_delays)) if queuing_delays else float("nan")
@@ -404,6 +425,8 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     else:
         metrics[FRACTION_RESPONSE_FRAMES_METRIC] = float("nan")
     metrics[GENERATION_LENGTHS] = generation_lengths
+    metrics[KV_OFFLOAD_SCATTER] = kv_pairs_offload
+    metrics[KV_RELOAD_SCATTER] = kv_pairs_reload
     metrics.update(component_means)
     return metrics
 
@@ -1378,6 +1401,72 @@ def plot_generation_length_distribution(
     return True
 
 
+def plot_kv_transfer_scatter(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_id: str,
+    output_path: Path,
+) -> bool:
+    offload_stats = summary_stats.get(KV_OFFLOAD_SCATTER, {}).get(config_id, {})
+    reload_stats = summary_stats.get(KV_RELOAD_SCATTER, {}).get(config_id, {})
+
+    off_entries: List[Tuple[float, float]] = []
+    for num_map in offload_stats.values():
+        for pair in num_map.get("values", []):
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                size, time = pair
+                if math.isfinite(size) and math.isfinite(time):
+                    off_entries.append((float(size), float(time) * 1000.0))
+
+    reload_entries: List[Tuple[float, float]] = []
+    for num_map in reload_stats.values():
+        for pair in num_map.get("values", []):
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                size, time = pair
+                if math.isfinite(size) and math.isfinite(time):
+                    reload_entries.append((float(size), float(time) * 1000.0))
+
+    def filter_outliers(entries: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        if len(entries) < 6:
+            return entries
+        times = np.array([t for _, t in entries])
+        q1 = np.percentile(times, 25)
+        q3 = np.percentile(times, 75)
+        iqr = q3 - q1
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+        return [(s, t) for s, t in entries if lower <= t <= upper]
+
+    off_filtered = filter_outliers(off_entries)
+    reload_filtered = filter_outliers(reload_entries)
+
+    off_sizes = [s for s, _ in off_filtered]
+    off_times = [t for _, t in off_filtered]
+    reload_sizes = [s for s, _ in reload_filtered]
+    reload_times = [t for _, t in reload_filtered]
+
+    if not off_sizes and not reload_sizes:
+        return False
+
+    configure_plot_style()
+    fig, ax = plt.subplots(figsize=(3.4, 2.6))
+    if off_sizes:
+        ax.scatter(off_sizes, off_times, color="#4E79A7", alpha=0.6, label="Offload")
+    if reload_sizes:
+        ax.scatter(reload_sizes, reload_times, color="#F28E2B", alpha=0.6, label="Reload")
+
+    ax.set_title("KV Transfer Time vs Cache Size (round_robin_m)")
+    ax.set_xlabel("KV Cache Size (MB)")
+    ax.set_ylabel("Transfer Time (ms)")
+    ax.grid(alpha=0.3)
+    if off_sizes and reload_sizes:
+        ax.legend(frameon=False)
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 def plot_rebuffering_ablation_group(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     group_key: str,
@@ -1583,7 +1672,13 @@ def main() -> None:
         + [key for key, *_ in DELAY_METRICS]
         + [key for key, *_ in SCHEDULING_COMPONENTS]
         + [key for key, *_ in MEMORY_COMPONENTS]
-        + [GENERATION_SPEED_METRIC, FRACTION_RESPONSE_FRAMES_METRIC, GENERATION_LENGTHS]
+        + [
+            GENERATION_SPEED_METRIC,
+            FRACTION_RESPONSE_FRAMES_METRIC,
+            GENERATION_LENGTHS,
+            KV_OFFLOAD_SCATTER,
+            KV_RELOAD_SCATTER,
+        ]
     )
 
     all_metrics_storage: Dict[str, Dict[str, Dict[str, Dict[int, List[float]]]]] = {}
@@ -1659,9 +1754,11 @@ def main() -> None:
                     for metric_key in all_metric_keys:
                         value = metrics.get(metric_key, float("nan"))
                         storage_list = metrics_storage[metric_key][config_id][num]
-                        if metric_key == GENERATION_LENGTHS:
+                        if metric_key in EXTEND_METRICS:
                             if isinstance(value, list):
                                 storage_list.extend(value)
+                            elif value is not None and value != float("nan"):
+                                storage_list.append(value)
                             continue
                         storage_list.append(value)
 
@@ -1686,6 +1783,11 @@ def main() -> None:
             for config_id, num_map in configs.items():
                 summary_stats[metric_key].setdefault(config_id, {})
                 for num, values in num_map.items():
+                    if metric_key in EXTEND_METRICS:
+                        summary_stats[metric_key][config_id][num] = {
+                            "values": list(values),
+                        }
+                        continue
                     mean, std = safe_mean_std(values)
                     summary_stats[metric_key][config_id][num] = {
                         "mean": mean,
@@ -1853,6 +1955,12 @@ def main() -> None:
         else:
             print(f"[{data_source}] Skipped response fraction distribution plot; no valid data.")
 
+        kv_scatter_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_kv_transfer_scatter.pdf"
+        if plot_kv_transfer_scatter(summary_stats, "round_robin_m", kv_scatter_path):
+            print(f"[{data_source}] Saved KV transfer scatter to {kv_scatter_path}")
+        else:
+            print(f"[{data_source}] Skipped KV transfer scatter plot; no valid data.")
+
         # CSV summary
         csv_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}.csv"
         csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1864,14 +1972,27 @@ def main() -> None:
             for metric_key, configs in summary_stats.items():
                 for config_id, num_map in configs.items():
                     for num, stats in num_map.items():
+                        mean = stats.get("mean", "")
+                        std = stats.get("std", "")
+                        raw_values = stats.get("values", [])
+                        formatted_values = []
+                        for v in raw_values:
+                            if isinstance(v, (list, tuple)) and len(v) == 2:
+                                size, time = v
+                                formatted_values.append(f"{size:.6f},{time:.6f}")
+                            elif isinstance(v, float):
+                                formatted_values.append(f"{v:.6f}")
+                            else:
+                                formatted_values.append(str(v))
+                        iteration_values = ";".join(formatted_values)
                         writer.writerow(
                             [
                                 metric_key,
                                 config_id,
                                 num,
-                                stats["mean"],
-                                stats["std"],
-                                ";".join(f"{v:.6f}" for v in stats["values"]),
+                                mean,
+                                std,
+                                iteration_values,
                             ]
                         )
         print(f"[{data_source}] Wrote summary table to {csv_path}")
