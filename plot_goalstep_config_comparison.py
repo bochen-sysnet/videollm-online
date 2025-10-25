@@ -26,7 +26,7 @@ DEFAULT_CONFIG_IDS: Tuple[str, ...] = (
     "round_robin_m",
     "round_robin_2",
 )
-DEFAULT_NUM_VIDEOS: Tuple[int, ...] = (1, 3, 5, 8, 10, 15)
+DEFAULT_NUM_VIDEOS: Tuple[int, ...] = (3, 5, 8, 10)
 DEFAULT_ABLATION_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15)
 DEFAULT_ITERATIONS: Tuple[int, ...] = (1, 2, 3, 4, 5)
 DEFAULT_BASE_DIR = Path("figures")
@@ -235,6 +235,24 @@ def parse_args() -> argparse.Namespace:
         help="Root directory containing data source folders (default: figures).",
     )
     parser.add_argument(
+        "--comparison-base-dir",
+        type=Path,
+        default=None,
+        help="Optional secondary root (e.g., ../results-3090) for cross-server comparisons.",
+    )
+    parser.add_argument(
+        "--primary-label",
+        type=str,
+        default=None,
+        help="Label for the primary results (default: base directory name).",
+    )
+    parser.add_argument(
+        "--comparison-label",
+        type=str,
+        default="3090",
+        help="Label for the comparison results used in cross-server plots.",
+    )
+    parser.add_argument(
         "--config-ids",
         nargs="+",
         default=["base", "random_m", "random_2", "round_robin_m", "round_robin_2"],
@@ -246,6 +264,13 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Number of videos for general (non-ablation) plots. Auto-detect when omitted.",
+    )
+    parser.add_argument(
+        "--baseline-comparison-nums",
+        nargs="+",
+        type=int,
+        default=list(DEFAULT_NUM_VIDEOS),
+        help="Number of videos used when averaging for the cross-server baseline comparison.",
     )
     parser.add_argument(
         "--ablation-num-videos",
@@ -1166,6 +1191,208 @@ def plot_memory_components_base_vs_videos(
     return True
 
 
+def plot_memory_breakdown_single_config(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_id: str,
+    target_num_videos: int,
+    output_path: Path,
+) -> bool:
+    """Visualize GPU vs CPU memory usage for a specific config/num_videos."""
+    model_entry = (
+        summary_stats.get("model_params_memory", {})
+        .get(config_id, {})
+        .get(target_num_videos, {})
+    )
+    dynamic_entry = (
+        summary_stats.get("combined_dynamic_memory", {})
+        .get(config_id, {})
+        .get(target_num_videos, {})
+    )
+    cpu_entry = (
+        summary_stats.get("cpu_memory_growth_peak", {})
+        .get(config_id, {})
+        .get(target_num_videos, {})
+    )
+
+    model_mean = model_entry.get("mean") if model_entry else float("nan")
+    dynamic_mean = dynamic_entry.get("mean") if dynamic_entry else float("nan")
+    cpu_mean = cpu_entry.get("mean") if cpu_entry else float("nan")
+
+    if not (
+        math.isfinite(model_mean)
+        and math.isfinite(dynamic_mean)
+        and math.isfinite(cpu_mean)
+    ):
+        return False
+
+    configure_plot_style()
+    colors = _scientific_colors()
+
+    fig, ax = plt.subplots(figsize=(3.6, 2.6))
+    metrics = [
+        ("GPU Total", model_mean + dynamic_mean, colors[0]),
+        ("Model Params", model_mean, colors[1]),
+        ("Combined Dynamic", dynamic_mean, colors[2]),
+        ("CPU Peak", cpu_mean, colors[3]),
+    ]
+    x = np.arange(len(metrics))
+    bar_width = 0.55
+
+    for idx, (label, value, color) in enumerate(metrics):
+        ax.bar(
+            x[idx],
+            value,
+            width=bar_width,
+            color=color,
+            edgecolor="black",
+            linewidth=0.4,
+            label=label,
+        )
+        ax.text(
+            x[idx],
+            value + 0.02 * max(value, 1.0),
+            f"{value:.1f} MB",
+            ha="center",
+            va="bottom",
+            fontsize=7,
+        )
+
+    ax.set_title(
+        f"{config_id.replace('_', ' ').title()} Memory Breakdown (N={target_num_videos})"
+    )
+    ax.set_ylabel("Memory (MB)")
+    ax.set_xticks(x)
+    ax.set_xticklabels([label for label, _, _ in metrics], rotation=15, ha="right")
+    y_max = max(value for _, value, _ in metrics)
+    if y_max <= 0:
+        y_max = 1.0
+    ax.set_ylim(0, y_max * 1.25)
+    ax.legend(frameon=False, ncol=2)
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def plot_rebuffer_baseline_comparison_across_bases(
+    primary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    comparison_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_ids: List[str],
+    target_nums: List[int],
+    primary_label: str,
+    comparison_label: str,
+    output_path: Path,
+) -> bool:
+    """Compare average rebuffering across baseline configs for two result sets."""
+    target_nums = sorted(set(target_nums))
+    if not target_nums:
+        return False
+
+    def aggregate(
+        stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+        config_id: str,
+    ) -> Tuple[float, float]:
+        config_stats = stats.get("rebuffer_time", {}).get(config_id, {})
+        values: List[float] = []
+        for num in target_nums:
+            entry = config_stats.get(num, {})
+            raw_values = entry.get("values", [])
+            if raw_values:
+                for v in raw_values:
+                    if v is None:
+                        continue
+                    v_float = float(v)
+                    if math.isfinite(v_float):
+                        values.append(v_float)
+            else:
+                mean = entry.get("mean")
+                if mean is not None and math.isfinite(mean):
+                    values.append(float(mean))
+        if not values:
+            return float("nan"), float("nan")
+        return safe_mean_std(values)
+
+    dataset_entries = []
+    for label, stats in (
+        (primary_label, primary_stats),
+        (comparison_label, comparison_stats),
+    ):
+        means = []
+        stds = []
+        for cfg in config_ids:
+            mean, std = aggregate(stats, cfg)
+            means.append(mean)
+            stds.append(std)
+        dataset_entries.append((label, means, stds))
+
+    valid_indices = [
+        idx
+        for idx in range(len(config_ids))
+        if any(math.isfinite(entry[1][idx]) for entry in dataset_entries)
+    ]
+    if not valid_indices:
+        return False
+
+    configure_plot_style()
+    colors = _scientific_colors()
+    fig, ax = plt.subplots(figsize=(4.0, 2.8))
+    x = np.arange(len(valid_indices))
+    bar_width = 0.35
+
+    plotted = False
+    for dataset_idx, (label, means, stds) in enumerate(dataset_entries):
+        dataset_means = [means[i] for i in valid_indices]
+        dataset_stds = [stds[i] for i in valid_indices]
+        if all(not math.isfinite(m) for m in dataset_means):
+            continue
+        plotted = True
+        offset = (dataset_idx - (len(dataset_entries) - 1) / 2) * bar_width
+        ax.bar(
+            x + offset,
+            dataset_means,
+            width=bar_width * 0.95,
+            yerr=dataset_stds,
+            capsize=2.5,
+            color=colors[dataset_idx % len(colors)],
+            edgecolor="black",
+            linewidth=0.4,
+            label=label if dataset_idx > 0 else "4090",
+        )
+
+        for xpos, value in zip(x + offset, dataset_means):
+            if math.isfinite(value):
+                ax.text(
+                    xpos,
+                    value + 0.02 * max(value, 1.0),
+                    f"{value:.2f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=6.5,
+                )
+
+    if not plotted:
+        plt.close(fig)
+        return False
+
+    cfg_labels = [config_ids[i] for i in valid_indices]
+    nums_str = ", ".join(str(n) for n in target_nums)
+    ax.set_ylabel("Rebuffering (s)", fontsize=12)
+    ax.set_yticklabels(ax.get_yticks(), fontsize=12)
+    ax.set_xticks(x)
+    ax.set_xticklabels(cfg_labels, rotation=20, ha="right", fontsize=12)
+    ax.legend(frameon=False, fontsize=12)
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 def plot_roundrobin_comparison(
     general_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     data_sources: List[str],
@@ -1896,9 +2123,19 @@ def main() -> None:
         for group_meta in ABLATION_GROUPS.values():
             nums_union.update(group_meta.get("num_videos", []))
         ablation_target_numbers = sorted(nums_union) if nums_union else list(DEFAULT_ABLATION_NUM_VIDEOS)
-    ablation_num_set = set(ablation_target_numbers)
+    ablation_num_set: Set[int] = set(ablation_target_numbers)
     iterations: List[int] = list(args.iterations)
     data_sources: List[str] = list(dict.fromkeys(args.data_sources))
+    baseline_comparison_nums: List[int] = (
+        sorted(set(args.baseline_comparison_nums)) if args.baseline_comparison_nums else list(DEFAULT_NUM_VIDEOS)
+    )
+    comparison_base_dir: Optional[Path] = args.comparison_base_dir
+    if comparison_base_dir is None:
+        default_comparison = Path("../results-3090")
+        if default_comparison.exists():
+            comparison_base_dir = default_comparison.resolve()
+    primary_label = args.primary_label or (base_dir.name or "primary")
+    comparison_label = args.comparison_label
 
     all_metric_keys = (
         [key for key, *_ in METRIC_ORDER]
@@ -1918,122 +2155,148 @@ def main() -> None:
         ]
     )
 
-    all_metrics_storage: Dict[str, Dict[str, Dict[str, Dict[int, List[float]]]]] = {}
-    available_numbers: Dict[str, Set[int]] = defaultdict(set)
-    missing_paths: Dict[str, List[Path]] = defaultdict(list)
+    summary_stats_map: Dict[str, Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]]] = {}
+    available_numbers_map: Dict[str, Dict[str, Set[int]]] = {}
+    missing_paths_map: Dict[str, Dict[str, List[Path]]] = {}
 
-    for data_source in data_sources:
-        # Determine directory for this data source
-        candidate_dir = base_dir / data_source
-        if candidate_dir.exists():
-            ds_root = candidate_dir
-        elif base_dir.name == data_source and base_dir.exists():
-            ds_root = base_dir
-        else:
-            ds_root = candidate_dir
-        ds_root = ds_root.resolve()
+    base_configs: List[Tuple[str, Path]] = [("primary", base_dir)]
+    if comparison_base_dir:
+        base_configs.append(("comparison", comparison_base_dir))
 
-        if not ds_root.exists():
-            print(f"Warning: Data source directory not found for '{data_source}': {ds_root}")
-            continue
+    for key, target_dir in base_configs:
+        all_metrics_storage: Dict[str, Dict[str, Dict[str, Dict[int, List[float]]]]] = {}
+        available_numbers_local: Dict[str, Set[int]] = defaultdict(set)
+        missing_paths_local: Dict[str, List[Path]] = defaultdict(list)
 
-        # Determine number of videos to inspect
-        if general_num_override:
-            num_videos = general_num_override
-        else:
-            detected = sorted(
-                int(p.name[1:])
-                for p in ds_root.glob("N*")
-                if p.is_dir() and len(p.name) > 1 and p.name[1:].isdigit()
-            )
-            num_videos = detected if detected else list(DEFAULT_NUM_VIDEOS)
-        num_videos = sorted(set(num_videos) | set(ablation_target_numbers))
+        for data_source in data_sources:
+            candidate_dir = target_dir / data_source
+            if candidate_dir.exists():
+                ds_root = candidate_dir
+            elif target_dir.name == data_source and target_dir.exists():
+                ds_root = target_dir
+            else:
+                ds_root = candidate_dir
+            ds_root = ds_root.resolve()
 
-        # Discover configs present in this data source
-        configs_for_ds: Set[str] = set()
-        for n in num_videos:
-            n_dir = ds_root / f"N{n}"
-            if not n_dir.exists():
+            if not ds_root.exists():
+                print(
+                    f"Warning: Data source directory not found for '{data_source}' in base '{target_dir}': {ds_root}"
+                )
+                all_metrics_storage[data_source] = {
+                    metric: defaultdict(lambda: defaultdict(list)) for metric in all_metric_keys
+                }
                 continue
-            for cfg_dir in n_dir.iterdir():
-                if cfg_dir.is_dir():
-                    configs_for_ds.add(cfg_dir.name)
-        if not configs_for_ds:
-            configs_for_ds.update(general_config_ids)
-        configs_for_ds = sorted(configs_for_ds)
 
-        # Initialize storage for this data source
-        metrics_storage = {
-            metric: defaultdict(lambda: defaultdict(list)) for metric in all_metric_keys
-        }
+            if general_num_override:
+                num_videos = list(general_num_override)
+            else:
+                detected = sorted(
+                    int(p.name[1:])
+                    for p in ds_root.glob("N*")
+                    if p.is_dir() and len(p.name) > 1 and p.name[1:].isdigit()
+                )
+                num_videos = detected if detected else list(DEFAULT_NUM_VIDEOS)
+            num_videos = sorted(set(num_videos) | set(ablation_target_numbers))
 
-        for num in num_videos:
-            for config_id in configs_for_ds:
-                allowed = ABLATION_CONFIG_ALLOWED_NUMS.get(config_id)
-                if allowed:
-                    if num not in allowed:
-                        continue
-                elif config_id in ABLATION_CONFIG_SET and num not in ablation_num_set:
+            configs_for_ds: Set[str] = set()
+            for n in num_videos:
+                n_dir = ds_root / f"N{n}"
+                if not n_dir.exists():
                     continue
-                for iteration in iterations:
-                    summary_path = (
-                        ds_root
-                        / f"N{num}"
-                        / config_id
-                        / f"I{iteration}"
-                        / "overall_summary.json"
-                    )
-                    if not summary_path.exists():
-                        missing_paths[data_source].append(summary_path)
-                        continue
-                    metrics = load_iteration_metrics(summary_path)
-                    available_numbers[data_source].add(num)
-                    for metric_key in all_metric_keys:
-                        value = metrics.get(metric_key, float("nan"))
-                        storage_list = metrics_storage[metric_key][config_id][num]
-                        if metric_key in EXTEND_METRICS:
-                            if isinstance(value, list):
-                                storage_list.extend(value)
-                            elif value is not None and value != float("nan"):
-                                storage_list.append(value)
+                for cfg_dir in n_dir.iterdir():
+                    if cfg_dir.is_dir():
+                        configs_for_ds.add(cfg_dir.name)
+            if not configs_for_ds:
+                configs_for_ds.update(general_config_ids)
+            configs_for_ds = sorted(configs_for_ds)
+
+            metrics_storage = {
+                metric: defaultdict(lambda: defaultdict(list)) for metric in all_metric_keys
+            }
+
+            for num in num_videos:
+                for config_id in configs_for_ds:
+                    allowed = ABLATION_CONFIG_ALLOWED_NUMS.get(config_id)
+                    if allowed:
+                        if num not in allowed:
                             continue
-                        storage_list.append(value)
+                    elif config_id in ABLATION_CONFIG_SET and num not in ablation_num_set:
+                        continue
+                    for iteration in iterations:
+                        summary_path = (
+                            ds_root
+                            / f"N{num}"
+                            / config_id
+                            / f"I{iteration}"
+                            / "overall_summary.json"
+                        )
+                        if not summary_path.exists():
+                            missing_paths_local[data_source].append(summary_path)
+                            continue
+                        metrics = load_iteration_metrics(summary_path)
+                        available_numbers_local[data_source].add(num)
+                        for metric_key in all_metric_keys:
+                            value = metrics.get(metric_key, float("nan"))
+                            storage_list = metrics_storage[metric_key][config_id][num]
+                            if metric_key in EXTEND_METRICS:
+                                if isinstance(value, list):
+                                    storage_list.extend(value)
+                                elif value is not None and value != float("nan"):
+                                    storage_list.append(value)
+                                continue
+                            storage_list.append(value)
 
-        all_metrics_storage[data_source] = metrics_storage
+            all_metrics_storage[data_source] = metrics_storage
 
-    if missing_paths:
-        for data_source, paths in missing_paths.items():
+        summary_stats_map[key] = {}
+        available_numbers_map[key] = available_numbers_local
+        missing_paths_map[key] = missing_paths_local
+
+        for data_source, ds_metrics in all_metrics_storage.items():
+            summary_stats = {metric: {} for metric in all_metric_keys}
+            for metric_key, configs in ds_metrics.items():
+                for config_id, num_map in configs.items():
+                    summary_stats[metric_key].setdefault(config_id, {})
+                    for num, values in num_map.items():
+                        if metric_key in EXTEND_METRICS:
+                            summary_stats[metric_key][config_id][num] = {
+                                "values": list(values),
+                            }
+                            continue
+                        mean, std = safe_mean_std(values)
+                        summary_stats[metric_key][config_id][num] = {
+                            "mean": mean,
+                            "std": std,
+                            "values": list(values),
+                        }
+            summary_stats_map[key][data_source] = summary_stats
+
+    primary_summary_stats = summary_stats_map.get("primary", {})
+    if not primary_summary_stats:
+        print("No data available to plot. Exiting.")
+        return
+    available_numbers = available_numbers_map.get("primary", defaultdict(set))
+
+    for data_source, paths in missing_paths_map.get("primary", {}).items():
+        if paths:
+            print(
+                f"Warning: Missing summaries for data_source '{data_source}' in base '{base_dir}':"
+            )
+            for path in paths:
+                print(f"  - {path}")
+
+    comparison_summary_stats = summary_stats_map.get("comparison", {})
+    if comparison_summary_stats and comparison_base_dir:
+        for data_source, paths in missing_paths_map.get("comparison", {}).items():
             if paths:
-                print(f"Warning: Missing summaries for data_source '{data_source}':")
+                print(
+                    f"Warning: Missing summaries for data_source '{data_source}' in base '{comparison_base_dir}':"
+                )
                 for path in paths:
                     print(f"  - {path}")
 
-    if not all_metrics_storage:
-        print("No data available to plot. Exiting.")
-        return
-
-    # Compute summary stats per data source
-    all_summary_stats: Dict[str, Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]]] = {}
-    for data_source, ds_metrics in all_metrics_storage.items():
-        summary_stats = {metric: {} for metric in all_metric_keys}
-        for metric_key, configs in ds_metrics.items():
-            for config_id, num_map in configs.items():
-                summary_stats[metric_key].setdefault(config_id, {})
-                for num, values in num_map.items():
-                    if metric_key in EXTEND_METRICS:
-                        summary_stats[metric_key][config_id][num] = {
-                            "values": list(values),
-                        }
-                        continue
-                    mean, std = safe_mean_std(values)
-                    summary_stats[metric_key][config_id][num] = {
-                        "mean": mean,
-                        "std": std,
-                        "values": list(values),
-                    }
-        all_summary_stats[data_source] = summary_stats
-
     metric_meta = {key: (y_label, title, slug) for key, y_label, title, slug in METRIC_ORDER}
+    all_summary_stats = primary_summary_stats
 
     for data_source, summary_stats in all_summary_stats.items():
         # Determine numbers and configs for plotting
@@ -2138,6 +2401,37 @@ def main() -> None:
             print(f"[{data_source}] Saved memory components (base) vs videos plot to {memory_base_path}")
         else:
             print(f"[{data_source}] Skipped memory components (base) vs videos plot; no valid data.")
+
+        memory_breakdown_path = (
+            plot_root_base.parent
+            / f"{plot_root_base.name}_{data_source}_memory_breakdown_round_robin_m_N3.pdf"
+        )
+        if plot_memory_breakdown_single_config(summary_stats, "round_robin_m", 3, memory_breakdown_path):
+            print(f"[{data_source}] Saved memory breakdown plot to {memory_breakdown_path}")
+        else:
+            print(f"[{data_source}] Skipped memory breakdown plot; no valid data.")
+
+        if comparison_summary_stats:
+            comp_stats = comparison_summary_stats.get(data_source)
+            if comp_stats:
+                server_compare_path = (
+                    plot_root_base.parent
+                    / f"{plot_root_base.name}_{data_source}_baseline_rebuffer_server_comparison.pdf"
+                )
+                if plot_rebuffer_baseline_comparison_across_bases(
+                    summary_stats,
+                    comp_stats,
+                    list(general_config_ids),
+                    baseline_comparison_nums,
+                    primary_label,
+                    comparison_label,
+                    server_compare_path,
+                ):
+                    print(f"[{data_source}] Saved baseline rebuffer comparison to {server_compare_path}")
+                else:
+                    print(
+                        f"[{data_source}] Skipped baseline rebuffer comparison plot; no valid overlapping data."
+                    )
 
         # Rebuffering ablation comparisons
         available_config_set = set(configs_for_ds)
