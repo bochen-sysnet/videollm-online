@@ -6,9 +6,9 @@ data_sources=("goalstep" "narration")
 # ablation video number list
 # num_videos_list=(5 10 15)
 # full evaluation
-num_videos_list=(1 3 5 8 10 15 20)
-# iterations=(1 2 3 4 5)
-iterations=(6 7 8 9 10)
+# num_videos_list=(1 3 5 8 10 15 20)
+num_videos_list=(2 4 6 7 9)
+iterations=(1 2 3 4 5 6 7 8 9 10)
 
 # full evaluation
 config_ids=("base" "random_m" "random_2" "round_robin_m" "round_robin_2")
