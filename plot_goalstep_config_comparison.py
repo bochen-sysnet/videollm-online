@@ -1191,84 +1191,166 @@ def plot_memory_components_base_vs_videos(
     return True
 
 
-def plot_memory_breakdown_single_config(
+def plot_memory_breakdown_multi_videos(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     config_id: str,
-    target_num_videos: int,
+    target_num_videos: Iterable[int],
     output_path: Path,
 ) -> bool:
-    """Visualize GPU vs CPU memory usage for a specific config/num_videos."""
-    model_entry = (
-        summary_stats.get("model_params_memory", {})
-        .get(config_id, {})
-        .get(target_num_videos, {})
-    )
-    dynamic_entry = (
-        summary_stats.get("combined_dynamic_memory", {})
-        .get(config_id, {})
-        .get(target_num_videos, {})
-    )
-    cpu_entry = (
-        summary_stats.get("cpu_memory_growth_peak", {})
-        .get(config_id, {})
-        .get(target_num_videos, {})
-    )
+    """Visualize memory components across multiple video counts for a single config."""
+    target_nums = [int(n) for n in target_num_videos]
+    component_defs = [
+        ("model_params_memory", "Model Params"),
+        ("combined_dynamic_memory", "Combined Dynamic"),
+        ("cpu_memory_growth_peak", "CPU Peak"),
+    ]
 
-    model_mean = model_entry.get("mean") if model_entry else float("nan")
-    dynamic_mean = dynamic_entry.get("mean") if dynamic_entry else float("nan")
-    cpu_mean = cpu_entry.get("mean") if cpu_entry else float("nan")
+    def _extract(metric_key: str, num: int) -> Tuple[float, float, List[float]]:
+        entry = (
+            summary_stats.get(metric_key, {})
+            .get(config_id, {})
+            .get(num, {})
+        )
+        mean = entry.get("mean")
+        std = entry.get("std")
+        values = entry.get("values", [])
+        clean_values: List[float] = []
+        for v in values:
+            try:
+                vf = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(vf):
+                clean_values.append(vf)
+        return (
+            float(mean) if mean is not None and math.isfinite(mean) else float("nan"),
+            float(std) if std is not None and math.isfinite(std) else float("nan"),
+            clean_values,
+        )
 
-    if not (
-        math.isfinite(model_mean)
-        and math.isfinite(dynamic_mean)
-        and math.isfinite(cpu_mean)
-    ):
+    component_stats: Dict[str, Dict[int, Tuple[float, float]]] = {}
+    model_values_cache: Dict[int, List[float]] = {}
+    dynamic_values_cache: Dict[int, List[float]] = {}
+
+    for metric_key, label in component_defs:
+        per_num: Dict[int, Tuple[float, float, List[float]]] = {}
+        for num in target_nums:
+            mean, std, values = _extract(metric_key, num)
+            per_num[num] = (mean, std, values)
+            if metric_key == "model_params_memory":
+                model_values_cache[num] = values
+            if metric_key == "combined_dynamic_memory":
+                dynamic_values_cache[num] = values
+        component_stats[label] = {
+            num: (data[0], data[1]) for num, data in per_num.items()
+        }
+
+    # GPU total computed from raw values when available, otherwise mean sum fallback.
+    gpu_totals: Dict[int, Tuple[float, float]] = {}
+    for num in target_nums:
+        combined = []
+        model_vals = model_values_cache.get(num, [])
+        dyn_vals = dynamic_values_cache.get(num, [])
+        if model_vals and dyn_vals and len(model_vals) == len(dyn_vals):
+            for m, d in zip(model_vals, dyn_vals):
+                if math.isfinite(m) and math.isfinite(d):
+                    combined.append(m + d)
+        if combined:
+            arr = np.asarray(combined, dtype=float)
+            gpu_totals[num] = (float(arr.mean()), float(arr.std(ddof=0)))
+        else:
+            model_mean, model_std = component_stats["Model Params"].get(num, (float("nan"), float("nan")))
+            dyn_mean, dyn_std = component_stats["Combined Dynamic"].get(num, (float("nan"), float("nan")))
+            if math.isfinite(model_mean) and math.isfinite(dyn_mean):
+                combined_mean = model_mean + dyn_mean
+                # simple std combination if available
+                if math.isfinite(model_std) and math.isfinite(dyn_std):
+                    combined_std = math.sqrt(model_std ** 2 + dyn_std ** 2)
+                else:
+                    combined_std = float("nan")
+                gpu_totals[num] = (combined_mean, combined_std)
+            else:
+                gpu_totals[num] = (float("nan"), float("nan"))
+
+    component_stats["GPU Total"] = gpu_totals
+
+    # Filter out components lacking any finite data
+    components_order = ["Model Params", "Combined Dynamic", "GPU Total", "CPU Peak"]
+    components = []
+    for label in components_order:
+        stats_per_num = component_stats.get(label, {})
+        if any(math.isfinite(stats_per_num.get(num, (float("nan"),))[0]) for num in target_nums):
+            components.append(label)
+
+    if not components:
         return False
+
+    means_matrix = []
+    std_matrix = []
+    for label in components:
+        means = []
+        stds = []
+        stats_per_num = component_stats.get(label, {})
+        for num in target_nums:
+            mean, std = stats_per_num.get(num, (float("nan"), float("nan")))
+            means.append(mean)
+            stds.append(std)
+        means_matrix.append(means)
+        std_matrix.append(stds)
 
     configure_plot_style()
     colors = _scientific_colors()
 
-    fig, ax = plt.subplots(figsize=(3.6, 2.6))
-    metrics = [
-        ("GPU Total", model_mean + dynamic_mean, colors[0]),
-        ("Model Params", model_mean, colors[1]),
-        ("Combined Dynamic", dynamic_mean, colors[2]),
-        ("CPU Peak", cpu_mean, colors[3]),
-    ]
-    x = np.arange(len(metrics))
-    bar_width = 0.55
+    fig, ax = plt.subplots(figsize=(4.0, 2.8))
+    x = np.arange(len(components))
+    num_groups = len(target_nums)
+    bar_width = min(0.8 / max(num_groups, 1), 0.22)
 
-    for idx, (label, value, color) in enumerate(metrics):
+    for idx, num in enumerate(target_nums):
+        offset = (idx - (num_groups - 1) / 2) * bar_width
+        means = [means_matrix[comp_idx][idx] for comp_idx in range(len(components))]
+        stds = [std_matrix[comp_idx][idx] for comp_idx in range(len(components))]
+        means_arr = np.asarray(means, dtype=float)
+        if np.all(~np.isfinite(means_arr)):
+            continue
+        stds_arr = np.asarray(stds, dtype=float)
+        stds_arr[~np.isfinite(stds_arr)] = 0.0
         ax.bar(
-            x[idx],
-            value,
-            width=bar_width,
-            color=color,
+            x + offset,
+            means_arr,
+            width=bar_width * 0.9,
+            yerr=stds_arr,
+            capsize=2.5,
+            color=colors[idx % len(colors)],
             edgecolor="black",
             linewidth=0.4,
-            label=label,
+            label=f"N={num}",
         )
-        ax.text(
-            x[idx],
-            value + 0.02 * max(value, 1.0),
-            f"{value:.1f} MB",
-            ha="center",
-            va="bottom",
-            fontsize=7,
-        )
+        for xpos, value in zip(x + offset, means_arr):
+            if math.isfinite(value) and value > 0:
+                ax.text(
+                    xpos,
+                    value * 1.05,
+                    f"{value:.1f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=6.5,
+                )
 
-    ax.set_title(
-        f"{config_id.replace('_', ' ').title()} Memory Breakdown (N={target_num_videos})"
-    )
-    ax.set_ylabel("Memory (MB)")
+    ax.set_title(f"{config_id.replace('_', ' ').title()} Memory Components")
+    ax.set_ylabel("Peak Memory (MB)")
     ax.set_xticks(x)
-    ax.set_xticklabels([label for label, _, _ in metrics], rotation=15, ha="right")
-    y_max = max(value for _, value, _ in metrics)
-    if y_max <= 0:
-        y_max = 1.0
-    ax.set_ylim(0, y_max * 1.25)
-    ax.legend(frameon=False, ncol=2)
+    ax.set_xticklabels(components, rotation=20, ha="right")
     ax.grid(axis="y", alpha=0.3)
+    positive_values = [
+        val for row in means_matrix for val in row if math.isfinite(val) and val > 0
+    ]
+    if positive_values:
+        min_pos = min(positive_values)
+        max_pos = max(positive_values)
+        ax.set_yscale("log")
+        ax.set_ylim(min_pos / 1.8, max_pos * 1.6)
+    ax.legend(frameon=False, ncol=1)
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2404,9 +2486,14 @@ def main() -> None:
 
         memory_breakdown_path = (
             plot_root_base.parent
-            / f"{plot_root_base.name}_{data_source}_memory_breakdown_round_robin_m_N3.pdf"
+            / f"{plot_root_base.name}_{data_source}_memory_breakdown_max_frames_memory_test.pdf"
         )
-        if plot_memory_breakdown_single_config(summary_stats, "round_robin_m", 3, memory_breakdown_path):
+        if plot_memory_breakdown_multi_videos(
+            summary_stats,
+            "max_frames_memory_test",
+            [3, 5, 10],
+            memory_breakdown_path,
+        ):
             print(f"[{data_source}] Saved memory breakdown plot to {memory_breakdown_path}")
         else:
             print(f"[{data_source}] Skipped memory breakdown plot; no valid data.")
