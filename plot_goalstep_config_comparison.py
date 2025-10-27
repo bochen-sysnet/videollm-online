@@ -63,9 +63,10 @@ SCHEDULING_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
 
 MEMORY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
     ("model_params_memory", "Model Params", "model_params"),
-    ("combined_dynamic_memory", "Combined Dynamic", "combined_dynamic"),
-    ("cpu_memory_growth_peak", "CPU Growth", "cpu_growth"),
+    ("combined_dynamic_memory", "KV GPU", "combined_dynamic"),
+    ("cpu_memory_growth_peak", "KV CPU", "cpu_growth"),
 )
+KV_CACHE_MEMORY = "kv_cache_memory"
 GENERATION_SPEED_METRIC = "generation_speed"
 FRACTION_RESPONSE_FRAMES_METRIC = "fraction_response_frames"
 GENERATION_LENGTHS = "generation_lengths"
@@ -358,6 +359,7 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
     kv_pairs_offload: List[Tuple[float, float]] = []
     kv_pairs_reload: List[Tuple[float, float]] = []
     kv_per_second: List[List[Tuple[float, float]]] = []
+    kv_cache_max_values: List[float] = []
     offload_slopes: List[float] = []
     reload_slopes: List[float] = []
     timing_breakdowns: List[Tuple[float, float, float, float, float, float, float]] = []
@@ -417,6 +419,8 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
 
         if model_mem:
             model_params_values.append(float(max(model_mem)))
+        if kv_mem:
+            kv_cache_max_values.append(float(max(kv_mem)))
         if kv_mem and activation_mem and other_mem:
             combined_dynamic_values.append(
                 float(max(kv_mem)) + float(max(activation_mem)) + float(max(other_mem))
@@ -483,6 +487,7 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
             "model_params_memory": float(np.mean(model_params_values)) if model_params_values else float("nan"),
             "combined_dynamic_memory": float(np.mean(combined_dynamic_values)) if combined_dynamic_values else float("nan"),
             "cpu_memory_growth_peak": float(np.mean(cpu_growth_values)) if cpu_growth_values else float("nan"),
+            KV_CACHE_MEMORY: float(np.mean(kv_cache_max_values)) if kv_cache_max_values else float("nan"),
         }
     )
     if total_generation_time > 0:
@@ -1201,8 +1206,8 @@ def plot_memory_breakdown_multi_videos(
     target_nums = [int(n) for n in target_num_videos]
     component_defs = [
         ("model_params_memory", "Model Params"),
-        ("combined_dynamic_memory", "Combined Dynamic"),
-        ("cpu_memory_growth_peak", "CPU Peak"),
+        ("combined_dynamic_memory", "KV GPU"),
+        ("cpu_memory_growth_peak", "KV CPU"),
     ]
 
     def _extract(metric_key: str, num: int) -> Tuple[float, float, List[float]]:
@@ -1260,7 +1265,7 @@ def plot_memory_breakdown_multi_videos(
             gpu_totals[num] = (float(arr.mean()), float(arr.std(ddof=0)))
         else:
             model_mean, model_std = component_stats["Model Params"].get(num, (float("nan"), float("nan")))
-            dyn_mean, dyn_std = component_stats["Combined Dynamic"].get(num, (float("nan"), float("nan")))
+            dyn_mean, dyn_std = component_stats["KV GPU"].get(num, (float("nan"), float("nan")))
             if math.isfinite(model_mean) and math.isfinite(dyn_mean):
                 combined_mean = model_mean + dyn_mean
                 # simple std combination if available
@@ -1275,7 +1280,7 @@ def plot_memory_breakdown_multi_videos(
     component_stats["GPU Total"] = gpu_totals
 
     # Filter out components lacking any finite data
-    components_order = ["Model Params", "Combined Dynamic", "GPU Total", "CPU Peak"]
+    components_order = ["Model Params", "KV GPU", "GPU Total", "KV CPU"]
     components = []
     for label in components_order:
         stats_per_num = component_stats.get(label, {})
@@ -1350,6 +1355,134 @@ def plot_memory_breakdown_multi_videos(
         max_pos = max(positive_values)
         ax.set_yscale("log")
         ax.set_ylim(min_pos / 1.8, max_pos * 1.6)
+    ax.legend(frameon=False, ncol=1)
+
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def plot_memory_speed_ratios(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_id: str,
+    target_num_videos: Iterable[int],
+    output_path: Path,
+) -> bool:
+    target_nums = [int(n) for n in target_num_videos]
+    if not target_nums:
+        return False
+
+    cpu_ratios: List[float] = []
+    kv_ratios: List[float] = []
+    consumption_ratios: List[float] = []
+
+    for num in target_nums:
+        cpu_mean = (
+            summary_stats.get("cpu_memory_growth_peak", {})
+            .get(config_id, {})
+            .get(num, {})
+            .get("mean")
+        )
+        cpu_ratio = float("nan")
+        if cpu_mean is not None and math.isfinite(cpu_mean):
+            cpu_ratio = cpu_mean / (64 * 1024)  # convert MB ratio
+        cpu_ratios.append(cpu_ratio)
+
+        model_mean = (
+            summary_stats.get("model_params_memory", {})
+            .get(config_id, {})
+            .get(num, {})
+            .get("mean")
+        )
+        kv_mean = (
+            summary_stats.get(KV_CACHE_MEMORY, {})
+            .get(config_id, {})
+            .get(num, {})
+            .get("mean")
+        )
+        kv_ratio = float("nan")
+        if (
+            kv_mean is not None
+            and math.isfinite(kv_mean)
+            and model_mean is not None
+            and math.isfinite(model_mean)
+        ):
+            available_gpu_mb = 24 * 1024 - model_mean
+            if available_gpu_mb > 0:
+                kv_ratio = kv_mean / available_gpu_mb
+        kv_ratios.append(kv_ratio)
+
+        gen_speed = (
+            summary_stats.get(GENERATION_SPEED_METRIC, {})
+            .get(config_id, {})
+            .get(num, {})
+            .get("mean")
+        )
+        consumption_ratio = float("nan")
+        if gen_speed is not None and math.isfinite(gen_speed) and gen_speed > 0:
+            consumption_speed = num * 2.7  # words/sec
+            consumption_ratio = consumption_speed / gen_speed
+        consumption_ratios.append(consumption_ratio)
+
+    if all(
+        not any(math.isfinite(val) for val in ratio_list)
+        for ratio_list in (cpu_ratios, kv_ratios, consumption_ratios)
+    ):
+        return False
+
+    categories = ["CPU", "KV", "Generation"]
+    ratio_matrix = [cpu_ratios, kv_ratios, consumption_ratios]
+
+    configure_plot_style()
+    colors = _scientific_colors()
+    fig, ax = plt.subplots(figsize=(4.0, 2.8))
+    x = np.arange(len(categories))
+    num_groups = len(target_nums)
+    bar_width = min(0.8 / max(num_groups, 1), 0.22)
+
+    plotted = False
+    for idx, num in enumerate(target_nums):
+        offset = (idx - (num_groups - 1) / 2) * bar_width
+        values = [ratio_matrix[row][idx] for row in range(len(categories))]
+        values_arr = np.asarray(values, dtype=float)
+        if np.all(~np.isfinite(values_arr)):
+            continue
+        plotted = True
+        ax.bar(
+            x + offset,
+            values_arr,
+            width=bar_width * 0.9,
+            color=colors[idx % len(colors)],
+            edgecolor="black",
+            linewidth=0.4,
+            label=f"N={num}",
+        )
+        for xpos, value in zip(x + offset, values_arr):
+            if math.isfinite(value):
+                ax.text(
+                    xpos,
+                    value + 0.03,
+                    f"{value:.2f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=6.5,
+                )
+
+    if not plotted:
+        plt.close(fig)
+        return False
+        
+    ax.set_ylabel("Ratio")
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories)
+    ax.grid(axis="y", alpha=0.3)
+    ylim_upper = max(
+        [value for row in ratio_matrix for value in row if math.isfinite(value)]
+        + [1.0]
+    )
+    ax.set_ylim(0, ylim_upper * 1.2)
     ax.legend(frameon=False, ncol=1)
 
     fig.tight_layout(pad=0.6)
@@ -2226,6 +2359,7 @@ def main() -> None:
         + [key for key, *_ in SCHEDULING_COMPONENTS]
         + [key for key, *_ in MEMORY_COMPONENTS]
         + [
+            KV_CACHE_MEMORY,
             GENERATION_SPEED_METRIC,
             FRACTION_RESPONSE_FRAMES_METRIC,
             GENERATION_LENGTHS,
@@ -2497,6 +2631,20 @@ def main() -> None:
             print(f"[{data_source}] Saved memory breakdown plot to {memory_breakdown_path}")
         else:
             print(f"[{data_source}] Skipped memory breakdown plot; no valid data.")
+
+        memory_ratio_path = (
+            plot_root_base.parent
+            / f"{plot_root_base.name}_{data_source}_memory_speed_ratios_max_frames_memory_test.pdf"
+        )
+        if plot_memory_speed_ratios(
+            summary_stats,
+            "max_frames_memory_test",
+            [3, 5, 10],
+            memory_ratio_path,
+        ):
+            print(f"[{data_source}] Saved memory/speed ratio plot to {memory_ratio_path}")
+        else:
+            print(f"[{data_source}] Skipped memory/speed ratio plot; no valid data.")
 
         if comparison_summary_stats:
             comp_stats = comparison_summary_stats.get(data_source)
