@@ -7,11 +7,13 @@ data_sources=("goalstep" "narration")
 # num_videos_list=(5 10 15)
 # full evaluation
 # num_videos_list=(1 3 5 8 10 15 20)
-num_videos_list=(2 4 6 7 9)
-iterations=(1 2 3 4 5 6 7 8 9 10)
+# test 21-50 videos
+num_videos_list=(3 5 10)
+iterations=(1 2 3 4 5)
 
 # full evaluation
-config_ids=("base" "random_m" "random_2" "round_robin_m" "round_robin_2")
+config_ids=("max_frames_memory_test")
+# config_ids=("base" "random_m" "random_2" "round_robin_m" "round_robin_2")
 # ablation study on remaining length
 # config_ids=("rl_ablation1" "rl_ablation2" "rl_ablation3")
 # config_ids=("chunk_ablation1" "chunk_ablation2" "chunk_ablation3" "chunk_ablation4" "chunk_ablation5")
