@@ -76,6 +76,7 @@ KV_SECONDARY_METRIC = "kv_transfer_per_second"
 KV_OFFLOAD_SLOPE = "kv_offload_slope"
 KV_RELOAD_SLOPE = "kv_reload_slope"
 TIMING_BREAKDOWN_METRIC = "timing_breakdown"
+BAR_LABEL_FONT_SIZE = 12
 
 EXTEND_METRICS = {
     GENERATION_LENGTHS,
@@ -1305,7 +1306,7 @@ def plot_memory_breakdown_multi_videos(
                     f"{value:.1f}",
                     ha="center",
                     va="bottom",
-                    fontsize=14,
+                    fontsize=BAR_LABEL_FONT_SIZE,
                     rotation=90,
                 )
 
@@ -1439,7 +1440,7 @@ def plot_memory_speed_ratios(
                 f"{value:.2f}",
                 ha="center",
                 va="bottom",
-                fontsize=14,
+                fontsize=BAR_LABEL_FONT_SIZE,
                 rotation=90,
             )
 
@@ -1552,7 +1553,7 @@ def plot_rebuffer_baseline_comparison_across_bases(
                     f"{value:.2f}",
                     ha="center",
                     va="bottom",
-                    fontsize=14,
+                    fontsize=BAR_LABEL_FONT_SIZE,
                     rotation=90,
                 )
 
@@ -1722,6 +1723,7 @@ def plot_roundrobin_ratio(
         linewidth=1.6,
         markersize=4,
         capsize=3,
+        label="RR-2 / RR-m",
     )
 
     ax.axhline(1.0, color="red", linestyle="--", linewidth=1.0, alpha=0.6)
@@ -1743,7 +1745,9 @@ def plot_roundrobin_ratio(
     ax.tick_params(axis='y', labelsize=14)
     ax.set_xticks(target_numbers)
     ax.grid(alpha=0.3)
-    ax.legend(frameon=False)
+    handles, labels = ax.get_legend_handles_labels()
+    if labels:
+        ax.legend(frameon=False)
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1796,17 +1800,17 @@ def plot_generation_speed_vs_listening(
             bar.get_y() + bar.get_height() / 2,
             text,
             va="center",
-            fontsize=18,
+            fontsize=BAR_LABEL_FONT_SIZE,
         )
 
-    ax.set_xlabel("Words Per Second", fontsize=18)
-    ax.set_ylabel("Listening Speed Study", fontsize=18)
+    ax.set_xlabel("Words Per Second", fontsize=14)
+    ax.set_ylabel("Listening Speed Study", fontsize=14)
     max_val = max(values)
     ax.set_xlim(0, max(max_val + 0.8, 5.5))
     ax.grid(axis="x", linestyle="--", alpha=0.4)
-    # set ytick size to 18
-    ax.tick_params(axis='y', labelsize=18)
-    ax.tick_params(axis='x', labelsize=18)
+    # set ytick size to 14
+    ax.tick_params(axis='y', labelsize=14)
+    ax.tick_params(axis='x', labelsize=14)
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -2143,7 +2147,7 @@ def plot_timing_breakdown(
                 f"{value:.2f}",
                 ha="center",
                 va="bottom",
-                fontsize=14,
+                fontsize=BAR_LABEL_FONT_SIZE,
                 rotation=90,
             )
 
