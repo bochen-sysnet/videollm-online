@@ -281,6 +281,20 @@ def parse_args() -> argparse.Namespace:
         help="Number of videos for ablation plots (default: 5 10 15).",
     )
     parser.add_argument(
+        "--per-video-numbers",
+        nargs="+",
+        type=int,
+        default=[3, 5, 8, 10],
+        help="Video counts to display in per-video plots.",
+    )
+    parser.add_argument(
+        "--overall-video-numbers",
+        nargs="+",
+        type=int,
+        default=list(range(1, 11)),
+        help="Video counts to include when aggregating across videos.",
+    )
+    parser.add_argument(
         "--iterations",
         nargs="+",
         type=int,
@@ -563,18 +577,27 @@ def _color_hatch_cycle(count: int) -> List[Tuple[str, str]]:
     return palette
 
 
-def _collect_per_video_means(num_map: Dict[int, Dict[str, Iterable[float]]]) -> List[float]:
+def _collect_per_video_means(
+    num_map: Dict[int, Dict[str, Iterable[float]]],
+    allowed_nums: Optional[Iterable[int]] = None,
+) -> List[float]:
     values: List[float] = []
-    for num in sorted(num_map):
-        entry = num_map[num]
+    numbers = allowed_nums if allowed_nums is not None else sorted(num_map)
+    for num in numbers:
+        entry = num_map.get(num)
+        if not entry:
+            continue
         mean = entry.get("mean")
         if mean is not None and math.isfinite(mean):
             values.append(float(mean))
     return values
 
 
-def _aggregate_across_videos(num_map: Dict[int, Dict[str, Iterable[float]]]) -> Tuple[float, float]:
-    values = _collect_per_video_means(num_map)
+def _aggregate_across_videos(
+    num_map: Dict[int, Dict[str, Iterable[float]]],
+    allowed_nums: Optional[Iterable[int]] = None,
+) -> Tuple[float, float]:
+    values = _collect_per_video_means(num_map, allowed_nums)
     if not values:
         return float("nan"), float("nan")
     arr = np.asarray(values, dtype=float)
@@ -654,6 +677,7 @@ def plot_overall_bar(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     config_ids: List[str],
     output_path: Path,
+    allowed_nums: Optional[Iterable[int]] = None,
 ) -> bool:
     """Bar chart summarizing mean/std aggregated across all video counts."""
     configure_plot_style()
@@ -664,7 +688,7 @@ def plot_overall_bar(
 
     for idx, config_id in enumerate(config_ids):
         num_map = summary_stats.get(metric_key, {}).get(config_id, {})
-        mean, std = _aggregate_across_videos(num_map)
+        mean, std = _aggregate_across_videos(num_map, allowed_nums)
         if not math.isfinite(mean):
             continue
         means.append(mean)
@@ -763,6 +787,7 @@ def plot_delay_comparison_by_config(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     config_ids: List[str],
     output_path: Path,
+    allowed_nums: Optional[Iterable[int]] = None,
 ) -> bool:
     """Grouped bar comparing delay metrics averaged over all videos per config."""
     configure_plot_style()
@@ -776,7 +801,7 @@ def plot_delay_comparison_by_config(
         has_values = False
         for metric_key in delay_keys:
             num_map = summary_stats.get(metric_key, {}).get(config_id, {})
-            values = _collect_per_video_means(num_map)
+            values = _collect_per_video_means(num_map, allowed_nums)
             if values:
                 mean = float(np.mean(values))
                 has_values = True
@@ -825,6 +850,7 @@ def plot_latency_components_by_config(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     config_ids: List[str],
     output_path: Path,
+    allowed_nums: Optional[Iterable[int]] = None,
 ) -> bool:
     """Compare latency components averaged across all videos for each config."""
     configure_plot_style()
@@ -844,7 +870,7 @@ def plot_latency_components_by_config(
         stds = []
         for key in component_keys:
             num_map = summary_stats.get(key, {}).get(config_id, {})
-            collected = _collect_per_video_means(num_map)
+            collected = _collect_per_video_means(num_map, allowed_nums)
             if collected:
                 arr = np.asarray(collected, dtype=float)
                 mean = float(arr.mean())
@@ -892,6 +918,7 @@ def plot_scheduling_components_by_config(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     config_ids: List[str],
     output_path: Path,
+    allowed_nums: Optional[Iterable[int]] = None,
 ) -> bool:
     """Grouped bar chart comparing scheduling components across configs."""
     configure_plot_style()
@@ -909,7 +936,7 @@ def plot_scheduling_components_by_config(
         has_data = False
         for key in component_keys:
             num_map = summary_stats.get(key, {}).get(config_id, {})
-            collected = _collect_per_video_means(num_map)
+            collected = _collect_per_video_means(num_map, allowed_nums)
             if collected:
                 arr = np.asarray(collected, dtype=float)
                 mean = float(arr.mean())
@@ -1031,6 +1058,7 @@ def plot_memory_components_by_config(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     config_ids: List[str],
     output_path: Path,
+    allowed_nums: Optional[Iterable[int]] = None,
 ) -> bool:
     """Grouped bar chart comparing memory components across configs (log scale)."""
     configure_plot_style()
@@ -1048,7 +1076,7 @@ def plot_memory_components_by_config(
         has_data = False
         for key in component_keys:
             num_map = summary_stats.get(key, {}).get(config_id, {})
-            collected = _collect_per_video_means(num_map)
+            collected = _collect_per_video_means(num_map, allowed_nums)
             if collected:
                 arr = np.asarray(collected, dtype=float)
                 mean = float(arr.mean())
@@ -2317,6 +2345,8 @@ def main() -> None:
             comparison_base_dir = default_comparison.resolve()
     primary_label = args.primary_label or (base_dir.name or "primary")
     comparison_label = args.comparison_label
+    per_video_targets: List[int] = sorted(set(args.per_video_numbers))
+    overall_targets: List[int] = sorted(set(args.overall_video_numbers))
 
     all_metric_keys = (
         [key for key, *_ in METRIC_ORDER]
@@ -2488,6 +2518,10 @@ def main() -> None:
         if not ds_numbers:
             ds_numbers = list(DEFAULT_NUM_VIDEOS)
 
+        per_video_nums = [n for n in per_video_targets if n in ds_numbers]
+        if not per_video_nums:
+            per_video_nums = ds_numbers
+
         configs_for_ds_set: Set[str] = set()
         for configs in summary_stats.values():
             configs_for_ds_set.update(configs.keys())
@@ -2519,7 +2553,7 @@ def main() -> None:
                 y_label,
                 slug,
                 summary_stats,
-                ds_numbers,
+                per_video_nums,
                 general_configs,
                 per_video_path,
             )
@@ -2536,6 +2570,7 @@ def main() -> None:
                 summary_stats,
                 general_configs,
                 overall_path,
+                allowed_nums=overall_targets,
             )
             if overall_saved:
                 print(f"[{data_source}] Saved aggregated bar plot to {overall_path}")
@@ -2544,35 +2579,35 @@ def main() -> None:
 
         # Base delay trends
         base_delay_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_base_delay_vs_videos.pdf"
-        if plot_base_delay_trends(summary_stats, ds_numbers, base_delay_path):
+        if plot_base_delay_trends(summary_stats, per_video_nums, base_delay_path):
             print(f"[{data_source}] Saved base delay trend plot to {base_delay_path}")
         else:
             print(f"[{data_source}] Skipped base delay trend plot; no valid data.")
 
         # Delay comparison across configs
         delay_compare_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_delay_by_config.pdf"
-        if plot_delay_comparison_by_config(summary_stats, general_configs, delay_compare_path):
+        if plot_delay_comparison_by_config(summary_stats, general_configs, delay_compare_path, allowed_nums=overall_targets):
             print(f"[{data_source}] Saved delay comparison plot to {delay_compare_path}")
         else:
             print(f"[{data_source}] Skipped delay comparison plot; no valid data.")
 
         # Scheduling components comparison across configs
         scheduling_config_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_scheduling_components_by_config.pdf"
-        if plot_scheduling_components_by_config(summary_stats, general_configs, scheduling_config_path):
+        if plot_scheduling_components_by_config(summary_stats, general_configs, scheduling_config_path, allowed_nums=overall_targets):
             print(f"[{data_source}] Saved scheduling components by config plot to {scheduling_config_path}")
         else:
             print(f"[{data_source}] Skipped scheduling components by config plot; no valid data.")
 
         # Scheduling components vs number of videos (base config)
         scheduling_base_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_scheduling_components_base_vs_videos.pdf"
-        if plot_scheduling_components_base_vs_videos(summary_stats, ds_numbers, scheduling_base_path):
+        if plot_scheduling_components_base_vs_videos(summary_stats, per_video_nums, scheduling_base_path):
             print(f"[{data_source}] Saved scheduling components (base) vs videos plot to {scheduling_base_path}")
         else:
             print(f"[{data_source}] Skipped scheduling components (base) vs videos plot; no valid data.")
 
         # Memory components across configs
         memory_config_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_memory_components_by_config.pdf"
-        if plot_memory_components_by_config(summary_stats, general_configs, memory_config_path):
+        if plot_memory_components_by_config(summary_stats, general_configs, memory_config_path, allowed_nums=overall_targets):
             print(f"[{data_source}] Saved memory components by config plot to {memory_config_path}")
         else:
             print(f"[{data_source}] Skipped memory components by config plot; no valid data.")
@@ -2648,7 +2683,7 @@ def main() -> None:
 
         # Latency components across configs
         latency_config_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_latency_components_by_config.pdf"
-        if plot_latency_components_by_config(summary_stats, general_configs, latency_config_path):
+        if plot_latency_components_by_config(summary_stats, general_configs, latency_config_path, allowed_nums=overall_targets):
             print(f"[{data_source}] Saved latency components by config plot to {latency_config_path}")
         else:
             print(f"[{data_source}] Skipped latency components by config plot; no valid data.")
