@@ -33,18 +33,18 @@ DEFAULT_BASE_DIR = Path("figures")
 BASE_CONFIG_ID = "base"
 
 METRIC_ORDER: Tuple[Tuple[str, str, str, str], ...] = (
-    ("rebuffer_time", "Average Rebuffering Time (s)", "Rebuffering Time", "rebuffer"),
+    ("rebuffer_time", "Rebuffering Time (s)", "Rebuffering Time", "rebuffer"),
     ("ttft", "Average TTFT (s)", "TTFT", "ttft"),
-    ("scheduling_score", "Final Scheduling Score", "Scheduling Score", "scheduling"),
-    ("perplexity", "Average VLM Perplexity", "Perplexity", "perplexity"),
+    ("scheduling_score", "Scheduling Score", "Scheduling Score", "scheduling"),
+    ("perplexity", "Perplexity", "Perplexity", "perplexity"),
 )
 
 LATENCY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
     ("visual_embedding_time", "Prefilling", "prefilling"),
     ("model_forward_time", "EOS", "scoring"),
     ("generation_time", "Decoding", "generation"),
-    ("kv_offload_time", "KV Offload", "kv_offload"),
-    ("kv_reload_time", "KV Reload", "kv_reload"),
+    ("kv_offload_time", "Offload", "kv_offload"),
+    ("kv_reload_time", "Reload", "kv_reload"),
     ("total_sending_time", "Network", "network_time"),
     ("total_processing_time", "Total", "total_processing"),
 )
@@ -530,18 +530,18 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
 # Plotting helpers
 # ------------------------------------------------------------------------------
 
-def configure_plot_style() -> None:
+def configure_plot_style(font_size: int = 14) -> None:
     """Set matplotlib defaults to a publication-friendly style."""
     plt.style.use("seaborn-v0_8-whitegrid")
     plt.rcParams.update(
         {
             "font.family": "DejaVu Sans",
-            "font.size": 8,
-            "axes.titlesize": 9,
-            "axes.labelsize": 9,
-            "xtick.labelsize": 7,
-            "ytick.labelsize": 7,
-            "legend.fontsize": 7,
+            "font.size": font_size,
+            "axes.titlesize": font_size + 1,
+            "axes.labelsize": font_size,
+            "xtick.labelsize": font_size,
+            "ytick.labelsize": font_size,
+            "legend.fontsize": max(8, font_size - 2),
             "axes.grid": True,
             "grid.alpha": 0.3,
             "grid.linestyle": "--",
@@ -615,7 +615,7 @@ def plot_grouped_bar(
     output_path: Path,
 ) -> bool:
     """Grouped bar chart of metric vs number of videos."""
-    configure_plot_style()
+    configure_plot_style(font_size=14)
     palette = _color_hatch_cycle(len(config_ids))
     num_configs = len(config_ids)
     num_groups = len(num_videos)
@@ -729,41 +729,53 @@ def plot_base_delay_trends(
     num_videos: List[int],
     output_path: Path,
 ) -> bool:
-    """Plot base config delay metrics vs number of videos."""
+    """Bar plot of base config delay metrics vs number of videos."""
+    if not num_videos:
+        return False
+
     base_stats = {
         metric: summary_stats.get(metric, {}).get(BASE_CONFIG_ID, {}) for metric, *_ in DELAY_METRICS
     }
     if not any(base_stats.values()):
         return False
 
-    configure_plot_style()
-    colors = _scientific_colors()
-    fig, ax = plt.subplots(figsize=(3.4, 2.6))
+    configure_plot_style(font_size=14)
+    fig, ax = plt.subplots(figsize=(4.0, 2.8))
+    palette = _color_hatch_cycle(len(DELAY_METRICS))
+    x = np.arange(len(num_videos))
+    bar_width = min(0.8 / max(len(DELAY_METRICS), 1), 0.22)
     has_data = False
 
-    markers = ["o", "s", "^"]
     for idx, (metric_key, _, title) in enumerate(DELAY_METRICS):
         metric_data = base_stats.get(metric_key, {})
         means = []
         stds = []
         for n in num_videos:
             entry = metric_data.get(n, {})
-            means.append(entry.get("mean", float("nan")))
-            stds.append(entry.get("std", float("nan")))
+            mean = entry.get("mean")
+            std = entry.get("std")
+            if mean is not None and math.isfinite(mean):
+                means.append(float(mean))
+                stds.append(float(std) if std is not None and math.isfinite(std) else 0.0)
+            else:
+                means.append(float("nan"))
+                stds.append(0.0)
         means_arr = np.asarray(means, dtype=float)
-        stds_arr = np.asarray(stds, dtype=float)
         if np.all(~np.isfinite(means_arr)):
             continue
         has_data = True
-        ax.errorbar(
-            num_videos,
+        color, hatch = palette[idx]
+        offset = (idx - (len(DELAY_METRICS) - 1) / 2) * bar_width
+        ax.bar(
+            x + offset,
             means_arr,
-            yerr=stds_arr,
-            color=colors[idx % len(colors)],
-            marker=markers[idx % len(markers)],
-            linewidth=1.6,
-            markersize=4,
-            capsize=3,
+            width=bar_width * 0.95,
+            yerr=stds,
+            capsize=2.5,
+            color=color,
+            hatch=hatch,
+            edgecolor="black",
+            linewidth=0.4,
             label=title,
         )
 
@@ -771,11 +783,14 @@ def plot_base_delay_trends(
         plt.close(fig)
         return False
 
-    ax.set_title(f"{BASE_CONFIG_ID.title()} Delay vs Number of Videos")
-    ax.set_xlabel("Number of Videos")
-    ax.set_ylabel("Delay (s)")
-    ax.set_xticks(num_videos)
-    ax.legend(frameon=False)
+    ax.set_title(f"{BASE_CONFIG_ID.title()} Delay vs Number of Videos", fontsize=14)
+    ax.set_xlabel("Number of Videos", fontsize=14)
+    ax.set_ylabel("Delay (s)", fontsize=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(n) for n in num_videos], fontsize=14)
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(frameon=False, fontsize=12)
+
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -998,8 +1013,10 @@ def plot_scheduling_components_base_vs_videos(
     num_videos: List[int],
     output_path: Path,
 ) -> bool:
-    """Line plot showing scheduling components over number of videos for base config."""
-    configure_plot_style()
+    """Bar plot showing scheduling components over number of videos for base config."""
+    if not num_videos:
+        return False
+
     base_components = {
         key: summary_stats.get(key, {}).get(BASE_CONFIG_ID, {})
         for key, _, _ in SCHEDULING_COMPONENTS
@@ -1008,45 +1025,55 @@ def plot_scheduling_components_base_vs_videos(
     if not any(base_components.values()):
         return False
 
-    colors = _scientific_colors()
-    markers = ["o", "s", "^"]
-    fig, ax = plt.subplots(figsize=(3.6, 2.4))
+    configure_plot_style(font_size=14)
+    palette = _color_hatch_cycle(len(num_videos))
+    fig, ax = plt.subplots(figsize=(4.0, 2.8))
+    x = np.arange(len(SCHEDULING_COMPONENTS))
+    bar_width = min(0.8 / max(len(num_videos), 1), 0.22)
     has_data = False
 
-    for idx, (key, label, _) in enumerate(SCHEDULING_COMPONENTS):
-        stats_for_base = base_components.get(key, {})
+    for idx, n in enumerate(num_videos):
         means = []
         stds = []
-        for n in num_videos:
-            entry = stats_for_base.get(n, {})
-            means.append(entry.get("mean", float("nan")))
-            stds.append(entry.get("std", float("nan")))
+        for key, _, label in SCHEDULING_COMPONENTS:
+            entry = base_components.get(key, {}).get(n, {})
+            mean = entry.get("mean")
+            std = entry.get("std")
+            if mean is not None and math.isfinite(mean):
+                means.append(float(mean))
+                stds.append(float(std) if std is not None and math.isfinite(std) else 0.0)
+            else:
+                means.append(float("nan"))
+                stds.append(0.0)
         means_arr = np.asarray(means, dtype=float)
-        stds_arr = np.asarray(stds, dtype=float)
         if np.all(~np.isfinite(means_arr)):
             continue
         has_data = True
-        ax.errorbar(
-            num_videos,
+        color, hatch = palette[idx]
+        offset = (idx - (len(num_videos) - 1) / 2) * bar_width
+        ax.bar(
+            x + offset,
             means_arr,
-            yerr=stds_arr,
-            color=colors[idx % len(colors)],
-            marker=markers[idx % len(markers)],
-            linewidth=1.6,
-            markersize=4,
-            capsize=3,
-            label=label,
+            width=bar_width * 0.95,
+            yerr=stds,
+            capsize=2.5,
+            color=color,
+            hatch=hatch,
+            edgecolor="black",
+            linewidth=0.4,
+            label=f"N={n}",
         )
 
     if not has_data:
         plt.close(fig)
         return False
 
-    ax.set_title(f"{BASE_CONFIG_ID.title()} Scheduling Components vs Number of Videos")
-    ax.set_xlabel("Number of Videos")
-    ax.set_ylabel("Cumulative Score")
-    ax.set_xticks(num_videos)
-    ax.legend(frameon=False)
+    ax.set_ylabel("Cumulative Score", fontsize=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels([label for _, label, _ in SCHEDULING_COMPONENTS], rotation=20, ha="right", fontsize=14)
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(frameon=False, ncol=1, fontsize=12)
+
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -1278,7 +1305,8 @@ def plot_memory_breakdown_multi_videos(
                     f"{value:.1f}",
                     ha="center",
                     va="bottom",
-                    fontsize=6.5,
+                    fontsize=14,
+                    rotation=90,
                 )
 
     ax.set_title(f"{config_id.replace('_', ' ').title()} Memory Components")
@@ -1402,31 +1430,33 @@ def plot_memory_speed_ratios(
             linewidth=0.4,
             label=f"N={num}",
         )
-        for xpos, value in zip(x + offset, values_arr):
-            if math.isfinite(value):
-                ax.text(
-                    xpos,
-                    value + 0.03,
-                    f"{value:.2f}",
-                    ha="center",
-                    va="bottom",
-                    fontsize=6.5,
-                )
+        for xpos, value, label in zip(x + offset, values_arr, categories):
+            if label not in {"CPU", "GPU"} or not math.isfinite(value):
+                continue
+            ax.text(
+                xpos,
+                value + 0.03,
+                f"{value:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=14,
+                rotation=90,
+            )
 
     if not plotted:
         plt.close(fig)
         return False
         
-    ax.set_ylabel("Ratio (%)")
+    ax.set_ylabel("Ratio (%)", fontsize=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(categories)
+    ax.set_xticklabels(categories, fontsize=14)
     ax.grid(axis="y", alpha=0.3)
     ylim_upper = max(
         [value for row in ratio_matrix for value in row if math.isfinite(value)]
         + [1.0]
     )
     ax.set_ylim(0, ylim_upper * 1.2)
-    ax.legend(frameon=False, ncol=1)
+    ax.legend(frameon=False, ncol=1, fontsize=12)
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1522,7 +1552,8 @@ def plot_rebuffer_baseline_comparison_across_bases(
                     f"{value:.2f}",
                     ha="center",
                     va="bottom",
-                    fontsize=6.5,
+                    fontsize=14,
+                    rotation=90,
                 )
 
     if not plotted:
@@ -1531,10 +1562,10 @@ def plot_rebuffer_baseline_comparison_across_bases(
 
     cfg_labels = [config_ids[i] for i in valid_indices]
     nums_str = ", ".join(str(n) for n in target_nums)
-    ax.set_ylabel("Rebuffering (s)", fontsize=12)
-    ax.set_yticklabels(ax.get_yticks(), fontsize=12)
+    ax.set_ylabel("Rebuffering (s)", fontsize=14)
+    ax.tick_params(axis="y", labelsize=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(cfg_labels, rotation=20, ha="right", fontsize=12)
+    ax.set_xticklabels(cfg_labels, rotation=20, ha="right", fontsize=14)
     ax.legend(frameon=False, fontsize=12)
     ax.grid(axis="y", alpha=0.3)
 
@@ -2122,7 +2153,7 @@ def plot_timing_breakdown(
     ax.set_xticks(x)
     ax.set_xticklabels([label for _, label in components], rotation=20, ha="right", fontsize=14)
     ax.grid(axis="y", alpha=0.3)
-    ax.legend(frameon=False, ncol=1, fontsize=14)
+    ax.legend(frameon=False, ncol=1, fontsize=12)
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
