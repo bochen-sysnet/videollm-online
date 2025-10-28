@@ -1524,45 +1524,50 @@ def plot_roundrobin_comparison(
     general_num_override: Optional[List[int]],
     output_path: Path,
 ) -> bool:
-    """Plot round_robin_m rebuffering vs number of videos for each data source."""
-    configure_plot_style()
-    colors = _scientific_colors()
-    markers = ["o", "s", "^", "D", "P", "X"]
+    """Plot goalstep round_robin_m rebuffering and delay components across users."""
+    summary_stats = general_stats.get("goalstep")
+    if not summary_stats:
+        return False
 
-    fig, ax = plt.subplots(figsize=(3.6, 2.6))
-    plotted = False
-    combined_nums: Set[int] = set()
+    target_numbers = list(range(1, 11))
+    series_def = [
+        ("rebuffer_time", "Total Rebuffering"),
+        ("processing_delay", "Processing Delay"),
+        ("queuing_delay", "Queuing Delay"),
+        ("network_delay", "Networking Delay"),
+    ]
 
-    for idx, data_source in enumerate(data_sources):
-        summary_stats = general_stats.get(data_source)
-        if not summary_stats:
+    data_series: List[Tuple[str, List[int], List[float], List[float]]] = []
+    for metric_key, label in series_def:
+        metric_stats = summary_stats.get(metric_key, {}).get("round_robin_m", {})
+        if not metric_stats:
             continue
-        rebuffer_stats = summary_stats.get("rebuffer_time", {}).get("round_robin_m", {})
-        if not rebuffer_stats:
-            continue
-        nums = sorted(available_numbers.get(data_source, []))
-        if general_num_override:
-            nums = [n for n in nums if n in general_num_override]
-        means = []
-        stds = []
-        valid_nums = []
-        for n in nums:
-            entry = rebuffer_stats.get(n, {})
+        nums: List[int] = []
+        means: List[float] = []
+        stds: List[float] = []
+        for n in target_numbers:
+            entry = metric_stats.get(n, {})
             mean = entry.get("mean")
             if mean is None or not math.isfinite(mean):
                 continue
-            std = entry.get("std", 0.0)
-            if std is None or not math.isfinite(std):
-                std = 0.0
-            means.append(mean)
-            stds.append(std)
-            valid_nums.append(n)
-        if not means:
-            continue
-        plotted = True
-        combined_nums.update(valid_nums)
+            std = entry.get("std")
+            nums.append(n)
+            means.append(float(mean))
+            stds.append(float(std) if std is not None and math.isfinite(std) else 0.0)
+        if nums:
+            data_series.append((label, nums, means, stds))
+
+    if not data_series:
+        return False
+
+    configure_plot_style()
+    colors = _scientific_colors()
+    markers = ["o", "s", "^", "D"]
+    fig, ax = plt.subplots(figsize=(4.0, 2.8))
+
+    for idx, (label, nums, means, stds) in enumerate(data_series):
         ax.errorbar(
-            valid_nums,
+            nums,
             means,
             yerr=stds,
             marker=markers[idx % len(markers)],
@@ -1570,18 +1575,16 @@ def plot_roundrobin_comparison(
             linewidth=1.6,
             markersize=4,
             capsize=3,
-            label=data_source.title(),
+            label=label,
         )
 
-    if not plotted or not combined_nums:
-        plt.close(fig)
-        return False
-
-    ax.set_title("RoundRobin_m Rebuffering vs Number of Videos")
+    ax.set_title("Goalstep RoundRobin-m Rebuffering Components")
     ax.set_xlabel("Number of Videos")
-    ax.set_ylabel("Total Rebuffering Time (s)")
-    ax.set_xticks(sorted(combined_nums))
-    ax.legend(frameon=False)
+    ax.set_ylabel("Time (s)")
+    ax.set_xticks(target_numbers)
+    ax.grid(alpha=0.3)
+    ax.legend(frameon=False, ncol=1)
+
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -1991,10 +1994,11 @@ def plot_buffering_components_comparison(
 
 
 def plot_timing_breakdown(
-    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
-    config_id: str,
-    target_num_videos: int,
+    all_summary_stats: Dict[str, Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]]],
+    data_sources: List[str],
     output_path: Path,
+    target_num_videos: int = 5,
+    config_id: str = "round_robin_m",
 ) -> bool:
     components = [
         ("visual_embedding_time", "Prefilling"),
@@ -2006,41 +2010,83 @@ def plot_timing_breakdown(
         ("total_processing_time", "Total"),
     ]
 
-    means = []
-    stds = []
-    labels = []
-    for metric_key, label in components:
-        metric_data = summary_stats.get(metric_key, {}).get(config_id, {}).get(target_num_videos, {})
-        mean = metric_data.get("mean")
-        std = metric_data.get("std")
-        if mean is None or not math.isfinite(mean):
-            means.append(float("nan"))
-            stds.append(0.0)
-        else:
-            means.append(float(mean))
-            stds.append(float(std) if std is not None and math.isfinite(std) else 0.0)
-        labels.append(label)
+    ds_order: List[str] = []
+    means_matrix: List[List[float]] = []
+    std_matrix: List[List[float]] = []
+    for data_source in data_sources:
+        summary_stats = all_summary_stats.get(data_source)
+        if not summary_stats:
+            continue
+        ds_means: List[float] = []
+        ds_stds: List[float] = []
+        for metric_key, _ in components:
+            metric_data = (
+                summary_stats.get(metric_key, {})
+                .get(config_id, {})
+                .get(target_num_videos, {})
+            )
+            mean = metric_data.get("mean")
+            std = metric_data.get("std")
+            if mean is None or not math.isfinite(mean):
+                ds_means.append(float("nan"))
+                ds_stds.append(0.0)
+            else:
+                ds_means.append(float(mean))
+                ds_stds.append(float(std) if std is not None and math.isfinite(std) else 0.0)
+        if any(math.isfinite(m) for m in ds_means):
+            ds_order.append(data_source)
+            means_matrix.append(ds_means)
+            std_matrix.append(ds_stds)
 
-    if not any(math.isfinite(m) for m in means):
+    if not ds_order:
         return False
 
     configure_plot_style()
-    fig, ax = plt.subplots(figsize=(3.6, 2.6))
-    x = np.arange(len(labels))
-    ax.bar(
-        x,
-        means,
-        yerr=stds,
-        capsize=2.5,
-        color="#4E79A7",
-        edgecolor="black",
-        linewidth=0.4,
-    )
-    ax.set_title(f"Timing Breakdown")
-    ax.set_ylabel("Time (s)")
+    palette = _color_hatch_cycle(len(ds_order))
+    fig, ax = plt.subplots(figsize=(4.4, 2.8))
+    x = np.arange(len(components))
+    bar_width = min(0.8 / max(len(ds_order), 1), 0.25)
+
+    for idx, (data_source, means, stds) in enumerate(zip(ds_order, means_matrix, std_matrix)):
+        color, hatch = palette[idx]
+        means_arr = np.asarray(means, dtype=float)
+        stds_arr = np.asarray(stds, dtype=float)
+        stds_arr[~np.isfinite(stds_arr)] = 0.0
+        if np.all(~np.isfinite(means_arr)):
+            continue
+        offset = (idx - (len(ds_order) - 1) / 2) * bar_width
+        ax.bar(
+            x + offset,
+            means_arr,
+            width=bar_width * 0.95,
+            yerr=stds_arr,
+            capsize=2.5,
+            color=color,
+            hatch=hatch,
+            edgecolor="black",
+            linewidth=0.4,
+            label=data_source.title(),
+        )
+        for xpos, value in zip(x + offset, means_arr):
+            if math.isfinite(value):
+                # rotate text 90 degrees
+                ax.text(
+                    xpos,
+                    value + 0.08 * max(value, 0.5),
+                    f"{value:.2f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=14,
+                    rotation=90,
+                )
+
+    ax.set_ylabel("Time (s)", fontsize=14)
+    # set y tick size to 14
+    ax.tick_params(axis='y', labelsize=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.set_xticklabels([label for _, label in components], rotation=20, ha="right", fontsize=14)
     ax.grid(axis="y", alpha=0.3)
+    ax.legend(frameon=False, ncol=1, fontsize=14)
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2631,12 +2677,6 @@ def main() -> None:
         else:
             print(f"[{data_source}] Skipped KV transfer slope plot; no valid data.")
 
-        timing_breakdown_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_timing_breakdown_round_robin_m.pdf"
-        if plot_timing_breakdown(summary_stats, "round_robin_m", 5, timing_breakdown_path):
-            print(f"[{data_source}] Saved timing breakdown plot to {timing_breakdown_path}")
-        else:
-            print(f"[{data_source}] Skipped timing breakdown plot; no valid data.")
-
         buffering_compare_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_buffering_components_comparison.pdf"
         if plot_buffering_components_comparison(
             summary_stats, ["round_robin_m", "round_robin_2"], 3, buffering_compare_path
@@ -2680,6 +2720,12 @@ def main() -> None:
                             ]
                         )
         print(f"[{data_source}] Wrote summary table to {csv_path}")
+
+    combined_timing_path = base_dir / "timing_breakdown_round_robin_m_combined.pdf"
+    if plot_timing_breakdown(all_summary_stats, data_sources, combined_timing_path):
+        print(f"Saved combined timing breakdown to {combined_timing_path}")
+    else:
+        print("Skipped combined timing breakdown plot; no valid data.")
 
     # Combined round_robin_m comparison across data sources
     if data_sources:
