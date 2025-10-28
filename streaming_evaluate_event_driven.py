@@ -4511,7 +4511,7 @@ def main():
         Config.BUFFER_URGENT_FACTOR = 1.0
         Config.BUFFER_URGENT_VALUE = Config.GENERATION_CHUNK_SIZE * Config.BUFFER_URGENT_FACTOR
     elif config_id == 'max_frames_memory_test':
-        Config.MAX_NUM_FRAMES = 1000
+        Config.MAX_EVAL_FRAMES = 1000
     elif config_id == 'consumption_ablation1_base':
         Config.USER_CONSUMPTION_SPEED = 1
     elif config_id == 'consumption_ablation1_rr_2':

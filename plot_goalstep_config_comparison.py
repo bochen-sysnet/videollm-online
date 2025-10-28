@@ -33,10 +33,10 @@ DEFAULT_BASE_DIR = Path("figures")
 BASE_CONFIG_ID = "base"
 
 METRIC_ORDER: Tuple[Tuple[str, str, str, str], ...] = (
-    ("rebuffer_time", "Rebuffering Time (s)", "Rebuffering Time", "rebuffer"),
-    ("ttft", "Average TTFT (s)", "TTFT", "ttft"),
-    ("scheduling_score", "Scheduling Score", "Scheduling Score", "scheduling"),
-    ("perplexity", "Perplexity", "Perplexity", "perplexity"),
+    ("rebuffer_time", "Rebuffering (s)", "", "rebuffer"),
+    ("ttft", "TTFT (s)", "", "ttft"),
+    ("scheduling_score", "Scheduling Score", "", "scheduling"),
+    ("perplexity", "Perplexity", "", "perplexity"),
 )
 
 LATENCY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
@@ -77,6 +77,7 @@ KV_OFFLOAD_SLOPE = "kv_offload_slope"
 KV_RELOAD_SLOPE = "kv_reload_slope"
 TIMING_BREAKDOWN_METRIC = "timing_breakdown"
 BAR_LABEL_FONT_SIZE = 12
+LEGEND_FONT_SIZE = 8
 
 EXTEND_METRICS = {
     GENERATION_LENGTHS,
@@ -322,10 +323,19 @@ def safe_mean_std(values: Iterable[float]) -> Tuple[float, float]:
     return float(arr.mean()), float(arr.std(ddof=0))
 
 
-def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
-    """Extract metrics from a single overall_summary.json file."""
+def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None) -> Dict[str, float]:
+    """Extract metrics from a single overall_summary.json file, optionally normalizing per video."""
     with summary_path.open("r", encoding="utf-8") as fp:
         summary = json.load(fp)
+
+    scaling: float = 1.0
+    if num_videos:
+        try:
+            num_videos_int = int(num_videos)
+        except (TypeError, ValueError):
+            num_videos_int = 0
+        if num_videos_int > 0:
+            scaling = 1.0 / float(num_videos_int)
 
     # Rebuffering time: average across conversations.
     buffer_states = summary.get("onthefly_buffer_data", {}) or {}
@@ -343,22 +353,22 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
         if total is None:
             rebuffer_series = candidate.get("rebuffer_values") or []
             total = rebuffer_series[-1] if rebuffer_series else 0.0
-        rebuffer_values.append(float(total))
+        rebuffer_values.append(float(total) * scaling)
 
         if candidate.get("processing_delays"):
-            processing_delays.append(float(candidate["processing_delays"][-1]))
+            processing_delays.append(float(candidate["processing_delays"][-1]) * scaling)
         elif candidate.get("total_processing_delay") is not None:
-            processing_delays.append(float(candidate["total_processing_delay"]))
+            processing_delays.append(float(candidate["total_processing_delay"]) * scaling)
 
         if candidate.get("queuing_delays"):
-            queuing_delays.append(float(candidate["queuing_delays"][-1]))
+            queuing_delays.append(float(candidate["queuing_delays"][-1]) * scaling)
         elif candidate.get("total_queuing_delay") is not None:
-            queuing_delays.append(float(candidate["total_queuing_delay"]))
+            queuing_delays.append(float(candidate["total_queuing_delay"]) * scaling)
 
         if candidate.get("networking_delays"):
-            networking_delays.append(float(candidate["networking_delays"][-1]))
+            networking_delays.append(float(candidate["networking_delays"][-1]) * scaling)
         elif candidate.get("total_networking_delay") is not None:
-            networking_delays.append(float(candidate["total_networking_delay"]))
+            networking_delays.append(float(candidate["total_networking_delay"]) * scaling)
     rebuffer_time = float(np.mean(rebuffer_values)) if rebuffer_values else float("nan")
 
     # TTFT: average per conversation response latency when prompts exist.
@@ -531,7 +541,7 @@ def load_iteration_metrics(summary_path: Path) -> Dict[str, float]:
 # Plotting helpers
 # ------------------------------------------------------------------------------
 
-def configure_plot_style(font_size: int = 14) -> None:
+def configure_plot_style(font_size: int = 10) -> None:
     """Set matplotlib defaults to a publication-friendly style."""
     plt.style.use("seaborn-v0_8-whitegrid")
     plt.rcParams.update(
@@ -542,7 +552,7 @@ def configure_plot_style(font_size: int = 14) -> None:
             "axes.labelsize": font_size,
             "xtick.labelsize": font_size,
             "ytick.labelsize": font_size,
-            "legend.fontsize": max(8, font_size - 2),
+            "legend.fontsize": LEGEND_FONT_SIZE,
             "axes.grid": True,
             "grid.alpha": 0.3,
             "grid.linestyle": "--",
@@ -559,7 +569,7 @@ def _scientific_colors() -> List[str]:
         "#F28E2B",
         "#E15759",
         "#76B7B2",
-        "#59A14F",
+        "#59A10F",
         "#EDC948",
         "#B07AA1",
         "#FF9DA7",
@@ -616,7 +626,7 @@ def plot_grouped_bar(
     output_path: Path,
 ) -> bool:
     """Grouped bar chart of metric vs number of videos."""
-    configure_plot_style(font_size=14)
+    configure_plot_style(font_size=10)
     palette = _color_hatch_cycle(len(config_ids))
     num_configs = len(config_ids)
     num_groups = len(num_videos)
@@ -713,7 +723,6 @@ def plot_overall_bar(
             edgecolor="black",
             linewidth=0.4,
         )
-    ax.set_title(f"{title} (All Videos)")
     ax.set_ylabel(y_label)
     ax.set_xticks(x)
     ax.set_xticklabels(config_labels, rotation=20, ha="right")
@@ -740,7 +749,7 @@ def plot_base_delay_trends(
     if not any(base_stats.values()):
         return False
 
-    configure_plot_style(font_size=14)
+    configure_plot_style(font_size=10)
     fig, ax = plt.subplots(figsize=(4.0, 2.8))
     palette = _color_hatch_cycle(len(DELAY_METRICS))
     x = np.arange(len(num_videos))
@@ -784,13 +793,13 @@ def plot_base_delay_trends(
         plt.close(fig)
         return False
 
-    ax.set_title(f"{BASE_CONFIG_ID.title()} Delay vs Number of Videos", fontsize=14)
-    ax.set_xlabel("Number of Videos", fontsize=14)
-    ax.set_ylabel("Delay (s)", fontsize=14)
+    ax.set_title(f"{BASE_CONFIG_ID.title()} Delay vs Number of Videos", fontsize=10)
+    ax.set_xlabel("Number of Videos", fontsize=10)
+    ax.set_ylabel("Delay (s)", fontsize=10)
     ax.set_xticks(x)
-    ax.set_xticklabels([str(n) for n in num_videos], fontsize=14)
+    ax.set_xticklabels([str(n) for n in num_videos], fontsize=10)
     ax.grid(axis="y", alpha=0.3)
-    ax.legend(frameon=False, fontsize=12)
+    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1026,7 +1035,7 @@ def plot_scheduling_components_base_vs_videos(
     if not any(base_components.values()):
         return False
 
-    configure_plot_style(font_size=14)
+    configure_plot_style(font_size=10)
     palette = _color_hatch_cycle(len(num_videos))
     fig, ax = plt.subplots(figsize=(4.0, 2.8))
     x = np.arange(len(SCHEDULING_COMPONENTS))
@@ -1069,11 +1078,11 @@ def plot_scheduling_components_base_vs_videos(
         plt.close(fig)
         return False
 
-    ax.set_ylabel("Cumulative Score", fontsize=14)
+    ax.set_ylabel("Cumulative Score", fontsize=10)
     ax.set_xticks(x)
-    ax.set_xticklabels([label for _, label, _ in SCHEDULING_COMPONENTS], rotation=20, ha="right", fontsize=14)
+    ax.set_xticklabels([label for _, label, _ in SCHEDULING_COMPONENTS], rotation=20, ha="right", fontsize=10)
     ax.grid(axis="y", alpha=0.3)
-    ax.legend(frameon=False, ncol=1, fontsize=12)
+    ax.legend(frameon=False, ncol=1, fontsize=LEGEND_FONT_SIZE)
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1448,16 +1457,16 @@ def plot_memory_speed_ratios(
         plt.close(fig)
         return False
         
-    ax.set_ylabel("Ratio (%)", fontsize=14)
+    ax.set_ylabel("Ratio (%)", fontsize=10)
     ax.set_xticks(x)
-    ax.set_xticklabels(categories, fontsize=14)
+    ax.set_xticklabels(categories, fontsize=10)
     ax.grid(axis="y", alpha=0.3)
     ylim_upper = max(
         [value for row in ratio_matrix for value in row if math.isfinite(value)]
         + [1.0]
     )
     ax.set_ylim(0, ylim_upper * 1.2)
-    ax.legend(frameon=False, ncol=1, fontsize=12)
+    ax.legend(frameon=False, ncol=1, fontsize=LEGEND_FONT_SIZE)
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1563,11 +1572,11 @@ def plot_rebuffer_baseline_comparison_across_bases(
 
     cfg_labels = [config_ids[i] for i in valid_indices]
     nums_str = ", ".join(str(n) for n in target_nums)
-    ax.set_ylabel("Rebuffering (s)", fontsize=14)
-    ax.tick_params(axis="y", labelsize=14)
+    ax.set_ylabel("Rebuffering (s)", fontsize=10)
+    ax.tick_params(axis="y", labelsize=10)
     ax.set_xticks(x)
-    ax.set_xticklabels(cfg_labels, rotation=20, ha="right", fontsize=14)
-    ax.legend(frameon=False, fontsize=12)
+    ax.set_xticklabels(cfg_labels, rotation=20, ha="right", fontsize=10)
+    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
     ax.grid(axis="y", alpha=0.3)
 
     fig.tight_layout(pad=0.6)
@@ -1638,16 +1647,16 @@ def plot_roundrobin_comparison(
             label=label,
         )
 
-    ax.set_xlabel("Number of Videos", fontsize=14)
-    ax.set_ylabel("RebufferingTime (s)", fontsize=14)
+    ax.set_xlabel("Number of Videos", fontsize=10)
+    ax.set_ylabel("RebufferingTime (s)", fontsize=10)
     ax.set_xticks(target_numbers)
-    # set xtick fontsize to 14
-    ax.tick_params(axis='x', labelsize=14)
-    # set ytick fontsize to 14
-    ax.tick_params(axis='y', labelsize=14)
+    # set xtick fontsize to 10
+    ax.tick_params(axis='x', labelsize=10)
+    # set ytick fontsize to 10
+    ax.tick_params(axis='y', labelsize=10)
     ax.grid(alpha=0.3)
-    # set legend fontsize to 14
-    ax.legend(frameon=False, fontsize=12)
+    # set legend fontsize to 10
+    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1733,16 +1742,16 @@ def plot_roundrobin_ratio(
         "Slicing benefits\ndiminish",
         ha="left",
         va="bottom",
-        fontsize=14,
+        fontsize=10,
         color="red",
     )
 
-    ax.set_xlabel("Number of Videos", fontsize=14)
-    ax.set_ylabel("Rebuffering Ratio", fontsize=14)
-    # set x tick fontsize to 14
-    ax.tick_params(axis='x', labelsize=14)
-    # set y tick fontsize to 14
-    ax.tick_params(axis='y', labelsize=14)
+    ax.set_xlabel("Number of Videos", fontsize=10)
+    ax.set_ylabel("Rebuffering Ratio", fontsize=10)
+    # set x tick fontsize to 10
+    ax.tick_params(axis='x', labelsize=10)
+    # set y tick fontsize to 10
+    ax.tick_params(axis='y', labelsize=10)
     ax.set_xticks(target_numbers)
     ax.grid(alpha=0.3)
     handles, labels = ax.get_legend_handles_labels()
@@ -1803,14 +1812,14 @@ def plot_generation_speed_vs_listening(
             fontsize=BAR_LABEL_FONT_SIZE,
         )
 
-    ax.set_xlabel("Words Per Second", fontsize=14)
-    ax.set_ylabel("Listening Speed Study", fontsize=14)
+    ax.set_xlabel("Words Per Second", fontsize=10)
+    ax.set_ylabel("Listening Speed Study", fontsize=10)
     max_val = max(values)
     ax.set_xlim(0, max(max_val + 0.8, 5.5))
     ax.grid(axis="x", linestyle="--", alpha=0.4)
-    # set ytick size to 14
-    ax.tick_params(axis='y', labelsize=14)
-    ax.tick_params(axis='x', labelsize=14)
+    # set ytick size to 10
+    ax.tick_params(axis='y', labelsize=10)
+    ax.tick_params(axis='x', labelsize=10)
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -2151,13 +2160,13 @@ def plot_timing_breakdown(
                 rotation=90,
             )
 
-    ax.set_ylabel("Time (s)", fontsize=14)
-    # set y tick size to 14
-    ax.tick_params(axis='y', labelsize=14)
+    ax.set_ylabel("Time (s)", fontsize=10)
+    # set y tick size to 10
+    ax.tick_params(axis='y', labelsize=10)
     ax.set_xticks(x)
-    ax.set_xticklabels([label for _, label in components], rotation=20, ha="right", fontsize=14)
+    ax.set_xticklabels([label for _, label in components], rotation=20, ha="right", fontsize=10)
     ax.grid(axis="y", alpha=0.3)
-    ax.legend(frameon=False, ncol=1, fontsize=12)
+    ax.legend(frameon=False, ncol=1, fontsize=LEGEND_FONT_SIZE)
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2264,11 +2273,10 @@ def plot_rebuffering_ablation_group(
                 label=baseline_label,
             )
 
-        ax.set_title(group_meta["title"])
         ax.set_ylabel("Total Rebuffering Time (s)")
         ax.set_xticks(x)
         ax.set_xticklabels(group_labels, rotation=20, ha="right")
-        ax.legend(frameon=False, fontsize=7)
+        ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
         fig.tight_layout(pad=0.8)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, bbox_inches="tight")
@@ -2341,7 +2349,7 @@ def plot_rebuffering_ablation_group(
     ax.set_xticks(x_positions)
     ax.set_xticklabels([str(n) for n in num_videos])
     ax.set_xlabel("Number of Videos")
-    ax.legend(frameon=False, fontsize=7, ncol=2)
+    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, ncol=2)
     fig.tight_layout(pad=0.8)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -2480,7 +2488,7 @@ def main() -> None:
                         if not summary_path.exists():
                             missing_paths_local[data_source].append(summary_path)
                             continue
-                        metrics = load_iteration_metrics(summary_path)
+                        metrics = load_iteration_metrics(summary_path, num)
                         available_numbers_local[data_source].add(num)
                         for metric_key in all_metric_keys:
                             value = metrics.get(metric_key, float("nan"))
