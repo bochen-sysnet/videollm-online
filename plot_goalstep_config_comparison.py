@@ -41,8 +41,8 @@ METRIC_ORDER: Tuple[Tuple[str, str, str, str], ...] = (
 
 LATENCY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
     ("visual_embedding_time", "Prefilling", "prefilling"),
-    ("model_forward_time", "Scoring", "scoring"),
-    ("generation_time", "Generation", "generation"),
+    ("model_forward_time", "EOS", "scoring"),
+    ("generation_time", "Decoding", "generation"),
     ("kv_offload_time", "KV Offload", "kv_offload"),
     ("kv_reload_time", "KV Reload", "kv_reload"),
     ("total_sending_time", "Network", "network_time"),
@@ -553,6 +553,24 @@ def _scientific_colors() -> List[str]:
     ]
 
 
+def _collect_per_video_means(num_map: Dict[int, Dict[str, Iterable[float]]]) -> List[float]:
+    values: List[float] = []
+    for num in sorted(num_map):
+        entry = num_map[num]
+        mean = entry.get("mean")
+        if mean is not None and math.isfinite(mean):
+            values.append(float(mean))
+    return values
+
+
+def _aggregate_across_videos(num_map: Dict[int, Dict[str, Iterable[float]]]) -> Tuple[float, float]:
+    values = _collect_per_video_means(num_map)
+    if not values:
+        return float("nan"), float("nan")
+    arr = np.asarray(values, dtype=float)
+    return float(arr.mean()), float(arr.std(ddof=0))
+
+
 def plot_grouped_bar(
     metric_key: str,
     title: str,
@@ -585,6 +603,7 @@ def plot_grouped_bar(
 
         means_arr = np.asarray(means, dtype=float)
         stds_arr = np.asarray(stds, dtype=float)
+        stds_arr[~np.isfinite(stds_arr)] = 0.0
         if np.all(~np.isfinite(means_arr)):
             continue
 
@@ -633,14 +652,11 @@ def plot_overall_bar(
 
     for idx, config_id in enumerate(config_ids):
         num_map = summary_stats.get(metric_key, {}).get(config_id, {})
-        collected: List[float] = []
-        for stats in num_map.values():
-            collected.extend(stats.get("values", []))
-        if not collected:
+        mean, std = _aggregate_across_videos(num_map)
+        if not math.isfinite(mean):
             continue
-        mean, std = safe_mean_std(collected)
         means.append(mean)
-        stds.append(std)
+        stds.append(std if math.isfinite(std) else 0.0)
         config_labels.append(config_id)
 
     if not means:
@@ -745,11 +761,9 @@ def plot_delay_comparison_by_config(
         has_values = False
         for metric_key in delay_keys:
             num_map = summary_stats.get(metric_key, {}).get(config_id, {})
-            values = []
-            for stats in num_map.values():
-                values.extend(stats.get("values", []))
+            values = _collect_per_video_means(num_map)
             if values:
-                mean, _ = safe_mean_std(values)
+                mean = float(np.mean(values))
                 has_values = True
             else:
                 mean = float("nan")
@@ -813,11 +827,11 @@ def plot_latency_components_by_config(
         stds = []
         for key in component_keys:
             num_map = summary_stats.get(key, {}).get(config_id, {})
-            collected: List[float] = []
-            for stats in num_map.values():
-                collected.extend(stats.get("values", []))
+            collected = _collect_per_video_means(num_map)
             if collected:
-                mean, std = safe_mean_std(collected)
+                arr = np.asarray(collected, dtype=float)
+                mean = float(arr.mean())
+                std = float(arr.std(ddof=0))
             else:
                 mean, std = (float("nan"), float("nan"))
             means.append(mean)
@@ -876,11 +890,11 @@ def plot_scheduling_components_by_config(
         has_data = False
         for key in component_keys:
             num_map = summary_stats.get(key, {}).get(config_id, {})
-            collected: List[float] = []
-            for stats in num_map.values():
-                collected.extend(stats.get("values", []))
+            collected = _collect_per_video_means(num_map)
             if collected:
-                mean, std = safe_mean_std(collected)
+                arr = np.asarray(collected, dtype=float)
+                mean = float(arr.mean())
+                std = float(arr.std(ddof=0))
                 has_data = True
             else:
                 mean, std = float("nan"), float("nan")
@@ -901,6 +915,7 @@ def plot_scheduling_components_by_config(
     for idx, (label, color) in enumerate(zip(component_labels, colors)):
         means_arr = np.asarray([row[idx] for row in means_matrix], dtype=float)
         stds_arr = np.asarray([row[idx] for row in std_matrix], dtype=float)
+        stds_arr[~np.isfinite(stds_arr)] = 0.0
         if np.all(~np.isfinite(means_arr)):
             continue
         offset = (idx - (len(component_keys) - 1) / 2) * bar_width
@@ -1011,11 +1026,11 @@ def plot_memory_components_by_config(
         has_data = False
         for key in component_keys:
             num_map = summary_stats.get(key, {}).get(config_id, {})
-            collected: List[float] = []
-            for stats in num_map.values():
-                collected.extend(stats.get("values", []))
+            collected = _collect_per_video_means(num_map)
             if collected:
-                mean, std = safe_mean_std(collected)
+                arr = np.asarray(collected, dtype=float)
+                mean = float(arr.mean())
+                std = float(arr.std(ddof=0))
                 has_data = True
             else:
                 mean, std = float("nan"), float("nan")
@@ -1036,6 +1051,7 @@ def plot_memory_components_by_config(
     for idx, (label, color) in enumerate(zip(component_labels, colors)):
         means_arr = np.asarray([row[idx] for row in means_matrix], dtype=float)
         stds_arr = np.asarray([row[idx] for row in std_matrix], dtype=float)
+        stds_arr[~np.isfinite(stds_arr)] = 0.0
         if np.all(~np.isfinite(means_arr)):
             continue
         offset = (idx - (len(component_keys) - 1) / 2) * bar_width
@@ -1301,7 +1317,7 @@ def plot_memory_speed_ratios(
     ):
         return False
 
-    categories = ["CPU", "KV", "Generation"]
+    categories = ["CPU", "GPU", "Throughput"]
     ratio_matrix = [cpu_ratios, kv_ratios, consumption_ratios]
     # convert to percentages
     ratio_matrix = [[val * 100 for val in row] for row in ratio_matrix]
@@ -1385,21 +1401,13 @@ def plot_rebuffer_baseline_comparison_across_bases(
         values: List[float] = []
         for num in target_nums:
             entry = config_stats.get(num, {})
-            raw_values = entry.get("values", [])
-            if raw_values:
-                for v in raw_values:
-                    if v is None:
-                        continue
-                    v_float = float(v)
-                    if math.isfinite(v_float):
-                        values.append(v_float)
-            else:
-                mean = entry.get("mean")
-                if mean is not None and math.isfinite(mean):
-                    values.append(float(mean))
+            mean = entry.get("mean")
+            if mean is not None and math.isfinite(mean):
+                values.append(float(mean))
         if not values:
             return float("nan"), float("nan")
-        return safe_mean_std(values)
+        arr = np.asarray(values, dtype=float)
+        return float(arr.mean()), float(arr.std(ddof=0))
 
     dataset_entries = []
     for label, stats in (
@@ -1411,7 +1419,7 @@ def plot_rebuffer_baseline_comparison_across_bases(
         for cfg in config_ids:
             mean, std = aggregate(stats, cfg)
             means.append(mean)
-            stds.append(std)
+            stds.append(std if math.isfinite(std) else 0.0)
         dataset_entries.append((label, means, stds))
 
     valid_indices = [
@@ -1653,11 +1661,9 @@ def plot_generation_speed_vs_listening(
     speed_stats = summary_stats.get(GENERATION_SPEED_METRIC, {}).get(config_id, {})
     speeds: List[float] = []
     for num_data in speed_stats.values():
-        speeds.extend(
-            v
-            for v in num_data.get("values", [])
-            if v is not None and math.isfinite(v)
-        )
+        mean = num_data.get("mean")
+        if mean is not None and math.isfinite(mean):
+            speeds.append(float(mean))
 
     if not speeds:
         return False
@@ -1754,7 +1760,6 @@ def plot_generation_length_distribution(
     configure_plot_style()
     fig, ax = plt.subplots(figsize=(3.4, 2.6))
     ax.hist(values, bins=min(30, max(10, len(values) // 2)), color="#A23B72", alpha=0.85, edgecolor="black")
-    ax.set_title("Generation Length Distribution (Base Config)")
     ax.set_xlabel("Generated Words per Response")
     ax.set_ylabel("Count")
     ax.grid(alpha=0.3, axis="y")
@@ -1963,8 +1968,8 @@ def plot_timing_breakdown(
 ) -> bool:
     components = [
         ("visual_embedding_time", "Prefilling"),
-        ("model_forward_time", "Scoring"),
-        ("generation_time", "Generation"),
+        ("model_forward_time", "EOS"),
+        ("generation_time", "Decoding"),
         ("kv_offload_time", "Offload"),
         ("kv_reload_time", "Reload"),
         ("total_sending_time", "Network"),
