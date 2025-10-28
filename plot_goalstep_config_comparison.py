@@ -26,7 +26,7 @@ DEFAULT_CONFIG_IDS: Tuple[str, ...] = (
     "round_robin_m",
     "round_robin_2",
 )
-DEFAULT_NUM_VIDEOS: Tuple[int, ...] = (3, 5, 8, 10)
+DEFAULT_NUM_VIDEOS: Tuple[int, ...] = (1,2,3,4,5,6,7,8,9,10)
 DEFAULT_ABLATION_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15)
 DEFAULT_ITERATIONS: Tuple[int, ...] = (1, 2, 3, 4, 5)
 DEFAULT_BASE_DIR = Path("figures")
@@ -1531,10 +1531,10 @@ def plot_roundrobin_comparison(
 
     target_numbers = list(range(1, 11))
     series_def = [
-        ("rebuffer_time", "Total Rebuffering"),
-        ("processing_delay", "Processing Delay"),
-        ("queuing_delay", "Queuing Delay"),
-        ("network_delay", "Networking Delay"),
+        ("rebuffer_time", "Total"),
+        ("processing_delay", "Processing"),
+        ("queuing_delay", "Queuing"),
+        ("network_delay", "Networking"),
     ]
 
     data_series: List[Tuple[str, List[int], List[float], List[float]]] = []
@@ -1578,12 +1578,16 @@ def plot_roundrobin_comparison(
             label=label,
         )
 
-    ax.set_title("Goalstep RoundRobin-m Rebuffering Components")
-    ax.set_xlabel("Number of Videos")
-    ax.set_ylabel("Time (s)")
+    ax.set_xlabel("Number of Videos", fontsize=14)
+    ax.set_ylabel("RebufferingTime (s)", fontsize=14)
     ax.set_xticks(target_numbers)
+    # set xtick fontsize to 14
+    ax.tick_params(axis='x', labelsize=14)
+    # set ytick fontsize to 14
+    ax.tick_params(axis='y', labelsize=14)
     ax.grid(alpha=0.3)
-    ax.legend(frameon=False, ncol=1)
+    # set legend fontsize to 14
+    ax.legend(frameon=False, fontsize=12)
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1599,85 +1603,89 @@ def plot_roundrobin_ratio(
     general_num_override: Optional[List[int]],
     output_path: Path,
 ) -> bool:
-    """Plot ratio of round_robin_2 to round_robin_m rebuffering vs number of videos for each data source."""
+    """Plot ratio of round_robin_2 to round_robin_m rebuffering vs number of videos for goalstep."""
+    if "goalstep" not in data_sources:
+        return False
+
+    summary_stats = general_stats.get("goalstep")
+    if not summary_stats:
+        return False
+
+    m_stats = summary_stats.get("rebuffer_time", {}).get("round_robin_m", {})
+    rr2_stats = summary_stats.get("rebuffer_time", {}).get("round_robin_2", {})
+    if not m_stats or not rr2_stats:
+        return False
+
+    target_numbers = list(range(1, 11))
+    ratios = []
+    stds = []
+    nums = []
+    for n in target_numbers:
+        entry_m = m_stats.get(n, {})
+        entry_rr2 = rr2_stats.get(n, {})
+        mean_m = entry_m.get("mean")
+        mean_rr2 = entry_rr2.get("mean")
+        if (
+            mean_m is None
+            or mean_rr2 is None
+            or not math.isfinite(mean_m)
+            or not math.isfinite(mean_rr2)
+            or mean_m == 0
+        ):
+            continue
+        ratio = mean_rr2 / mean_m
+        std_m = entry_m.get("std")
+        std_rr2 = entry_rr2.get("std")
+        ratio_std = 0.0
+        if std_m is not None and std_rr2 is not None and math.isfinite(std_m) and math.isfinite(std_rr2):
+            ratio_std = ratio * math.sqrt(
+                (std_rr2 / mean_rr2) ** 2 if mean_rr2 else 0.0
+                + (std_m / mean_m) ** 2
+            )
+        nums.append(n)
+        ratios.append(ratio)
+        stds.append(ratio_std)
+
+    if not ratios:
+        return False
+
     configure_plot_style()
     colors = _scientific_colors()
     markers = ["o", "s", "^", "D", "P", "X"]
+    fig, ax = plt.subplots(figsize=(3.8, 2.6))
 
-    fig, ax = plt.subplots(figsize=(3.6, 2.6))
-    plotted = False
-    combined_nums: Set[int] = set()
-    combined_nums: Set[int] = set()
+    ax.errorbar(
+        nums,
+        ratios,
+        yerr=stds,
+        marker=markers[0],
+        color=colors[0],
+        linewidth=1.6,
+        markersize=4,
+        capsize=3,
+    )
 
-    for idx, data_source in enumerate(data_sources):
-        summary_stats = general_stats.get(data_source)
-        if not summary_stats:
-            continue
-        m_stats = summary_stats.get("rebuffer_time", {}).get("round_robin_m", {})
-        rr2_stats = summary_stats.get("rebuffer_time", {}).get("round_robin_2", {})
-        if not m_stats or not rr2_stats:
-            continue
-        nums = sorted(available_numbers.get(data_source, []))
-        if general_num_override:
-            nums = [n for n in nums if n in general_num_override]
-        ratios = []
-        stds = []
-        valid_nums = []
-        for n in nums:
-            entry_m = m_stats.get(n, {})
-            entry_rr2 = rr2_stats.get(n, {})
-            mean_m = entry_m.get("mean")
-            mean_rr2 = entry_rr2.get("mean")
-            if (
-                mean_m is None
-                or mean_rr2 is None
-                or not math.isfinite(mean_m)
-                or not math.isfinite(mean_rr2)
-                or mean_m == 0
-            ):
-                continue
+    ax.axhline(1.0, color="red", linestyle="--", linewidth=1.0, alpha=0.6)
+    ax.text(
+        target_numbers[0],
+        1.3,
+        "Slicing benefits\ndiminish",
+        ha="left",
+        va="bottom",
+        fontsize=14,
+        color="red",
+    )
 
-            # compute ratio
-            ratio = mean_rr2 / mean_m
-            ratios.append(ratio)
-
-            # approximate std of ratio assuming independence
-            std_m = entry_m.get("std", 0.0) or 0.0
-            std_rr2 = entry_rr2.get("std", 0.0) or 0.0
-            # avoid division by zero
-            ratio_std = 0.0
-            if mean_m != 0:
-                ratio_std = ratio * math.sqrt(
-                    (std_rr2 / mean_rr2) ** 2 if mean_rr2 else 0.0
-                    + (std_m / mean_m) ** 2
-                )
-            stds.append(ratio_std)
-            valid_nums.append(n)
-        if not ratios:
-            continue
-        plotted = True
-        combined_nums.update(valid_nums)
-        ax.errorbar(
-            valid_nums,
-            ratios,
-            yerr=stds,
-            marker=markers[idx % len(markers)],
-            color=colors[idx % len(colors)],
-            linewidth=1.6,
-            markersize=4,
-            capsize=3,
-            label=data_source.title(),
-        )
-
-    if not plotted or not combined_nums:
-        plt.close(fig)
-        return False
-
-    ax.set_title("RoundRobin_2 / RoundRobin_m Rebuffering Ratio")
-    ax.set_xlabel("Number of Videos")
-    ax.set_ylabel("Rebuffering Ratio")
-    ax.set_xticks(sorted(combined_nums))
+    ax.set_xlabel("Number of Videos", fontsize=14)
+    ax.set_ylabel("Rebuffering Ratio", fontsize=14)
+    # set x tick fontsize to 14
+    ax.tick_params(axis='x', labelsize=14)
+    # set y tick fontsize to 14
+    ax.tick_params(axis='y', labelsize=14)
+    ax.set_xticks(target_numbers)
+    ax.grid(alpha=0.3)
     ax.legend(frameon=False)
+
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -2067,18 +2075,18 @@ def plot_timing_breakdown(
             linewidth=0.4,
             label=data_source.title(),
         )
-        for xpos, value in zip(x + offset, means_arr):
-            if math.isfinite(value):
-                # rotate text 90 degrees
-                ax.text(
-                    xpos,
-                    value + 0.08 * max(value, 0.5),
-                    f"{value:.2f}",
-                    ha="center",
-                    va="bottom",
-                    fontsize=14,
-                    rotation=90,
-                )
+        for xpos, value, comp_label in zip(x + offset, means_arr, [lbl for _, lbl in components]):
+            if comp_label not in {"Offload", "Reload"} or not math.isfinite(value):
+                continue
+            ax.text(
+                xpos,
+                value + 0.08 * max(value, 0.5),
+                f"{value:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=14,
+                rotation=90,
+            )
 
     ax.set_ylabel("Time (s)", fontsize=14)
     # set y tick size to 14
@@ -2746,22 +2754,21 @@ def main() -> None:
             print("Skipped round_robin_m comparison plot; no valid data.")
 
     # Combined round_robin_2 / round_robin_m ratio comparison across data sources
-    if data_sources:
-        if args.output:
-            base_output = Path(args.output)
-            combined_path = base_output.parent / f"{base_output.stem}_roundrobin_ratio.pdf"
-        else:
-            combined_path = base_dir / "roundrobin_2_over_m_ratio_across_sources.pdf"
-        if plot_roundrobin_ratio(
-            all_summary_stats,
-            data_sources,
-            available_numbers,
-            general_num_override,
-            combined_path,
-        ):
-            print(f"Saved round_robin_2 / round_robin_m ratio comparison to {combined_path}")
-        else:
-            print("Skipped round_robin_2 / round_robin_m ratio comparison plot; no valid data.")
+    combined_ratio_path = (
+        base_dir / "roundrobin_2_over_m_ratio_goalstep.pdf"
+        if not args.output
+        else Path(args.output).parent / f"{Path(args.output).stem}_roundrobin_ratio.pdf"
+    )
+    if plot_roundrobin_ratio(
+        all_summary_stats,
+        ["goalstep"],
+        available_numbers,
+        list(range(1, 11)),
+        combined_ratio_path,
+    ):
+        print(f"Saved goalstep round_robin_2 / round_robin_m ratio comparison to {combined_ratio_path}")
+    else:
+        print("Skipped round_robin_2 / round_robin_m ratio comparison plot; no valid data.")
 
 
 if __name__ == "__main__":
