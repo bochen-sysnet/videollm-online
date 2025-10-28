@@ -553,6 +553,16 @@ def _scientific_colors() -> List[str]:
     ]
 
 
+def _color_hatch_cycle(count: int) -> List[Tuple[str, str]]:
+    """Generate consistent (color, hatch) pairs for bar/stacked plots."""
+    colors = _scientific_colors()
+    hatches = ["/", "\\", "x", "-", "+", "o", ".", "*", "//", "||"]
+    palette: List[Tuple[str, str]] = []
+    for idx in range(max(1, count)):
+        palette.append((colors[idx % len(colors)], hatches[idx % len(hatches)]))
+    return palette
+
+
 def _collect_per_video_means(num_map: Dict[int, Dict[str, Iterable[float]]]) -> List[float]:
     values: List[float] = []
     for num in sorted(num_map):
@@ -583,7 +593,7 @@ def plot_grouped_bar(
 ) -> bool:
     """Grouped bar chart of metric vs number of videos."""
     configure_plot_style()
-    colors = _scientific_colors()
+    palette = _color_hatch_cycle(len(config_ids))
     num_configs = len(config_ids)
     num_groups = len(num_videos)
     bar_width = min(0.8 / max(num_configs, 1), 0.18)
@@ -608,13 +618,15 @@ def plot_grouped_bar(
             continue
 
         has_data = True
+        color, hatch = palette[idx]
         ax.bar(
             x + offset,
             means_arr,
             width=bar_width * 0.95,
             yerr=stds_arr,
             capsize=2.5,
-            color=colors[idx % len(colors)],
+            color=color,
+            hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
             label=config_id,
@@ -645,7 +657,7 @@ def plot_overall_bar(
 ) -> bool:
     """Bar chart summarizing mean/std aggregated across all video counts."""
     configure_plot_style()
-    colors = _scientific_colors()
+    palette = _color_hatch_cycle(len(config_ids))
     means = []
     stds = []
     config_labels = []
@@ -664,15 +676,18 @@ def plot_overall_bar(
 
     x = np.arange(len(means))
     fig, ax = plt.subplots(figsize=(3.4, 2.6))
-    ax.bar(
-        x,
-        means,
-        yerr=stds,
-        capsize=2.5,
-        color=[colors[i % len(colors)] for i in range(len(means))],
-        edgecolor="black",
-        linewidth=0.4,
-    )
+    for idx, (mean, std) in enumerate(zip(means, stds)):
+        color, hatch = palette[idx]
+        ax.bar(
+            [x[idx]],
+            [mean],
+            yerr=[std],
+            capsize=2.5,
+            color=color,
+            hatch=hatch,
+            edgecolor="black",
+            linewidth=0.4,
+        )
     ax.set_title(f"{title} (All Videos)")
     ax.set_ylabel(y_label)
     ax.set_xticks(x)
@@ -751,8 +766,8 @@ def plot_delay_comparison_by_config(
 ) -> bool:
     """Grouped bar comparing delay metrics averaged over all videos per config."""
     configure_plot_style()
-    colors = _scientific_colors()
     delay_keys = [metric for metric, *_ in DELAY_METRICS]
+    palette = _color_hatch_cycle(len(delay_keys))
     collected = []
     config_labels = []
 
@@ -781,11 +796,13 @@ def plot_delay_comparison_by_config(
 
     fig, ax = plt.subplots(figsize=(3.4, 2.6))
     for idx, (_, _, title) in enumerate(DELAY_METRICS):
+        color, hatch = palette[idx]
         ax.bar(
             x + (idx - (len(delay_keys) - 1) / 2) * bar_width,
             arr[:, idx],
             width=bar_width * 0.95,
-            color=colors[idx % len(colors)],
+            color=color,
+            hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
             label=title,
@@ -811,7 +828,7 @@ def plot_latency_components_by_config(
 ) -> bool:
     """Compare latency components averaged across all videos for each config."""
     configure_plot_style()
-    colors = _scientific_colors()
+    palette = _color_hatch_cycle(len(config_ids))
     component_keys = [key for key, _, _ in LATENCY_COMPONENTS]
     component_labels = [label for _, label, _ in LATENCY_COMPONENTS]
     num_components = len(component_keys)
@@ -843,13 +860,15 @@ def plot_latency_components_by_config(
 
         has_data = True
         offset = (idx - (num_configs - 1) / 2) * bar_width
+        color, hatch = palette[idx]
         ax.bar(
             x + offset,
             means_arr,
             width=bar_width * 0.95,
             yerr=stds,
             capsize=2.5,
-            color=colors[idx % len(colors)],
+            color=color,
+            hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
             label=config_id,
@@ -876,9 +895,9 @@ def plot_scheduling_components_by_config(
 ) -> bool:
     """Grouped bar chart comparing scheduling components across configs."""
     configure_plot_style()
-    colors = _scientific_colors()
     component_keys = [key for key, _, _ in SCHEDULING_COMPONENTS]
     component_labels = [label for _, label, _ in SCHEDULING_COMPONENTS]
+    palette = _color_hatch_cycle(len(component_labels))
 
     means_matrix: List[List[float]] = []
     std_matrix: List[List[float]] = []
@@ -911,8 +930,10 @@ def plot_scheduling_components_by_config(
     x = np.arange(len(valid_configs))
     bar_width = min(0.8 / len(component_keys), 0.2)
     fig, ax = plt.subplots(figsize=(3.6, 2.6))
+    palette = _color_hatch_cycle(len(component_labels))
 
-    for idx, (label, color) in enumerate(zip(component_labels, colors)):
+    for idx, label in enumerate(component_labels):
+        color, hatch = palette[idx]
         means_arr = np.asarray([row[idx] for row in means_matrix], dtype=float)
         stds_arr = np.asarray([row[idx] for row in std_matrix], dtype=float)
         stds_arr[~np.isfinite(stds_arr)] = 0.0
@@ -926,6 +947,7 @@ def plot_scheduling_components_by_config(
             yerr=stds_arr,
             capsize=2.5,
             color=color,
+            hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
             label=label,
@@ -1012,7 +1034,7 @@ def plot_memory_components_by_config(
 ) -> bool:
     """Grouped bar chart comparing memory components across configs (log scale)."""
     configure_plot_style()
-    colors = _scientific_colors()
+    palette = _color_hatch_cycle(len(MEMORY_COMPONENTS))
     component_keys = [key for key, _, _ in MEMORY_COMPONENTS]
     component_labels = [label for _, label, _ in MEMORY_COMPONENTS]
 
@@ -1048,7 +1070,8 @@ def plot_memory_components_by_config(
     bar_width = min(0.8 / len(component_keys), 0.2)
     fig, ax = plt.subplots(figsize=(3.6, 2.6))
 
-    for idx, (label, color) in enumerate(zip(component_labels, colors)):
+    for idx, label in enumerate(component_labels):
+        color, hatch = palette[idx]
         means_arr = np.asarray([row[idx] for row in means_matrix], dtype=float)
         stds_arr = np.asarray([row[idx] for row in std_matrix], dtype=float)
         stds_arr[~np.isfinite(stds_arr)] = 0.0
@@ -1062,6 +1085,7 @@ def plot_memory_components_by_config(
             yerr=stds_arr,
             capsize=2.5,
             color=color,
+            hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
             label=label,
@@ -1189,7 +1213,7 @@ def plot_memory_breakdown_multi_videos(
         std_matrix.append(stds)
 
     configure_plot_style()
-    colors = _scientific_colors()
+    palette = _color_hatch_cycle(len(target_nums))
 
     fig, ax = plt.subplots(figsize=(4.0, 2.8))
     x = np.arange(len(components))
@@ -1197,6 +1221,7 @@ def plot_memory_breakdown_multi_videos(
     bar_width = min(0.8 / max(num_groups, 1), 0.22)
 
     for idx, num in enumerate(target_nums):
+        color, hatch = palette[idx]
         offset = (idx - (num_groups - 1) / 2) * bar_width
         means = [means_matrix[comp_idx][idx] for comp_idx in range(len(components))]
         stds = [std_matrix[comp_idx][idx] for comp_idx in range(len(components))]
@@ -1211,7 +1236,8 @@ def plot_memory_breakdown_multi_videos(
             width=bar_width * 0.9,
             yerr=stds_arr,
             capsize=2.5,
-            color=colors[idx % len(colors)],
+            color=color,
+            hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
             label=f"N={num}",
@@ -1323,7 +1349,7 @@ def plot_memory_speed_ratios(
     ratio_matrix = [[val * 100 for val in row] for row in ratio_matrix]
 
     configure_plot_style()
-    colors = _scientific_colors()
+    palette = _color_hatch_cycle(len(target_nums))
     fig, ax = plt.subplots(figsize=(4.0, 2.8))
     x = np.arange(len(categories))
     num_groups = len(target_nums)
@@ -1331,6 +1357,7 @@ def plot_memory_speed_ratios(
 
     plotted = False
     for idx, num in enumerate(target_nums):
+        color, hatch = palette[idx]
         offset = (idx - (num_groups - 1) / 2) * bar_width
         values = [ratio_matrix[row][idx] for row in range(len(categories))]
         values_arr = np.asarray(values, dtype=float)
@@ -1341,7 +1368,8 @@ def plot_memory_speed_ratios(
             x + offset,
             values_arr,
             width=bar_width * 0.9,
-            color=colors[idx % len(colors)],
+            color=color,
+            hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
             label=f"N={num}",
@@ -1431,13 +1459,14 @@ def plot_rebuffer_baseline_comparison_across_bases(
         return False
 
     configure_plot_style()
-    colors = _scientific_colors()
+    palette = _color_hatch_cycle(len(dataset_entries))
     fig, ax = plt.subplots(figsize=(4.0, 2.8))
     x = np.arange(len(valid_indices))
     bar_width = 0.35
 
     plotted = False
     for dataset_idx, (label, means, stds) in enumerate(dataset_entries):
+        color, hatch = palette[dataset_idx]
         dataset_means = [means[i] for i in valid_indices]
         dataset_stds = [stds[i] for i in valid_indices]
         if all(not math.isfinite(m) for m in dataset_means):
@@ -1450,10 +1479,11 @@ def plot_rebuffer_baseline_comparison_across_bases(
             width=bar_width * 0.95,
             yerr=dataset_stds,
             capsize=2.5,
-            color=colors[dataset_idx % len(colors)],
+            color=color,
+            hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
-            label=label if dataset_idx > 0 else "4090",
+            label=label,
         )
 
         for xpos, value in zip(x + offset, dataset_means):
@@ -2093,7 +2123,7 @@ def plot_rebuffering_ablation_group(
             return False
 
         configure_plot_style()
-        colors = _scientific_colors()
+        palette = _color_hatch_cycle(len(valid_baselines))
         x = np.arange(len(group_labels))
         bar_width = min(0.75 / max(len(valid_baselines), 1), 0.18)
         fig, ax = plt.subplots(figsize=(3.8, 2.6))
@@ -2101,14 +2131,17 @@ def plot_rebuffering_ablation_group(
         for idx, baseline_label in enumerate(valid_baselines):
             means_arr = np.asarray(values[baseline_label], dtype=float)
             stds_arr = np.asarray(errors[baseline_label], dtype=float)
+            stds_arr[~np.isfinite(stds_arr)] = 0.0
             offset = (idx - (len(valid_baselines) - 1) / 2) * bar_width
+            color, hatch = palette[idx]
             ax.bar(
                 x + offset,
                 means_arr,
                 width=bar_width * 0.95,
                 yerr=stds_arr,
                 capsize=2.5,
-                color=colors[idx % len(colors)],
+                color=color,
+                hatch=hatch,
                 edgecolor="black",
                 linewidth=0.4,
                 label=baseline_label,
@@ -2140,7 +2173,7 @@ def plot_rebuffering_ablation_group(
         return False
 
     configure_plot_style()
-    colors = _scientific_colors()
+    palette = _color_hatch_cycle(len(ablation_configs))
     num_videos = selected_nums
     x_positions = np.arange(len(num_videos))
     bar_width = min(0.75 / max(len(ablation_configs), 1), 0.18)
@@ -2165,15 +2198,18 @@ def plot_rebuffering_ablation_group(
         if np.all(~np.isfinite(means_arr)):
             continue
         plotted = True
+        stds_arr[~np.isfinite(stds_arr)] = 0.0
 
         offset = (idx - (len(ablation_configs) - 1) / 2) * bar_width
+        color, hatch = palette[idx]
         ax.bar(
             x_positions + offset,
             means_arr,
             width=bar_width * 0.95,
             yerr=stds_arr,
             capsize=2.5,
-            color=colors[idx % len(colors)],
+            color=color,
+            hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
             label=label,
