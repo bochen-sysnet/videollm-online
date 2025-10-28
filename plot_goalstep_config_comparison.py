@@ -46,19 +46,19 @@ LATENCY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
     ("kv_offload_time", "KV Offload", "kv_offload"),
     ("kv_reload_time", "KV Reload", "kv_reload"),
     ("total_sending_time", "Network", "network_time"),
-    ("total_processing_time", "Total Processing", "total_processing"),
+    ("total_processing_time", "Total", "total_processing"),
 )
 
 DELAY_METRICS: Tuple[Tuple[str, str, str], ...] = (
-    ("processing_delay", "Processing Delay", "processing_delay"),
-    ("queuing_delay", "Queuing Delay", "queuing_delay"),
-    ("network_delay", "Networking Delay", "network_delay"),
+    ("processing_delay", "Processing", "processing_delay"),
+    ("queuing_delay", "Queuing", "queuing_delay"),
+    ("network_delay", "Networking", "network_delay"),
 )
 
 SCHEDULING_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
-    ("lowest_buffer_score", "Lowest Buffer", "lowest_buffer"),
+    ("lowest_buffer_score", "Lowest", "lowest_buffer"),
     ("nonzero_score", "Nonzero", "nonzero"),
-    ("ending_score", "Ending", "ending"),
+    ("ending_score", "Finishing", "ending"),
 )
 
 MEMORY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
@@ -106,7 +106,7 @@ ABLATION_GROUPS = {
             ("base", "Default"),
             ("comp_ablation1", "No RL Score"),
             ("comp_ablation2", "No Age Score"),
-            ("comp_ablation3", "No Buffer Urgent Threshold"),
+            ("comp_ablation3", "No Urgent Threshold"),
             ("comp_ablation4", "No Scheduling"),
             ("comp_ablation5", "No Slicing"),
         ],
@@ -116,7 +116,7 @@ ABLATION_GROUPS = {
     "chunk": {
         "title": "Chunk Size Ablation",
         "configs": [
-            ("base", "Chunk 2 (Default)"),
+            ("base", "Default (Chunk 2)"),
             ("chunk_ablation1", "Chunk 1"),
             ("chunk_ablation2", "Chunk 4"),
             ("chunk_ablation3", "Chunk 8"),
@@ -129,7 +129,7 @@ ABLATION_GROUPS = {
     "factor": {
         "title": "Factor Ablation",
         "configs": [
-            ("base", "Default"),
+            ("base", "Default (0.2)"),
             ("factor_ablation1", "Factor 0"),
             ("factor_ablation2", "Factor 0.1"),
             ("factor_ablation3", "Factor 0.3"),
@@ -263,7 +263,7 @@ def parse_args() -> argparse.Namespace:
         "--general-num-videos",
         nargs="+",
         type=int,
-        default=None,
+        default=list(DEFAULT_NUM_VIDEOS),
         help="Number of videos for general (non-ablation) plots. Auto-detect when omitted.",
     )
     parser.add_argument(
@@ -277,7 +277,7 @@ def parse_args() -> argparse.Namespace:
         "--ablation-num-videos",
         nargs="+",
         type=int,
-        default=None,
+        default=list(DEFAULT_ABLATION_NUM_VIDEOS),
         help="Number of videos for ablation plots (default: 5 10 15).",
     )
     parser.add_argument(
@@ -855,81 +855,6 @@ def plot_latency_components_by_config(
     return has_data
 
 
-def plot_latency_components_vs_videos(
-    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
-    config_ids: List[str],
-    num_videos: List[int],
-    output_path: Path,
-) -> bool:
-    """Show how latency components evolve as the number of videos increases."""
-    configure_plot_style()
-    colors = _scientific_colors()
-    markers = ["o", "s", "^", "D", "P", "X", "v", "<", ">"]
-
-    component_entries = [(key, label) for key, label, _ in LATENCY_COMPONENTS]
-    if not component_entries:
-        return False
-
-    cols = min(4, len(component_entries))
-    rows = math.ceil(len(component_entries) / cols)
-    fig, axes = plt.subplots(
-        rows,
-        cols,
-        figsize=(3.2 * cols, 2.3 * rows),
-        sharex=True,
-        sharey=False,
-    )
-    axes = np.atleast_1d(axes).flatten()
-    plotted = False
-    combined_nums: Set[int] = set()
-
-    for ax, (metric_key, comp_label) in zip(axes, component_entries):
-        for idx, config_id in enumerate(config_ids):
-            stats_for_config = summary_stats.get(metric_key, {}).get(config_id, {})
-            means = []
-            for n in num_videos:
-                entry = stats_for_config.get(n, {})
-                means.append(entry.get("mean", float("nan")))
-            means_arr = np.asarray(means, dtype=float)
-            if np.all(~np.isfinite(means_arr)):
-                continue
-            plotted = True
-            ax.plot(
-                num_videos,
-                means_arr,
-                marker=markers[idx % len(markers)],
-                color=colors[idx % len(colors)],
-                linewidth=1.6,
-                markersize=4,
-                label=config_id,
-            )
-        ax.set_title(comp_label)
-        ax.set_ylabel("Time (s)")
-        ax.set_xticks(num_videos)
-
-    for ax in axes[len(component_entries) :]:
-        ax.axis("off")
-
-    if plotted:
-        for ax in axes[-cols:]:
-            ax.set_xlabel("Number of Videos")
-        handles, labels = axes[0].get_legend_handles_labels()
-        if handles:
-            fig.legend(
-                handles,
-                labels,
-                loc="lower center",
-                ncol=min(3, len(config_ids)),
-                frameon=False,
-            )
-            fig.subplots_adjust(bottom=0.15)
-        fig.tight_layout(pad=0.7)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
-    return plotted
-
-
 def plot_scheduling_components_by_config(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     config_ids: List[str],
@@ -1132,62 +1057,6 @@ def plot_memory_components_by_config(
     ax.set_xticks(x)
     ax.set_xticklabels(valid_configs, rotation=20, ha="right")
     ax.set_xlabel("Config ID")
-    ax.legend(frameon=False)
-    fig.tight_layout(pad=0.6)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
-    return True
-
-
-def plot_memory_components_base_vs_videos(
-    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
-    num_videos: List[int],
-    output_path: Path,
-) -> bool:
-    """Line plot of memory components vs number of videos for the base config (log scale)."""
-    configure_plot_style()
-    base_stats = {
-        key: summary_stats.get(key, {}).get(BASE_CONFIG_ID, {})
-        for key, _, _ in MEMORY_COMPONENTS
-    }
-    if not any(base_stats.values()):
-        return False
-
-    colors = _scientific_colors()
-    markers = ["o", "s", "^"]
-    fig, ax = plt.subplots(figsize=(3.6, 2.4))
-    has_data = False
-
-    for idx, (key, label, _) in enumerate(MEMORY_COMPONENTS):
-        stats_for_base = base_stats.get(key, {})
-        means = []
-        for n in num_videos:
-            entry = stats_for_base.get(n, {})
-            means.append(entry.get("mean", float("nan")))
-        means_arr = np.asarray(means, dtype=float)
-        if np.all(~np.isfinite(means_arr)):
-            continue
-        has_data = True
-        ax.plot(
-            num_videos,
-            means_arr,
-            marker=markers[idx % len(markers)],
-            color=colors[idx % len(colors)],
-            linewidth=1.6,
-            markersize=4,
-            label=label,
-        )
-
-    if not has_data:
-        plt.close(fig)
-        return False
-
-    ax.set_title(f"{BASE_CONFIG_ID.title()} Memory Components vs Number of Videos")
-    ax.set_xlabel("Number of Videos")
-    ax.set_ylabel("Peak Memory (MB)")
-    ax.set_yscale("log")
-    ax.set_xticks(num_videos)
     ax.legend(frameon=False)
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1434,6 +1303,8 @@ def plot_memory_speed_ratios(
 
     categories = ["CPU", "KV", "Generation"]
     ratio_matrix = [cpu_ratios, kv_ratios, consumption_ratios]
+    # convert to percentages
+    ratio_matrix = [[val * 100 for val in row] for row in ratio_matrix]
 
     configure_plot_style()
     colors = _scientific_colors()
@@ -1474,7 +1345,7 @@ def plot_memory_speed_ratios(
         plt.close(fig)
         return False
         
-    ax.set_ylabel("Ratio")
+    ax.set_ylabel("Ratio (%)")
     ax.set_xticks(x)
     ax.set_xticklabels(categories)
     ax.grid(axis="y", alpha=0.3)
@@ -2493,23 +2364,23 @@ def main() -> None:
         return
     available_numbers = available_numbers_map.get("primary", defaultdict(set))
 
-    for data_source, paths in missing_paths_map.get("primary", {}).items():
-        if paths:
-            print(
-                f"Warning: Missing summaries for data_source '{data_source}' in base '{base_dir}':"
-            )
-            for path in paths:
-                print(f"  - {path}")
+    # for data_source, paths in missing_paths_map.get("primary", {}).items():
+    #     if paths:
+    #         print(
+    #             f"Warning: Missing summaries for data_source '{data_source}' in base '{base_dir}':"
+    #         )
+    #         for path in paths:
+    #             print(f"  - {path}")
 
     comparison_summary_stats = summary_stats_map.get("comparison", {})
-    if comparison_summary_stats and comparison_base_dir:
-        for data_source, paths in missing_paths_map.get("comparison", {}).items():
-            if paths:
-                print(
-                    f"Warning: Missing summaries for data_source '{data_source}' in base '{comparison_base_dir}':"
-                )
-                for path in paths:
-                    print(f"  - {path}")
+    # if comparison_summary_stats and comparison_base_dir:
+    #     for data_source, paths in missing_paths_map.get("comparison", {}).items():
+    #         if paths:
+    #             print(
+    #                 f"Warning: Missing summaries for data_source '{data_source}' in base '{comparison_base_dir}':"
+    #             )
+    #             for path in paths:
+    #                 print(f"  - {path}")
 
     metric_meta = {key: (y_label, title, slug) for key, y_label, title, slug in METRIC_ORDER}
     all_summary_stats = primary_summary_stats
@@ -2611,13 +2482,6 @@ def main() -> None:
         else:
             print(f"[{data_source}] Skipped memory components by config plot; no valid data.")
 
-        # Memory components vs number of videos (base config)
-        memory_base_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_memory_components_base_vs_videos.pdf"
-        if plot_memory_components_base_vs_videos(summary_stats, ds_numbers, memory_base_path):
-            print(f"[{data_source}] Saved memory components (base) vs videos plot to {memory_base_path}")
-        else:
-            print(f"[{data_source}] Skipped memory components (base) vs videos plot; no valid data.")
-
         memory_breakdown_path = (
             plot_root_base.parent
             / f"{plot_root_base.name}_{data_source}_memory_breakdown_max_frames_memory_test.pdf"
@@ -2693,13 +2557,6 @@ def main() -> None:
             print(f"[{data_source}] Saved latency components by config plot to {latency_config_path}")
         else:
             print(f"[{data_source}] Skipped latency components by config plot; no valid data.")
-
-        # Latency components over number of videos
-        latency_videos_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_latency_components_vs_videos.pdf"
-        if plot_latency_components_vs_videos(summary_stats, general_configs, ds_numbers, latency_videos_path):
-            print(f"[{data_source}] Saved latency components vs videos plot to {latency_videos_path}")
-        else:
-            print(f"[{data_source}] Skipped latency components vs videos plot; no valid data.")
 
         # Generation speed for single-video experiments
         generation_speed_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_generation_speed_vs_listening.pdf"
