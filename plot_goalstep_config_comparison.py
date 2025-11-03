@@ -76,8 +76,9 @@ KV_SECONDARY_METRIC = "kv_transfer_per_second"
 KV_OFFLOAD_SLOPE = "kv_offload_slope"
 KV_RELOAD_SLOPE = "kv_reload_slope"
 TIMING_BREAKDOWN_METRIC = "timing_breakdown"
-BAR_LABEL_FONT_SIZE = 12
+BAR_LABEL_FONT_SIZE = 14
 LEGEND_FONT_SIZE = 8
+DISTRIBUTION_CONFIG_ID = "max_frames_memory_test"
 
 EXTEND_METRICS = {
     GENERATION_LENGTHS,
@@ -373,6 +374,9 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
 
     # TTFT: average per conversation response latency when prompts exist.
     component_samples: Dict[str, List[float]] = {key: [] for key, _, _ in LATENCY_COMPONENTS}
+    component_per_frame_samples: Dict[str, List[float]] = {
+        key: [] for key, _, _ in LATENCY_COMPONENTS
+    }
     results = summary.get("results", []) or []
     ttft_samples: List[float] = []
     ppl_samples: List[float] = []
@@ -402,6 +406,8 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
             value = result.get(key)
             if value is not None:
                 component_samples[key].append(float(value))
+                denom = max(num_frames, 1)
+                component_per_frame_samples[key].append(float(value) / denom)
 
         for turn in result.get("generated_turns", []):
             text = turn.get("text", "")
@@ -494,6 +500,10 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
         key: float(np.mean(values)) if values else float("nan")
         for key, values in component_samples.items()
     }
+    component_per_frame_means = {
+        f"{key}_per_frame": float(np.mean(values)) if values else float("nan")
+        for key, values in component_per_frame_samples.items()
+    }
 
     metrics = {
         "rebuffer_time": rebuffer_time,
@@ -534,6 +544,7 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
     metrics[KV_RELOAD_SLOPE] = reload_slopes
     metrics[TIMING_BREAKDOWN_METRIC] = timing_breakdowns
     metrics.update(component_means)
+    metrics.update(component_per_frame_means)
     return metrics
 
 
@@ -1091,85 +1102,6 @@ def plot_scheduling_components_base_vs_videos(
     return True
 
 
-def plot_memory_components_by_config(
-    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
-    config_ids: List[str],
-    output_path: Path,
-    allowed_nums: Optional[Iterable[int]] = None,
-) -> bool:
-    """Grouped bar chart comparing memory components across configs (log scale)."""
-    configure_plot_style()
-    palette = _color_hatch_cycle(len(MEMORY_COMPONENTS))
-    component_keys = [key for key, _, _ in MEMORY_COMPONENTS]
-    component_labels = [label for _, label, _ in MEMORY_COMPONENTS]
-
-    means_matrix: List[List[float]] = []
-    std_matrix: List[List[float]] = []
-    valid_configs: List[str] = []
-
-    for config_id in config_ids:
-        config_means = []
-        config_stds = []
-        has_data = False
-        for key in component_keys:
-            num_map = summary_stats.get(key, {}).get(config_id, {})
-            collected = _collect_per_video_means(num_map, allowed_nums)
-            if collected:
-                arr = np.asarray(collected, dtype=float)
-                mean = float(arr.mean())
-                std = float(arr.std(ddof=0))
-                has_data = True
-            else:
-                mean, std = float("nan"), float("nan")
-            config_means.append(mean)
-            config_stds.append(std)
-        if has_data:
-            valid_configs.append(config_id)
-            means_matrix.append(config_means)
-            std_matrix.append(config_stds)
-
-    if not means_matrix:
-        return False
-
-    x = np.arange(len(valid_configs))
-    bar_width = min(0.8 / len(component_keys), 0.2)
-    fig, ax = plt.subplots(figsize=(3.6, 2.6))
-
-    for idx, label in enumerate(component_labels):
-        color, hatch = palette[idx]
-        means_arr = np.asarray([row[idx] for row in means_matrix], dtype=float)
-        stds_arr = np.asarray([row[idx] for row in std_matrix], dtype=float)
-        stds_arr[~np.isfinite(stds_arr)] = 0.0
-        if np.all(~np.isfinite(means_arr)):
-            continue
-        offset = (idx - (len(component_keys) - 1) / 2) * bar_width
-        ax.bar(
-            x + offset,
-            means_arr,
-            width=bar_width * 0.95,
-            yerr=stds_arr,
-            capsize=2.5,
-            color=color,
-            hatch=hatch,
-            edgecolor="black",
-            linewidth=0.4,
-            label=label,
-        )
-
-    ax.set_title("Memory Components by Config")
-    ax.set_ylabel("Peak Memory (MB)")
-    ax.set_yscale("log")
-    ax.set_xticks(x)
-    ax.set_xticklabels(valid_configs, rotation=20, ha="right")
-    ax.set_xlabel("Config ID")
-    ax.legend(frameon=False)
-    fig.tight_layout(pad=0.6)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
-    return True
-
-
 def plot_memory_breakdown_multi_videos(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
     config_id: str,
@@ -1179,9 +1111,9 @@ def plot_memory_breakdown_multi_videos(
     """Visualize memory components across multiple video counts for a single config."""
     target_nums = [int(n) for n in target_num_videos]
     component_defs = [
-        ("model_params_memory", "Model Params"),
-        ("combined_dynamic_memory", "KV GPU"),
-        ("cpu_memory_growth_peak", "KV CPU"),
+        ("model_params_memory", "Params"),
+        ("combined_dynamic_memory", "KV (GPU)"),
+        ("cpu_memory_growth_peak", "KV (CPU)"),
     ]
 
     def _extract(metric_key: str, num: int) -> Tuple[float, float, List[float]]:
@@ -1238,8 +1170,8 @@ def plot_memory_breakdown_multi_videos(
             arr = np.asarray(combined, dtype=float)
             gpu_totals[num] = (float(arr.mean()), float(arr.std(ddof=0)))
         else:
-            model_mean, model_std = component_stats["Model Params"].get(num, (float("nan"), float("nan")))
-            dyn_mean, dyn_std = component_stats["KV GPU"].get(num, (float("nan"), float("nan")))
+            model_mean, model_std = component_stats["Params"].get(num, (float("nan"), float("nan")))
+            dyn_mean, dyn_std = component_stats["KV (GPU)"].get(num, (float("nan"), float("nan")))
             if math.isfinite(model_mean) and math.isfinite(dyn_mean):
                 combined_mean = model_mean + dyn_mean
                 # simple std combination if available
@@ -1254,7 +1186,7 @@ def plot_memory_breakdown_multi_videos(
     component_stats["GPU Total"] = gpu_totals
 
     # Filter out components lacking any finite data
-    components_order = ["Model Params", "KV GPU", "GPU Total", "KV CPU"]
+    components_order = ["Params", "KV (GPU)", "GPU Total", "KV (CPU)"]
     components = []
     for label in components_order:
         stats_per_num = component_stats.get(label, {})
@@ -1307,22 +1239,10 @@ def plot_memory_breakdown_multi_videos(
             linewidth=0.4,
             label=f"N={num}",
         )
-        for xpos, value in zip(x + offset, means_arr):
-            if math.isfinite(value) and value > 0:
-                ax.text(
-                    xpos,
-                    value * 1.05,
-                    f"{value:.1f}",
-                    ha="center",
-                    va="bottom",
-                    fontsize=BAR_LABEL_FONT_SIZE,
-                    rotation=90,
-                )
 
-    ax.set_title(f"{config_id.replace('_', ' ').title()} Memory Components")
     ax.set_ylabel("Peak Memory (MB)")
     ax.set_xticks(x)
-    ax.set_xticklabels(components, rotation=20, ha="right")
+    ax.set_xticklabels(components)
     ax.grid(axis="y", alpha=0.3)
     positive_values = [
         val for row in means_matrix for val in row if math.isfinite(val) and val > 0
@@ -1446,7 +1366,7 @@ def plot_memory_speed_ratios(
             ax.text(
                 xpos,
                 value + 0.03,
-                f"{value:.2f}",
+                f"{value:.2f}%",
                 ha="center",
                 va="bottom",
                 fontsize=BAR_LABEL_FONT_SIZE,
@@ -1827,28 +1747,82 @@ def plot_generation_speed_vs_listening(
     return True
 
 
-def plot_fraction_response_distribution(
+def _collect_distribution_values(
     summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    metric_key: str,
     config_id: str,
-    output_path: Path,
-) -> bool:
-    fraction_stats = summary_stats.get(FRACTION_RESPONSE_FRAMES_METRIC, {})
-    config_stats = fraction_stats.get(config_id, {})
+) -> List[float]:
+    config_stats = summary_stats.get(metric_key, {}).get(config_id, {})
     values: List[float] = []
     for num_map in config_stats.values():
         raw = num_map.get("values", [])
-        values.extend(v for v in raw if v is not None and math.isfinite(v))
+        values.extend(float(v) for v in raw if v is not None and math.isfinite(v))
+    return values
 
-    if not values:
+
+def _plot_cdf_for_sources(
+    summary_stats_by_source: Dict[str, Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]]],
+    metric_key: str,
+    xlabel: str,
+    output_path: Path,
+    config_id: str,
+    x_limits: Optional[Tuple[float, float]] = None,
+) -> bool:
+    configure_plot_style()
+    fig, ax = plt.subplots(figsize=(3.8, 2.6))
+    colors = _scientific_colors()
+
+    plotted = False
+    annotations: List[Tuple[float, str, str]] = []
+    for idx, data_source in enumerate(sorted(summary_stats_by_source.keys())):
+        summary_stats = summary_stats_by_source[data_source]
+        values = _collect_distribution_values(summary_stats, metric_key, config_id)
+        if not values:
+            continue
+        values_arr = np.sort(np.asarray(values, dtype=float))
+        if values_arr.size == 0:
+            continue
+        cdf = np.arange(1, values_arr.size + 1, dtype=float) / values_arr.size
+        color = colors[idx % len(colors)]
+        mean_val = float(values_arr.mean())
+        ax.step(
+            values_arr,
+            cdf,
+            where="post",
+            color=color,
+            linewidth=1.6,
+            label=data_source.title(),
+        )
+        annotations.append((mean_val, data_source.title(), color))
+        plotted = True
+
+    if not plotted:
+        plt.close(fig)
         return False
 
-    configure_plot_style()
-    fig, ax = plt.subplots(figsize=(3.4, 2.6))
-    ax.hist(values, bins=min(20, max(5, len(values))), color="#4E79A7", alpha=0.8, edgecolor="black")
-    ax.set_title("Fraction of Frames with Responses (Base Config)")
-    ax.set_xlabel("Fraction of Frames with Nonzero Response")
-    ax.set_ylabel("Run Count")
-    ax.grid(alpha=0.3, axis="y")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("CDF")
+    if x_limits is not None:
+        ax.set_xlim(*x_limits)
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(alpha=0.3)
+    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
+
+    for idx, (mean_val, label, color) in enumerate(annotations):
+        if x_limits is not None and (mean_val < x_limits[0] or mean_val > x_limits[1]):
+            continue
+        ax.axvline(mean_val, linestyle="--", linewidth=1.0, color=color, alpha=0.6)
+        ax.text(
+            mean_val,
+            0.75 - idx * 0.5,
+            f"{label} mean\n{mean_val:.1f}",
+            ha="left",
+            va="center",
+            fontsize=BAR_LABEL_FONT_SIZE,
+            color=color,
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.7),
+        )
+
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -1856,31 +1830,34 @@ def plot_fraction_response_distribution(
     return True
 
 
-def plot_generation_length_distribution(
-    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+def plot_fraction_response_distribution(
+    summary_stats_by_source: Dict[str, Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]]],
     config_id: str,
     output_path: Path,
 ) -> bool:
-    length_stats = summary_stats.get(GENERATION_LENGTHS, {}).get(config_id, {})
-    values: List[int] = []
-    for num_map in length_stats.values():
-        raw = num_map.get("values", [])
-        values.extend(int(v) for v in raw if v is not None and math.isfinite(v))
+    return _plot_cdf_for_sources(
+        summary_stats_by_source,
+        FRACTION_RESPONSE_FRAMES_METRIC,
+        "Fraction of Frames with Nonzero Response",
+        output_path,
+        config_id,
+        x_limits=(0.0, 1.0),
+    )
 
-    if not values:
-        return False
 
-    configure_plot_style()
-    fig, ax = plt.subplots(figsize=(3.4, 2.6))
-    ax.hist(values, bins=min(30, max(10, len(values) // 2)), color="#A23B72", alpha=0.85, edgecolor="black")
-    ax.set_xlabel("Generated Words per Response")
-    ax.set_ylabel("Count")
-    ax.grid(alpha=0.3, axis="y")
-    fig.tight_layout(pad=0.6)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
-    return True
+def plot_generation_length_distribution(
+    summary_stats_by_source: Dict[str, Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]]],
+    config_id: str,
+    output_path: Path,
+) -> bool:
+    return _plot_cdf_for_sources(
+        summary_stats_by_source,
+        GENERATION_LENGTHS,
+        "Generated Words per Response",
+        output_path,
+        config_id,
+        x_limits=None,
+    )
 
 
 def plot_kv_transfer_scatter(
@@ -1890,6 +1867,18 @@ def plot_kv_transfer_scatter(
 ) -> bool:
     offload_stats = summary_stats.get(KV_OFFLOAD_SCATTER, {}).get(config_id, {})
     reload_stats = summary_stats.get(KV_RELOAD_SCATTER, {}).get(config_id, {})
+
+    def flatten_numeric_entries(num_map: Dict[int, Dict[str, Iterable[float]]]) -> List[float]:
+        values: List[float] = []
+        for stats in num_map.values():
+            raw = stats.get("values")
+            if raw:
+                values.extend(float(v) for v in raw if v is not None and math.isfinite(v))
+            else:
+                mean_val = stats.get("mean")
+                if mean_val is not None and math.isfinite(mean_val):
+                    values.append(float(mean_val))
+        return values
 
     off_entries: List[Tuple[float, float]] = []
     for num_map in offload_stats.values():
@@ -1921,27 +1910,69 @@ def plot_kv_transfer_scatter(
     off_filtered = filter_outliers(off_entries)
     reload_filtered = filter_outliers(reload_entries)
 
-    off_sizes = [s for s, _ in off_filtered]
     off_times = [t for _, t in off_filtered]
-    reload_sizes = [s for s, _ in reload_filtered]
     reload_times = [t for _, t in reload_filtered]
 
-    if not off_sizes and not reload_sizes:
+    def aggregate_metric_ms(metric_key: str) -> float:
+        num_map = summary_stats.get(metric_key, {}).get(config_id, {})
+        values = flatten_numeric_entries(num_map)
+        if not values:
+            return 0.0
+        return float(np.mean(values) * 1000.0)
+
+    prefilling_ms = aggregate_metric_ms("visual_embedding_time_per_frame")
+    eos_ms = aggregate_metric_ms("model_forward_time_per_frame")
+    decoding_ms = aggregate_metric_ms("generation_time_per_frame")
+    network_ms = aggregate_metric_ms("total_sending_time_per_frame")
+
+    if not any([off_times, reload_times, prefilling_ms, eos_ms, decoding_ms, network_ms]):
         return False
 
     configure_plot_style()
-    fig, ax = plt.subplots(figsize=(3.4, 2.6))
-    if off_sizes:
-        ax.scatter(off_sizes, off_times, color="#4E79A7", alpha=0.6, label="Offload")
-    if reload_sizes:
-        ax.scatter(reload_sizes, reload_times, color="#F28E2B", alpha=0.6, label="Reload")
+    fig, ax = plt.subplots(figsize=(3.8, 2.6))
 
-    ax.set_title("KV Transfer Time vs Cache Size (round_robin_m)")
-    ax.set_xlabel("KV Cache Size (MB)")
-    ax.set_ylabel("Transfer Time (ms)")
-    ax.grid(alpha=0.3)
-    if off_sizes and reload_sizes:
-        ax.legend(frameon=False)
+    components = [
+        ("Prefilling", prefilling_ms),
+        ("EOS", eos_ms),
+        ("Decoding", decoding_ms),
+        ("Network", network_ms),
+        ("Offload", float(np.mean(off_times)) if off_times else 0.0),
+        ("Reload", float(np.mean(reload_times)) if reload_times else 0.0),
+    ]
+
+    components = [(name, value) for name, value in components if math.isfinite(value) and value > 0]
+    if not components:
+        plt.close(fig)
+        return False
+
+    colors = _scientific_colors()
+    x = np.arange(len(components))
+    values = [value for _, value in components]
+    ax.bar(
+        x,
+        values,
+        color=[colors[idx % len(colors)] for idx in range(len(components))],
+        edgecolor="black",
+        linewidth=0.4,
+    )
+
+    total_time = sum(values)
+    for xpos, value in zip(x, values):
+        frac = value / total_time if total_time > 0 else 0.0
+        ax.text(
+            xpos,
+            value * 1.05 if value > 0 else 0.02,
+            f"{value:.2f} ms",
+            ha="center",
+            va="bottom",
+            fontsize=BAR_LABEL_FONT_SIZE,
+        )
+
+    ax.set_ylabel("Time (ms)")
+    ax.set_xticks(x)
+    ax.set_xticklabels([name for name, _ in components], rotation=20, ha="right")
+    ax.grid(axis="y", alpha=0.3)
+
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -1957,48 +1988,67 @@ def plot_kv_slope_comparison(
     off_stats = summary_stats.get(KV_OFFLOAD_SLOPE, {}).get(config_id, {})
     reload_stats = summary_stats.get(KV_RELOAD_SLOPE, {}).get(config_id, {})
 
-    labels = []
-    off_means = []
-    off_stds = []
-    reload_means = []
-    reload_stds = []
+    off_values: List[float] = []
+    for num_map in off_stats.values():
+        raw = num_map.get("values", [])
+        off_values.extend([float(v) for v in raw if v is not None and math.isfinite(v)])
 
-    video_numbers = sorted(set(off_stats.keys()) | set(reload_stats.keys()))
-    for num in video_numbers:
-        off_entries = [2*v for v in off_stats.get(num, {}).get("values", []) if math.isfinite(v)]
-        reload_entries = [2*v for v in reload_stats.get(num, {}).get("values", []) if math.isfinite(v)]
-        if not off_entries and not reload_entries:
-            continue
-        labels.append(num)
-        if off_entries:
-            off_means.append(float(np.mean(off_entries)))
-            off_stds.append(float(np.std(off_entries)))
-        else:
-            off_means.append(0.0)
-            off_stds.append(0.0)
-        if reload_entries:
-            reload_means.append(float(np.mean(reload_entries)))
-            reload_stds.append(float(np.std(reload_entries)))
-        else:
-            reload_means.append(0.0)
-            reload_stds.append(0.0)
+    reload_values: List[float] = []
+    for num_map in reload_stats.values():
+        raw = num_map.get("values", [])
+        reload_values.extend([float(v) for v in raw if v is not None and math.isfinite(v)])
 
-    if not labels:
+    datasets = [off_values, reload_values]
+    if not any(values for values in datasets):
         return False
 
     configure_plot_style()
-    fig, ax = plt.subplots(figsize=(3.4, 2.6))
-    x = np.arange(len(labels))
-    bar_width = 0.65
-    ax.bar([0], off_means, bar_width, yerr=off_stds, capsize=2.5, color="#4E79A7", edgecolor="black", linewidth=0.4, label="Offload")
-    ax.bar([1], reload_means, bar_width, yerr=reload_stds, capsize=2.5, color="#F28E2B", edgecolor="black", linewidth=0.4, label="Reload")
-    # ax.set_xlabel("Number of Videos")
-    ax.set_ylabel("Switch Time Inc. Per Second (ms)")
-    # set x tick as "offload" and "reload"
-    ax.set_xticks([0, 1])
-    ax.set_xticklabels(["Offload", "Reload"])
+    fig, ax = plt.subplots(figsize=(3.8, 2.6))
+
+    positions = [1, 2]
+    colors = ["#4E79A7", "#F28E2B"]
+    labels = ["Offload", "Reload"]
+
+    violin = ax.violinplot(
+        datasets,
+        positions=positions,
+        widths=0.6,
+        showmeans=False,
+        showextrema=False,
+        showmedians=False,
+    )
+
+    for body, color, values in zip(violin["bodies"], colors, datasets):
+        if values:
+            body.set_facecolor(color)
+            body.set_edgecolor("black")
+            body.set_alpha(0.6)
+        else:
+            body.set_visible(False)
+
+    for pos, values, color, label in zip(positions, datasets, colors, labels):
+        if not values:
+            continue
+        mean_val = float(np.mean(values))
+        ax.scatter(pos, mean_val, color=color, edgecolor="black", zorder=3, s=25)
+        ax.text(
+            pos + 0.05,
+            mean_val,
+            f"{mean_val:.2f}",
+            ha="left",
+            va="center",
+            fontsize=BAR_LABEL_FONT_SIZE,
+            color=color,
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.7),
+        )
+
+    ax.set_ylabel("Inflation (x1e-3)", fontsize=18)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels, fontsize=18)
+    ax.tick_params(axis='y', labelsize=18)
+    ax.tick_params(axis='x', labelsize=18)
     ax.grid(axis="y", alpha=0.3)
-    # ax.legend(frameon=False)
+
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -2394,6 +2444,7 @@ def main() -> None:
     all_metric_keys = (
         [key for key, *_ in METRIC_ORDER]
         + [key for key, *_ in LATENCY_COMPONENTS]
+        + [f"{key}_per_frame" for key, *_ in LATENCY_COMPONENTS]
         + [key for key, *_ in DELAY_METRICS]
         + [key for key, *_ in SCHEDULING_COMPONENTS]
         + [key for key, *_ in MEMORY_COMPONENTS]
@@ -2553,6 +2604,8 @@ def main() -> None:
     metric_meta = {key: (y_label, title, slug) for key, y_label, title, slug in METRIC_ORDER}
     all_summary_stats = primary_summary_stats
 
+    distribution_stats: Dict[str, Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]]] = {}
+
     for data_source, summary_stats in all_summary_stats.items():
         # Determine numbers and configs for plotting
         ds_numbers = sorted(available_numbers.get(data_source, []))
@@ -2560,6 +2613,8 @@ def main() -> None:
             ds_numbers = sorted(set(ds_numbers) | set(general_num_override))
         if not ds_numbers:
             ds_numbers = list(DEFAULT_NUM_VIDEOS)
+
+        distribution_stats[data_source] = summary_stats
 
         per_video_nums = [n for n in per_video_targets if n in ds_numbers]
         if not per_video_nums:
@@ -2649,12 +2704,6 @@ def main() -> None:
             print(f"[{data_source}] Skipped scheduling components (base) vs videos plot; no valid data.")
 
         # Memory components across configs
-        memory_config_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_memory_components_by_config.pdf"
-        if plot_memory_components_by_config(summary_stats, general_configs, memory_config_path, allowed_nums=overall_targets):
-            print(f"[{data_source}] Saved memory components by config plot to {memory_config_path}")
-        else:
-            print(f"[{data_source}] Skipped memory components by config plot; no valid data.")
-
         memory_breakdown_path = (
             plot_root_base.parent
             / f"{plot_root_base.name}_{data_source}_memory_breakdown_max_frames_memory_test.pdf"
@@ -2662,7 +2711,7 @@ def main() -> None:
         if plot_memory_breakdown_multi_videos(
             summary_stats,
             "max_frames_memory_test",
-            [3, 5, 10],
+            [3, 5, 8, 10],
             memory_breakdown_path,
         ):
             print(f"[{data_source}] Saved memory breakdown plot to {memory_breakdown_path}")
@@ -2676,7 +2725,7 @@ def main() -> None:
         if plot_memory_speed_ratios(
             summary_stats,
             "max_frames_memory_test",
-            [3, 5, 10],
+            [3, 5, 8, 10],
             memory_ratio_path,
         ):
             print(f"[{data_source}] Saved memory/speed ratio plot to {memory_ratio_path}")
@@ -2738,19 +2787,6 @@ def main() -> None:
         else:
             print(f"[{data_source}] Skipped generation speed vs listening plot; no valid data.")
 
-        generation_length_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_generation_length_distribution.pdf"
-        if plot_generation_length_distribution(summary_stats, BASE_CONFIG_ID, generation_length_path):
-            print(f"[{data_source}] Saved generation length distribution to {generation_length_path}")
-        else:
-            print(f"[{data_source}] Skipped generation length distribution plot; no valid data.")
-
-        # Fraction of frames with nonzero responses (base config)
-        fraction_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_response_fraction_distribution.pdf"
-        if plot_fraction_response_distribution(summary_stats, BASE_CONFIG_ID, fraction_path):
-            print(f"[{data_source}] Saved response fraction distribution to {fraction_path}")
-        else:
-            print(f"[{data_source}] Skipped response fraction distribution plot; no valid data.")
-
         kv_scatter_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_kv_transfer_scatter.pdf"
         if plot_kv_transfer_scatter(summary_stats, "round_robin_m", kv_scatter_path):
             print(f"[{data_source}] Saved KV transfer scatter to {kv_scatter_path}")
@@ -2807,19 +2843,31 @@ def main() -> None:
                         )
         print(f"[{data_source}] Wrote summary table to {csv_path}")
 
-    combined_timing_path = base_dir / "timing_breakdown_round_robin_m_combined.pdf"
+    if distribution_stats:
+        combined_dir = base_dir / "combined"
+        combined_dir.mkdir(parents=True, exist_ok=True)
+
+        generation_length_path = combined_dir / "config_metrics_generation_length_cdf.pdf"
+        if plot_generation_length_distribution(distribution_stats, DISTRIBUTION_CONFIG_ID, generation_length_path):
+            print(f"[combined] Saved generation length CDF to {generation_length_path}")
+        else:
+            print("[combined] Skipped generation length CDF; no valid data.")
+
+        fraction_path = combined_dir / "config_metrics_response_fraction_cdf.pdf"
+        if plot_fraction_response_distribution(distribution_stats, DISTRIBUTION_CONFIG_ID, fraction_path):
+            print(f"[combined] Saved response fraction CDF to {fraction_path}")
+        else:
+            print("[combined] Skipped response fraction CDF; no valid data.")
+
+    combined_timing_path = combined_dir / "timing_breakdown_round_robin_m_combined.pdf"
     if plot_timing_breakdown(all_summary_stats, data_sources, combined_timing_path):
-        print(f"Saved combined timing breakdown to {combined_timing_path}")
+        print(f"[combined] Saved combined timing breakdown to {combined_timing_path}")
     else:
-        print("Skipped combined timing breakdown plot; no valid data.")
+        print("[combined] Skipped combined timing breakdown plot; no valid data.")
 
     # Combined round_robin_m comparison across data sources
     if data_sources:
-        if args.output:
-            base_output = Path(args.output)
-            combined_path = base_output.parent / f"{base_output.stem}_roundrobin_rebuffer.pdf"
-        else:
-            combined_path = base_dir / "roundrobin_m_rebuffer_across_sources.pdf"
+        combined_path = combined_dir / "roundrobin_m_rebuffer_across_sources.pdf"
         if plot_roundrobin_comparison(
             all_summary_stats,
             data_sources,
@@ -2827,15 +2875,13 @@ def main() -> None:
             general_num_override,
             combined_path,
         ):
-            print(f"Saved round_robin_m comparison to {combined_path}")
+            print(f"[combined] Saved round_robin_m comparison to {combined_path}")
         else:
-            print("Skipped round_robin_m comparison plot; no valid data.")
+            print("[combined] Skipped round_robin_m comparison plot; no valid data.")
 
     # Combined round_robin_2 / round_robin_m ratio comparison across data sources
     combined_ratio_path = (
-        base_dir / "roundrobin_2_over_m_ratio_goalstep.pdf"
-        if not args.output
-        else Path(args.output).parent / f"{Path(args.output).stem}_roundrobin_ratio.pdf"
+        combined_dir / "roundrobin_2_over_m_ratio_goalstep.pdf"
     )
     if plot_roundrobin_ratio(
         all_summary_stats,
@@ -2844,9 +2890,9 @@ def main() -> None:
         list(range(1, 11)),
         combined_ratio_path,
     ):
-        print(f"Saved goalstep round_robin_2 / round_robin_m ratio comparison to {combined_ratio_path}")
+        print(f"[combined] Saved goalstep round_robin_2 / round_robin_m ratio comparison to {combined_ratio_path}")
     else:
-        print("Skipped round_robin_2 / round_robin_m ratio comparison plot; no valid data.")
+        print("[combined] Skipped round_robin_2 / round_robin_m ratio comparison plot; no valid data.")
 
 
 if __name__ == "__main__":
