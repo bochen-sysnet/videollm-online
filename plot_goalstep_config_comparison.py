@@ -26,6 +26,13 @@ DEFAULT_CONFIG_IDS: Tuple[str, ...] = (
     "round_robin_m",
     "round_robin_2",
 )
+CONFIG_DISPLAY_NAMES: Dict[str, str] = {
+    "base": "Ours",
+    "random_2": "RD-S",
+    "random_m": "RD-M",
+    "round_robin_2": "RR-S",
+    "round_robin_m": "RR-M",
+}
 DEFAULT_NUM_VIDEOS: Tuple[int, ...] = (1,2,3,4,5,6,7,8,9,10)
 DEFAULT_ABLATION_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15)
 DEFAULT_ITERATIONS: Tuple[int, ...] = (1, 2, 3, 4, 5)
@@ -77,7 +84,7 @@ KV_OFFLOAD_SLOPE = "kv_offload_slope"
 KV_RELOAD_SLOPE = "kv_reload_slope"
 TIMING_BREAKDOWN_METRIC = "timing_breakdown"
 BAR_LABEL_FONT_SIZE = 14
-LEGEND_FONT_SIZE = 8
+LEGEND_FONT_SIZE = 10
 DISTRIBUTION_CONFIG_ID = "max_frames_memory_test"
 
 EXTEND_METRICS = {
@@ -106,12 +113,12 @@ ABLATION_GROUPS = {
     "comp": {
         "title": "Computation Modules Ablation",
         "configs": [
-            ("base", "Default"),
-            ("comp_ablation1", "No RL Score"),
-            ("comp_ablation2", "No Age Score"),
-            ("comp_ablation3", "No Urgent Threshold"),
-            ("comp_ablation4", "No Scheduling"),
-            ("comp_ablation5", "No Slicing"),
+            ("base", "Ours"),
+            ("comp_ablation1", "RL"),
+            ("comp_ablation2", "Age"),
+            ("comp_ablation3", "Thr."),
+            ("comp_ablation4", "LBF"),
+            ("comp_ablation5", "Slice"),
         ],
         "num_videos": [5, 10, 15],
         "slug": "comp_ablation",
@@ -573,6 +580,11 @@ def configure_plot_style(font_size: int = 10) -> None:
     )
 
 
+def _display_config_name(config_id: str) -> str:
+    """Return human-friendly label for a config id."""
+    return CONFIG_DISPLAY_NAMES.get(config_id, config_id.replace("_", " ").title())
+
+
 def _scientific_colors() -> List[str]:
     """Return a color palette suited for scientific plots."""
     return [
@@ -674,7 +686,7 @@ def plot_grouped_bar(
             hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
-            label=config_id,
+            label=_display_config_name(config_id),
         )
 
     ax.set_title(title)
@@ -715,7 +727,7 @@ def plot_overall_bar(
             continue
         means.append(mean)
         stds.append(std if math.isfinite(std) else 0.0)
-        config_labels.append(config_id)
+        config_labels.append(_display_config_name(config_id))
 
     if not means:
         return False
@@ -846,7 +858,7 @@ def plot_delay_comparison_by_config(
             per_metric_means.append(mean)
         if has_values:
             collected.append(per_metric_means)
-            config_labels.append(config_id)
+            config_labels.append(_display_config_name(config_id))
 
     if not collected:
         return False
@@ -856,7 +868,7 @@ def plot_delay_comparison_by_config(
     bar_width = min(0.8 / len(delay_keys), 0.2)
 
     fig, ax = plt.subplots(figsize=(3.4, 2.6))
-    for idx, (_, _, title) in enumerate(DELAY_METRICS):
+    for idx, (_, title, _) in enumerate(DELAY_METRICS):
         color, hatch = palette[idx]
         ax.bar(
             x + (idx - (len(delay_keys) - 1) / 2) * bar_width,
@@ -869,11 +881,16 @@ def plot_delay_comparison_by_config(
             label=title,
         )
 
-    ax.set_title("Delay Comparison Across Configs")
-    ax.set_ylabel("Delay (s)")
+    # show numbers on bars
+    for idx, (_, _, title) in enumerate(DELAY_METRICS):
+        color, hatch = palette[idx]
+        for i in range(len(config_labels)):
+            ax.text(x[i] + (idx - (len(delay_keys) - 1) / 2) * bar_width, arr[i, idx], f"{arr[i, idx]:.2f}", ha="center", va="bottom", color=color, rotation=90)
+
+    ax.set_ylabel("Rebuffering (s)")
     ax.set_xticks(x)
-    ax.set_xticklabels(config_labels, rotation=20, ha="right")
-    ax.set_xlabel("Config ID")
+    ax.set_xticklabels(config_labels)
+    ax.set_xlabel("Scheduler")
     ax.legend(frameon=False)
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -933,7 +950,7 @@ def plot_latency_components_by_config(
             hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
-            label=config_id,
+            label=_display_config_name(config_id),
         )
 
     ax.set_title("Latency Components by Config")
@@ -983,7 +1000,7 @@ def plot_scheduling_components_by_config(
             config_means.append(mean)
             config_stds.append(std)
         if has_data:
-            valid_configs.append(config_id)
+            valid_configs.append(_display_config_name(config_id))
             means_matrix.append(config_means)
             std_matrix.append(config_stds)
 
@@ -1016,7 +1033,6 @@ def plot_scheduling_components_by_config(
             label=label,
         )
 
-    ax.set_title("Scheduling Components by Config")
     ax.set_ylabel("Cumulative Score")
     ax.set_xticks(x)
     ax.set_xticklabels(valid_configs, rotation=20, ha="right")
@@ -1490,7 +1506,7 @@ def plot_rebuffer_baseline_comparison_across_bases(
         plt.close(fig)
         return False
 
-    cfg_labels = [config_ids[i] for i in valid_indices]
+    cfg_labels = [_display_config_name(config_ids[i]) for i in valid_indices]
     nums_str = ", ".join(str(n) for n in target_nums)
     ax.set_ylabel("Rebuffering (s)", fontsize=10)
     ax.tick_params(axis="y", labelsize=10)
@@ -2323,10 +2339,10 @@ def plot_rebuffering_ablation_group(
                 label=baseline_label,
             )
 
-        ax.set_ylabel("Total Rebuffering Time (s)")
+        ax.set_ylabel("Rebuffering Time (s)")
         ax.set_xticks(x)
-        ax.set_xticklabels(group_labels, rotation=20, ha="right")
-        ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
+        ax.set_xticklabels(group_labels)
+        ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, loc="upper left")
         fig.tight_layout(pad=0.8)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, bbox_inches="tight")
@@ -2394,12 +2410,11 @@ def plot_rebuffering_ablation_group(
         plt.close(fig)
         return False
 
-    ax.set_title(group_meta["title"])
-    ax.set_ylabel("Total Rebuffering Time (s)")
+    ax.set_ylabel("Rebuffering Time (s)")
     ax.set_xticks(x_positions)
     ax.set_xticklabels([str(n) for n in num_videos])
-    ax.set_xlabel("Number of Videos")
-    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, ncol=2)
+    ax.set_xlabel("Number of Users")
+    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, ncol=2, loc="upper left")
     fig.tight_layout(pad=0.8)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
