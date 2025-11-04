@@ -15,7 +15,7 @@ import numpy as np
 
 GOALSTEP_PATH = Path("datasets/ego4d/v2/annotations/goalstep_livechat_trainval_filtered_21k.json")
 NARRATION_PATH = Path("datasets/ego4d/v2/annotations/refined_narration_stream_val.json")
-DEFAULT_OUTPUT_DIR = Path("figures/annotation_overview")
+DEFAULT_OUTPUT_DIR = Path("figures/combined")
 plt.style.use("seaborn-v0_8-whitegrid")
 
 
@@ -26,6 +26,7 @@ class AggregateMetrics:
     conv_durations: List[float]
     responses_per_minute: List[float]
     response_gaps: List[float]
+    words_per_minute: List[float]
     total_videos: int
     total_conversations: int
     total_responses: int
@@ -38,6 +39,7 @@ def load_goalstep() -> AggregateMetrics:
     conv_durations: List[float] = []
     responses_per_minute: List[float] = []
     response_gaps: List[float] = []
+    words_per_minute: List[float] = []
     video_ids: set[str] = set()
 
     for entry in data:
@@ -48,9 +50,12 @@ def load_goalstep() -> AggregateMetrics:
         responses_per_conv.append(len(responses))
 
         resp_times = []
+        conv_word_total = 0.0
         for turn in responses:
             text = turn.get("content") or ""
-            response_lengths.append(len(text.split()))
+            words = len(text.split())
+            conv_word_total += words
+            response_lengths.append(words)
             if isinstance(turn.get("time"), (int, float)):
                 resp_times.append(float(turn["time"]))
 
@@ -66,6 +71,8 @@ def load_goalstep() -> AggregateMetrics:
         if duration is not None and duration > 0:
             conv_durations.append(float(duration))
             responses_per_minute.append(len(responses) / (float(duration) / 60.0) if responses else 0.0)
+            if conv_word_total > 0:
+                words_per_minute.append(conv_word_total / (float(duration) / 60.0))
 
     return AggregateMetrics(
         response_lengths,
@@ -73,6 +80,7 @@ def load_goalstep() -> AggregateMetrics:
         conv_durations,
         responses_per_minute,
         response_gaps,
+        words_per_minute,
         total_videos=len(video_ids),
         total_conversations=len(data),
         total_responses=len(response_lengths),
@@ -86,6 +94,7 @@ def load_narration() -> AggregateMetrics:
     conv_durations: List[float] = []
     responses_per_minute: List[float] = []
     response_gaps: List[float] = []
+    words_per_minute: List[float] = []
     video_ids: set[str] = set()
     conv_count = 0
 
@@ -96,9 +105,12 @@ def load_narration() -> AggregateMetrics:
             entries = entries or []
             responses_per_conv.append(len(entries))
             times = []
+            conv_word_total = 0.0
             for entry in entries:
                 text = entry.get("text") or ""
-                response_lengths.append(len(text.split()))
+                words = len(text.split())
+                conv_word_total += words
+                response_lengths.append(words)
                 if isinstance(entry.get("time"), (int, float)):
                     times.append(float(entry["time"]))
 
@@ -108,6 +120,8 @@ def load_narration() -> AggregateMetrics:
                 if duration > 0:
                     conv_durations.append(duration)
                     responses_per_minute.append(len(entries) / (duration / 60.0) if entries else 0.0)
+                    if conv_word_total > 0:
+                        words_per_minute.append(conv_word_total / (duration / 60.0))
                 if len(times) > 1:
                     response_gaps.extend(np.diff(times))
 
@@ -117,6 +131,7 @@ def load_narration() -> AggregateMetrics:
         conv_durations,
         responses_per_minute,
         response_gaps,
+        words_per_minute,
         total_videos=len(video_ids),
         total_conversations=conv_count,
         total_responses=len(response_lengths),
@@ -173,7 +188,7 @@ def render_combined_comparison(goal: AggregateMetrics, narration: AggregateMetri
             goal.response_lengths,
             narration.response_lengths,
             "",
-            "Resp. Lengths (Words)",
+            "Resp. Lengths (#Words)",
             80,
             100,
         ),
@@ -181,17 +196,17 @@ def render_combined_comparison(goal: AggregateMetrics, narration: AggregateMetri
             goal.responses_per_minute,
             narration.responses_per_minute,
             "",
-            "Resp. Density (Resp. / min)",
+            "Resp. Density (#Resp. / min)",
             120,
             60,
         ),
         (
-            goal.conv_durations,
-            narration.conv_durations,
+            goal.words_per_minute,
+            narration.words_per_minute,
             "",
-            "Conv. Duration (s)",
+            "Gen. Load (#Words / Min)",
             120,
-            1000,
+            400,
         ),
     ]
     # set fontsize for the plot

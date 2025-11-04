@@ -30,8 +30,8 @@ CONFIG_DISPLAY_NAMES: Dict[str, str] = {
     "base": "Ours",
     "random_2": "RD-S",
     "random_m": "RD-M",
-    "round_robin_2": "RR-S",
-    "round_robin_m": "RR-M",
+    "round_robin_2": "ER-S",
+    "round_robin_m": "ER-M",
 }
 DEFAULT_NUM_VIDEOS: Tuple[int, ...] = (1,2,3,4,5,6,7,8,9,10)
 DEFAULT_ABLATION_NUM_VIDEOS: Tuple[int, ...] = (5, 10, 15)
@@ -126,12 +126,12 @@ ABLATION_GROUPS = {
     "chunk": {
         "title": "Chunk Size Ablation",
         "configs": [
-            ("base", "Default (Chunk 2)"),
-            ("chunk_ablation1", "Chunk 1"),
-            ("chunk_ablation2", "Chunk 4"),
-            ("chunk_ablation3", "Chunk 8"),
-            ("chunk_ablation4", "Chunk 16"),
-            ("chunk_ablation5", "Chunk 32"),
+            ("chunk_ablation1", "C 1"),
+            ("base", "C 2 (Ours))"),
+            ("chunk_ablation2", "C 4"),
+            ("chunk_ablation3", "C 8"),
+            ("chunk_ablation4", "C 16"),
+            ("chunk_ablation5", "C 32"),
         ],
         "num_videos": [5, 10, 15],
         "slug": "chunk_ablation",
@@ -139,17 +139,17 @@ ABLATION_GROUPS = {
     "factor": {
         "title": "Factor Ablation",
         "configs": [
-            ("base", "Default (0.2)"),
-            ("factor_ablation1", "Factor 0"),
-            ("factor_ablation2", "Factor 0.1"),
-            ("factor_ablation3", "Factor 0.3"),
-            ("factor_ablation4", "Factor 0.4"),
-            ("factor_ablation5", "Factor 0.5"),
-            ("factor_ablation6", "Factor 0.6"),
-            ("factor_ablation7", "Factor 0.7"),
-            ("factor_ablation8", "Factor 0.8"),
-            ("factor_ablation9", "Factor 0.9"),
-            ("factor_ablation10", "Factor 1.0"),
+            ("base", "Ours (0.2)"),
+            ("factor_ablation1", "Thr 0"),
+            ("factor_ablation2", "Thr 0.1"),
+            ("factor_ablation3", "Thr 0.3"),
+            ("factor_ablation4", "Thr 0.4"),
+            ("factor_ablation5", "Thr 0.5"),
+            ("factor_ablation6", "Thr 0.6"),
+            ("factor_ablation7", "Thr 0.7"),
+            ("factor_ablation8", "Thr 0.8"),
+            ("factor_ablation9", "Thr 0.9"),
+            ("factor_ablation10", "Thr 1.0"),
         ],
         "num_videos": [5, 10, 15],
         "slug": "factor_ablation",
@@ -159,38 +159,38 @@ ABLATION_GROUPS = {
         "grouped_configs": [
             ("1", [
                 ("consumption_ablation1_base", "Base"),
-                ("consumption_ablation1_rr_2", "RR-2"),
-                ("consumption_ablation1_rr_m", "RR-m"),
-                ("consumption_ablation1_rand_2", "Rand-2"),
-                ("consumption_ablation1_rand_m", "Rand-m"),
+                ("consumption_ablation1_rr_2", "ER-S"),
+                ("consumption_ablation1_rr_m", "ER-M"),
+                ("consumption_ablation1_rand_2", "RD-S"),
+                ("consumption_ablation1_rand_m", "RD-M"),
             ]),
             ("2", [
                 ("consumption_ablation2_base", "Base"),
-                ("consumption_ablation2_rr_2", "RR-2"),
-                ("consumption_ablation2_rr_m", "RR-m"),
-                ("consumption_ablation2_rand_2", "Rand-2"),
-                ("consumption_ablation2_rand_m", "Rand-m"),
+                ("consumption_ablation2_rr_2", "ER-S"),
+                ("consumption_ablation2_rr_m", "ER-M"),
+                ("consumption_ablation2_rand_2", "RD-S"),
+                ("consumption_ablation2_rand_m", "RD-M"),
             ]),
-            ("3", [
+            ("3 (Ours)", [
                 ("base", "Base"),
-                ("round_robin_2", "RR-2"),
-                ("round_robin_m", "RR-m"),
-                ("random_2", "Rand-2"),
-                ("random_m", "Rand-m"),
+                ("round_robin_2", "ER-S"),
+                ("round_robin_m", "ER-M"),
+                ("random_2", "RD-S"),
+                ("random_m", "RD-M"),
             ]),
             ("4", [
                 ("consumption_ablation3_base", "Base"),
-                ("consumption_ablation3_rr_2", "RR-2"),
-                ("consumption_ablation3_rr_m", "RR-m"),
-                ("consumption_ablation3_rand_2", "Rand-2"),
-                ("consumption_ablation3_rand_m", "Rand-m"),
+                ("consumption_ablation3_rr_2", "ER-S"),
+                ("consumption_ablation3_rr_m", "ER-M"),
+                ("consumption_ablation3_rand_2", "RD-S"),
+                ("consumption_ablation3_rand_m", "RD-M"),
             ]),
             ("5", [
                 ("consumption_ablation4_base", "Base"),
-                ("consumption_ablation4_rr_2", "RR-2"),
-                ("consumption_ablation4_rr_m", "RR-m"),
-                ("consumption_ablation4_rand_2", "Rand-2"),
-                ("consumption_ablation4_rand_m", "Rand-m"),
+                ("consumption_ablation4_rr_2", "ER-S"),
+                ("consumption_ablation4_rr_m", "ER-M"),
+                ("consumption_ablation4_rand_2", "RD-S"),
+                ("consumption_ablation4_rand_m", "RD-M"),
             ]),
         ],
         "num_videos": [5],
@@ -254,7 +254,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--primary-label",
         type=str,
-        default=None,
+        default="4090",
         help="Label for the primary results (default: base directory name).",
     )
     parser.add_argument(
@@ -746,9 +746,17 @@ def plot_overall_bar(
             edgecolor="black",
             linewidth=0.4,
         )
+        ax.text(
+            x[idx],
+            mean * 1.02 if mean >= 0 else mean * 0.98,
+            f"{mean:.2f}",
+            ha="center",
+            va="bottom" if mean >= 0 else "top",
+            fontsize=BAR_LABEL_FONT_SIZE,
+        )
     ax.set_ylabel(y_label)
     ax.set_xticks(x)
-    ax.set_xticklabels(config_labels, rotation=20, ha="right")
+    ax.set_xticklabels(config_labels)
     ax.set_xlabel("Config ID")
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -953,7 +961,6 @@ def plot_latency_components_by_config(
             label=_display_config_name(config_id),
         )
 
-    ax.set_title("Latency Components by Config")
     ax.set_ylabel("Time (s)")
     ax.set_xticks(x)
     ax.set_xticklabels(component_labels, rotation=25, ha="right")
@@ -1494,7 +1501,7 @@ def plot_rebuffer_baseline_comparison_across_bases(
             if math.isfinite(value):
                 ax.text(
                     xpos,
-                    value + 0.02 * max(value, 1.0),
+                    value + 0.1 * max(value, 1.0),
                     f"{value:.2f}",
                     ha="center",
                     va="bottom",
@@ -1668,7 +1675,6 @@ def plot_roundrobin_ratio(
         linewidth=1.6,
         markersize=4,
         capsize=3,
-        label="RR-2 / RR-m",
     )
 
     ax.axhline(1.0, color="red", linestyle="--", linewidth=1.0, alpha=0.6)
@@ -1691,8 +1697,6 @@ def plot_roundrobin_ratio(
     ax.set_xticks(target_numbers)
     ax.grid(alpha=0.3)
     handles, labels = ax.get_legend_handles_labels()
-    if labels:
-        ax.legend(frameon=False)
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2763,7 +2767,7 @@ def main() -> None:
                     comparison_label,
                     server_compare_path,
                 ):
-                    print(f"[{data_source}] Saved baseline rebuffer comparison to {server_compare_path}")
+                    print(f"[{data_source}] Saved server rebuffer comparison to {server_compare_path}")
                 else:
                     print(
                         f"[{data_source}] Skipped baseline rebuffer comparison plot; no valid overlapping data."

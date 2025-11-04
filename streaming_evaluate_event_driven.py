@@ -4470,6 +4470,16 @@ def main():
         Config.BUFFER_URGENT_VALUE = 0
         Config.SCHEDULING_METHOD = 'round_robin'
         Config.GENERATION_CHUNK_SIZE = 1000
+    elif config_id == 'single_comp_ablation1':
+        Config.RL_WEIGHT = 0
+    elif config_id == 'single_comp_ablation2':
+        Config.AGE_WEIGHT = 0
+    elif config_id == 'single_comp_ablation3':
+        Config.BUFFER_URGENT_VALUE = 0
+    elif config_id == 'single_comp_ablation4':
+        Config.SCHEDULING_METHOD = 'round_robin'
+    elif config_id == 'single_comp_ablation5':
+        Config.GENERATION_CHUNK_SIZE = 1000
     elif config_id == 'chunk_ablation1':
         Config.GENERATION_CHUNK_SIZE = 1
     elif config_id == 'chunk_ablation2':
