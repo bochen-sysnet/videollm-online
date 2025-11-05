@@ -83,8 +83,10 @@ KV_SECONDARY_METRIC = "kv_transfer_per_second"
 KV_OFFLOAD_SLOPE = "kv_offload_slope"
 KV_RELOAD_SLOPE = "kv_reload_slope"
 TIMING_BREAKDOWN_METRIC = "timing_breakdown"
-BAR_LABEL_FONT_SIZE = 14
-LEGEND_FONT_SIZE = 10
+BAR_LABEL_FONT_SIZE = 12
+LEGEND_FONT_SIZE = 12
+TICK_FONT_SIZE = 16
+LABEL_FONT_SIZE = 20
 DISTRIBUTION_CONFIG_ID = "max_frames_memory_test"
 
 EXTEND_METRICS = {
@@ -196,6 +198,19 @@ ABLATION_GROUPS = {
         "num_videos": [5],
         "slug": "consumption_ablation",
     },
+    "single_comp": {
+        "title": "Single Component Ablation",
+        "configs": [
+            ("base", "Ours"),
+            ("single_comp_ablation1", "RL"),
+            ("single_comp_ablation2", "Age"),
+            ("single_comp_ablation3", "Thr."),
+            ("single_comp_ablation4", "LBF"),
+            ("single_comp_ablation5", "Slice"),
+        ],
+        "num_videos": [5, 10, 15],
+        "slug": "single_comp_ablation",
+    },
 }
 
 ABLATION_CONFIG_SET: Set[str] = set()
@@ -294,7 +309,7 @@ def parse_args() -> argparse.Namespace:
         "--per-video-numbers",
         nargs="+",
         type=int,
-        default=[3, 5, 8, 10],
+        default=[3, 5, 10],
         help="Video counts to display in per-video plots.",
     )
     parser.add_argument(
@@ -638,6 +653,30 @@ def _aggregate_across_videos(
     return float(arr.mean()), float(arr.std(ddof=0))
 
 
+def _annotate_bar(
+    ax: plt.Axes,
+    xpos: float,
+    value: float,
+    err: float = 0.0,
+    fontsize: int = BAR_LABEL_FONT_SIZE,
+) -> None:
+    if not math.isfinite(value):
+        return
+    safe_err = err if err and math.isfinite(err) else 0.0
+    padding = max(abs(value) * 0.02, 0)
+    offset = safe_err + padding
+    ypos = value + offset if value >= 0 else value - offset
+    ax.text(
+        xpos,
+        ypos,
+        f"{value:.2f}",
+        ha="center",
+        va="bottom" if value >= 0 else "top",
+        fontsize=fontsize,
+        rotation=90,
+    )
+
+
 def plot_grouped_bar(
     metric_key: str,
     title: str,
@@ -676,8 +715,9 @@ def plot_grouped_bar(
 
         has_data = True
         color, hatch = palette[idx]
+        positions = x + offset
         ax.bar(
-            x + offset,
+            positions,
             means_arr,
             width=bar_width * 0.95,
             yerr=stds_arr,
@@ -688,15 +728,17 @@ def plot_grouped_bar(
             linewidth=0.4,
             label=_display_config_name(config_id),
         )
+        for xpos, value, err in zip(positions, means_arr, stds_arr):
+            _annotate_bar(ax, xpos, value, err, fontsize=BAR_LABEL_FONT_SIZE)
 
-    ax.set_title(title)
-    ax.set_ylabel(y_label)
+    ax.set_ylabel(y_label, fontsize=LABEL_FONT_SIZE)
     ax.set_xticks(x)
-    ax.set_xticklabels([str(n) for n in num_videos])
-    ax.set_xlabel("Number of Videos")
+    ax.set_xticklabels([str(n) for n in num_videos], fontsize=TICK_FONT_SIZE)
+    # set y tick fontsize to TICK_FONT_SIZE
+    ax.tick_params(axis='y', labelsize=TICK_FONT_SIZE)
+    ax.set_xlabel("Number of Users", fontsize=LABEL_FONT_SIZE)
     if has_data:
-        ax.legend(frameon=False)
-        fig.tight_layout(pad=0.6)
+        ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -746,14 +788,7 @@ def plot_overall_bar(
             edgecolor="black",
             linewidth=0.4,
         )
-        ax.text(
-            x[idx],
-            mean * 1.02 if mean >= 0 else mean * 0.98,
-            f"{mean:.2f}",
-            ha="center",
-            va="bottom" if mean >= 0 else "top",
-            fontsize=BAR_LABEL_FONT_SIZE,
-        )
+        _annotate_bar(ax, x[idx], mean, std)
     ax.set_ylabel(y_label)
     ax.set_xticks(x)
     ax.set_xticklabels(config_labels)
@@ -807,6 +842,7 @@ def plot_base_delay_trends(
         has_data = True
         color, hatch = palette[idx]
         offset = (idx - (len(DELAY_METRICS) - 1) / 2) * bar_width
+        bars_x = x + offset
         ax.bar(
             x + offset,
             means_arr,
@@ -819,20 +855,21 @@ def plot_base_delay_trends(
             linewidth=0.4,
             label=title,
         )
+        for xpos, val, err in zip(bars_x, means_arr, stds):
+            _annotate_bar(ax, xpos, val, err)
 
     if not has_data:
         plt.close(fig)
         return False
 
-    ax.set_title(f"{BASE_CONFIG_ID.title()} Delay vs Number of Videos", fontsize=10)
-    ax.set_xlabel("Number of Videos", fontsize=10)
-    ax.set_ylabel("Delay (s)", fontsize=10)
+    ax.set_xlabel("Number of Users", fontsize=LABEL_FONT_SIZE)
+    ax.set_ylabel("Rebuffering (s)", fontsize=LABEL_FONT_SIZE)
     ax.set_xticks(x)
-    ax.set_xticklabels([str(n) for n in num_videos], fontsize=10)
+    ax.set_xticklabels([str(n) for n in num_videos], fontsize=TICK_FONT_SIZE)
+    ax.tick_params(axis='y', labelsize=TICK_FONT_SIZE)
     ax.grid(axis="y", alpha=0.3)
-    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
+    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, loc="best")
 
-    fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -878,8 +915,9 @@ def plot_delay_comparison_by_config(
     fig, ax = plt.subplots(figsize=(3.4, 2.6))
     for idx, (_, title, _) in enumerate(DELAY_METRICS):
         color, hatch = palette[idx]
+        positions = x + (idx - (len(delay_keys) - 1) / 2) * bar_width
         ax.bar(
-            x + (idx - (len(delay_keys) - 1) / 2) * bar_width,
+            positions,
             arr[:, idx],
             width=bar_width * 0.95,
             color=color,
@@ -888,12 +926,8 @@ def plot_delay_comparison_by_config(
             linewidth=0.4,
             label=title,
         )
-
-    # show numbers on bars
-    for idx, (_, _, title) in enumerate(DELAY_METRICS):
-        color, hatch = palette[idx]
-        for i in range(len(config_labels)):
-            ax.text(x[i] + (idx - (len(delay_keys) - 1) / 2) * bar_width, arr[i, idx], f"{arr[i, idx]:.2f}", ha="center", va="bottom", color=color, rotation=90)
+        for xpos, value in zip(positions, arr[:, idx]):
+            _annotate_bar(ax, xpos, value, 0.0)
 
     ax.set_ylabel("Rebuffering (s)")
     ax.set_xticks(x)
@@ -948,8 +982,9 @@ def plot_latency_components_by_config(
         has_data = True
         offset = (idx - (num_configs - 1) / 2) * bar_width
         color, hatch = palette[idx]
+        positions = x + offset
         ax.bar(
-            x + offset,
+            positions,
             means_arr,
             width=bar_width * 0.95,
             yerr=stds,
@@ -960,6 +995,8 @@ def plot_latency_components_by_config(
             linewidth=0.4,
             label=_display_config_name(config_id),
         )
+        for xpos, value, err in zip(positions, means_arr, stds):
+            _annotate_bar(ax, xpos, value, err)
 
     ax.set_ylabel("Time (s)")
     ax.set_xticks(x)
@@ -1027,8 +1064,9 @@ def plot_scheduling_components_by_config(
         if np.all(~np.isfinite(means_arr)):
             continue
         offset = (idx - (len(component_keys) - 1) / 2) * bar_width
+        positions = x + offset
         ax.bar(
-            x + offset,
+            positions,
             means_arr,
             width=bar_width * 0.95,
             yerr=stds_arr,
@@ -1039,6 +1077,8 @@ def plot_scheduling_components_by_config(
             linewidth=0.4,
             label=label,
         )
+        for xpos, value, err in zip(positions, means_arr, stds_arr):
+            _annotate_bar(ax, xpos, value, err)
 
     ax.set_ylabel("Cumulative Score")
     ax.set_xticks(x)
@@ -1095,8 +1135,9 @@ def plot_scheduling_components_base_vs_videos(
         has_data = True
         color, hatch = palette[idx]
         offset = (idx - (len(num_videos) - 1) / 2) * bar_width
+        positions = x + offset
         ax.bar(
-            x + offset,
+            positions,
             means_arr,
             width=bar_width * 0.95,
             yerr=stds,
@@ -1107,6 +1148,8 @@ def plot_scheduling_components_base_vs_videos(
             linewidth=0.4,
             label=f"N={n}",
         )
+        for xpos, value, err in zip(positions, means_arr, stds):
+            _annotate_bar(ax, xpos, value, err)
 
     if not has_data:
         plt.close(fig)
@@ -1134,9 +1177,9 @@ def plot_memory_breakdown_multi_videos(
     """Visualize memory components across multiple video counts for a single config."""
     target_nums = [int(n) for n in target_num_videos]
     component_defs = [
-        ("model_params_memory", "Params"),
-        ("combined_dynamic_memory", "KV (GPU)"),
-        ("cpu_memory_growth_peak", "KV (CPU)"),
+        ("model_params_memory", "Params (G)"),
+        ("combined_dynamic_memory", "KV (G)"),
+        ("cpu_memory_growth_peak", "KV (C)"),
     ]
 
     def _extract(metric_key: str, num: int) -> Tuple[float, float, List[float]]:
@@ -1193,8 +1236,8 @@ def plot_memory_breakdown_multi_videos(
             arr = np.asarray(combined, dtype=float)
             gpu_totals[num] = (float(arr.mean()), float(arr.std(ddof=0)))
         else:
-            model_mean, model_std = component_stats["Params"].get(num, (float("nan"), float("nan")))
-            dyn_mean, dyn_std = component_stats["KV (GPU)"].get(num, (float("nan"), float("nan")))
+            model_mean, model_std = component_stats["Params (G)"].get(num, (float("nan"), float("nan")))
+            dyn_mean, dyn_std = component_stats["KV (G)"].get(num, (float("nan"), float("nan")))
             if math.isfinite(model_mean) and math.isfinite(dyn_mean):
                 combined_mean = model_mean + dyn_mean
                 # simple std combination if available
@@ -1209,7 +1252,7 @@ def plot_memory_breakdown_multi_videos(
     component_stats["GPU Total"] = gpu_totals
 
     # Filter out components lacking any finite data
-    components_order = ["Params", "KV (GPU)", "GPU Total", "KV (CPU)"]
+    components_order = ["Params (G)", "KV (G)", "KV (C)"]
     components = []
     for label in components_order:
         stats_per_num = component_stats.get(label, {})
@@ -1250,8 +1293,9 @@ def plot_memory_breakdown_multi_videos(
             continue
         stds_arr = np.asarray(stds, dtype=float)
         stds_arr[~np.isfinite(stds_arr)] = 0.0
+        positions = x + offset
         ax.bar(
-            x + offset,
+            positions,
             means_arr,
             width=bar_width * 0.9,
             yerr=stds_arr,
@@ -1262,10 +1306,13 @@ def plot_memory_breakdown_multi_videos(
             linewidth=0.4,
             label=f"N={num}",
         )
+        for xpos, value, err in zip(positions, means_arr, stds_arr):
+            _annotate_bar(ax, xpos, value, err)
 
-    ax.set_ylabel("Peak Memory (MB)")
+    ax.set_ylabel("Memory (MB)", fontsize=LABEL_FONT_SIZE)
     ax.set_xticks(x)
-    ax.set_xticklabels(components)
+    ax.set_xticklabels(components, fontsize=TICK_FONT_SIZE)
+    ax.tick_params(axis='y', labelsize=TICK_FONT_SIZE)
     ax.grid(axis="y", alpha=0.3)
     positive_values = [
         val for row in means_matrix for val in row if math.isfinite(val) and val > 0
@@ -1275,9 +1322,8 @@ def plot_memory_breakdown_multi_videos(
         max_pos = max(positive_values)
         ax.set_yscale("log")
         ax.set_ylim(min_pos / 1.8, max_pos * 1.6)
-    ax.legend(frameon=False, ncol=1)
+    ax.legend(frameon=False, ncol=1, fontsize=LEGEND_FONT_SIZE, loc="best")
 
-    fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -1373,8 +1419,9 @@ def plot_memory_speed_ratios(
         if np.all(~np.isfinite(values_arr)):
             continue
         plotted = True
+        positions = x + offset
         ax.bar(
-            x + offset,
+            positions,
             values_arr,
             width=bar_width * 0.9,
             color=color,
@@ -1383,18 +1430,8 @@ def plot_memory_speed_ratios(
             linewidth=0.4,
             label=f"N={num}",
         )
-        for xpos, value, label in zip(x + offset, values_arr, categories):
-            if label not in {"CPU", "GPU"} or not math.isfinite(value):
-                continue
-            ax.text(
-                xpos,
-                value + 0.03,
-                f"{value:.2f}%",
-                ha="center",
-                va="bottom",
-                fontsize=BAR_LABEL_FONT_SIZE,
-                rotation=90,
-            )
+        for xpos, value in zip(positions, values_arr):
+            _annotate_bar(ax, xpos, value, 0.0)
 
     if not plotted:
         plt.close(fig)
@@ -1484,8 +1521,9 @@ def plot_rebuffer_baseline_comparison_across_bases(
             continue
         plotted = True
         offset = (dataset_idx - (len(dataset_entries) - 1) / 2) * bar_width
+        positions = x + offset
         ax.bar(
-            x + offset,
+            positions,
             dataset_means,
             width=bar_width * 0.95,
             yerr=dataset_stds,
@@ -1496,18 +1534,8 @@ def plot_rebuffer_baseline_comparison_across_bases(
             linewidth=0.4,
             label=label,
         )
-
-        for xpos, value in zip(x + offset, dataset_means):
-            if math.isfinite(value):
-                ax.text(
-                    xpos,
-                    value + 0.1 * max(value, 1.0),
-                    f"{value:.2f}",
-                    ha="center",
-                    va="bottom",
-                    fontsize=BAR_LABEL_FONT_SIZE,
-                    rotation=90,
-                )
+        for xpos, value, err in zip(positions, dataset_means, dataset_stds):
+            _annotate_bar(ax, xpos, value, err)
 
     if not plotted:
         plt.close(fig)
@@ -1518,7 +1546,7 @@ def plot_rebuffer_baseline_comparison_across_bases(
     ax.set_ylabel("Rebuffering (s)", fontsize=10)
     ax.tick_params(axis="y", labelsize=10)
     ax.set_xticks(x)
-    ax.set_xticklabels(cfg_labels, rotation=20, ha="right", fontsize=10)
+    ax.set_xticklabels(cfg_labels, fontsize=10)
     ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
     ax.grid(axis="y", alpha=0.3)
 
@@ -2205,8 +2233,9 @@ def plot_timing_breakdown(
         if np.all(~np.isfinite(means_arr)):
             continue
         offset = (idx - (len(ds_order) - 1) / 2) * bar_width
+        positions = x + offset
         ax.bar(
-            x + offset,
+            positions,
             means_arr,
             width=bar_width * 0.95,
             yerr=stds_arr,
@@ -2217,18 +2246,8 @@ def plot_timing_breakdown(
             linewidth=0.4,
             label=data_source.title(),
         )
-        for xpos, value, comp_label in zip(x + offset, means_arr, [lbl for _, lbl in components]):
-            if comp_label not in {"Offload", "Reload"} or not math.isfinite(value):
-                continue
-            ax.text(
-                xpos,
-                value + 0.08 * max(value, 0.5),
-                f"{value:.2f}",
-                ha="center",
-                va="bottom",
-                fontsize=BAR_LABEL_FONT_SIZE,
-                rotation=90,
-            )
+        for xpos, value, err in zip(positions, means_arr, stds_arr):
+            _annotate_bar(ax, xpos, value, err)
 
     ax.set_ylabel("Time (s)", fontsize=10)
     # set y tick size to 10
@@ -2330,8 +2349,9 @@ def plot_rebuffering_ablation_group(
             stds_arr[~np.isfinite(stds_arr)] = 0.0
             offset = (idx - (len(valid_baselines) - 1) / 2) * bar_width
             color, hatch = palette[idx]
+            positions = x + offset
             ax.bar(
-                x + offset,
+                positions,
                 means_arr,
                 width=bar_width * 0.95,
                 yerr=stds_arr,
@@ -2342,8 +2362,10 @@ def plot_rebuffering_ablation_group(
                 linewidth=0.4,
                 label=baseline_label,
             )
+            for xpos, value, err in zip(positions, means_arr, stds_arr):
+                _annotate_bar(ax, xpos, value, err)
 
-        ax.set_ylabel("Rebuffering Time (s)")
+        ax.set_ylabel("Rebuffering (s)")
         ax.set_xticks(x)
         ax.set_xticklabels(group_labels)
         ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, loc="upper left")
@@ -2368,8 +2390,124 @@ def plot_rebuffering_ablation_group(
         return False
 
     configure_plot_style()
-    palette = _color_hatch_cycle(len(ablation_configs))
     num_videos = selected_nums
+
+    if group_key in {"factor", "chunk"}:
+        if group_key == "factor":
+            factor_map = {"base": 0.2}
+            factor_values = {
+                1: 0.0,
+                2: 0.1,
+                3: 0.3,
+                4: 0.4,
+                5: 0.5,
+                6: 0.6,
+                7: 0.7,
+                8: 0.8,
+                9: 0.9,
+                10: 1.0,
+            }
+            for idx_val, threshold in factor_values.items():
+                factor_map[f"factor_ablation{idx_val}"] = threshold
+            baseline_x = factor_map["base"]
+        else:  # chunk ablation
+            factor_map = {
+                "chunk_ablation1": 1,
+                "base": 2,
+                "chunk_ablation2": 4,
+                "chunk_ablation3": 8,
+                "chunk_ablation4": 16,
+                "chunk_ablation5": 32,
+            }
+            baseline_x = 2
+
+        value_triplets: List[Tuple[float, str, str]] = []
+        for cfg, label in ablation_configs:
+            x_val = factor_map.get(cfg)
+            if x_val is None or not math.isfinite(x_val):
+                continue
+            value_triplets.append((float(x_val), cfg, label))
+        if not value_triplets:
+            return False
+        value_triplets.sort(key=lambda t: t[0])
+
+        xs = [item[0] for item in value_triplets]
+        configs_filtered = [item[1] for item in value_triplets]
+
+        fig, ax = plt.subplots(figsize=(4.0, 2.8))
+        colors = _scientific_colors()
+        plotted = False
+
+        for idx, num in enumerate(num_videos):
+            means = []
+            stds = []
+            for cfg in configs_filtered:
+                entry = rebuffer_stats.get(cfg, {}).get(num, {})
+                mean = entry.get("mean")
+                std = entry.get("std", 0.0)
+                if mean is None or not math.isfinite(mean):
+                    means.append(float("nan"))
+                    stds.append(float("nan"))
+                else:
+                    means.append(float(mean))
+                    stds.append(float(std if std is not None and math.isfinite(std) else 0.0))
+            means_arr = np.asarray(means, dtype=float)
+            stds_arr = np.asarray(stds, dtype=float)
+            if np.all(~np.isfinite(means_arr)):
+                continue
+
+            plotted = True
+            color = colors[idx % len(colors)]
+            ax.errorbar(
+                xs,
+                means_arr,
+                yerr=stds_arr,
+                marker="o",
+                linestyle="-",
+                linewidth=1.8,
+                markersize=4,
+                capsize=3,
+                color=color,
+                label=f"N={num}",
+            )
+
+        if not plotted:
+            plt.close(fig)
+            return False
+
+        ax.axvline(
+            baseline_x,
+            color="#333333",
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.7,
+        )
+        label_text = "Ours" if group_key == "factor" else "Chunk=2"
+        ylim = ax.get_ylim()
+        ax.text(
+            baseline_x,
+            ylim[1] - (ylim[1] - ylim[0]) * 0.05,
+            label_text,
+            ha="left",
+            va="top",
+            fontsize=BAR_LABEL_FONT_SIZE,
+            rotation=90,
+            color="#333333",
+        )
+        ax.set_xlabel("Threshold" if group_key == "factor" else "Chunk Size")
+        ax.set_ylabel("Rebuffering (s)")
+        ax.set_xticks(xs)
+        ax.set_xticklabels([f"{x:.1f}" if group_key == "factor" else f"{int(x)}" for x in xs])
+        ax.grid(alpha=0.3)
+        ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, ncol=3, loc="best")
+        fig.tight_layout(pad=0.8)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, bbox_inches="tight")
+        plt.close(fig)
+        return True
+
+    # Default bar plot for other ablation groups
+    palette = _color_hatch_cycle(len(ablation_configs))
     x_positions = np.arange(len(num_videos))
     bar_width = min(0.75 / max(len(ablation_configs), 1), 0.18)
 
@@ -2397,8 +2535,9 @@ def plot_rebuffering_ablation_group(
 
         offset = (idx - (len(ablation_configs) - 1) / 2) * bar_width
         color, hatch = palette[idx]
+        positions = x_positions + offset
         ax.bar(
-            x_positions + offset,
+            positions,
             means_arr,
             width=bar_width * 0.95,
             yerr=stds_arr,
@@ -2409,17 +2548,20 @@ def plot_rebuffering_ablation_group(
             linewidth=0.4,
             label=label,
         )
+        for xpos, value, err in zip(positions, means_arr, stds_arr):
+            _annotate_bar(ax, xpos, value, err)
 
     if not plotted:
         plt.close(fig)
         return False
 
-    ax.set_ylabel("Rebuffering Time (s)")
+    ax.set_ylabel("Rebuffering (s)", fontsize=LABEL_FONT_SIZE)
     ax.set_xticks(x_positions)
-    ax.set_xticklabels([str(n) for n in num_videos])
-    ax.set_xlabel("Number of Users")
+    ax.set_xticklabels([str(n) for n in num_videos], fontsize=TICK_FONT_SIZE)
+    ax.set_xlabel("Number of Users", fontsize=LABEL_FONT_SIZE)
+    ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE)
     ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, ncol=2, loc="upper left")
-    fig.tight_layout(pad=0.8)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -2594,6 +2736,17 @@ def main() -> None:
                             "std": std,
                             "values": list(values),
                         }
+
+            # Reuse base perplexity for RD-M and ER-M variants
+            perplexity_stats = summary_stats.get("perplexity")
+            if perplexity_stats:
+                base_stats = perplexity_stats.get(BASE_CONFIG_ID)
+                if base_stats:
+                    for alias in ("random_m", "round_robin_m"):
+                        perplexity_stats[alias] = {
+                            num: dict(stats_dict)
+                            for num, stats_dict in base_stats.items()
+                        }
             summary_stats_map[key][data_source] = summary_stats
 
     primary_summary_stats = summary_stats_map.get("primary", {})
@@ -2730,7 +2883,7 @@ def main() -> None:
         if plot_memory_breakdown_multi_videos(
             summary_stats,
             "max_frames_memory_test",
-            [3, 5, 8, 10],
+            [3, 5, 10],
             memory_breakdown_path,
         ):
             print(f"[{data_source}] Saved memory breakdown plot to {memory_breakdown_path}")

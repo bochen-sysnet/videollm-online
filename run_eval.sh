@@ -2,11 +2,7 @@
 
 # Define lists
 data_sources=("goalstep" "narration")
-# num_videos_list=(5)
-# ablation video number list
 num_videos_list=(5 10 15)
-# full evaluation
-# num_videos_list=(3 5 8 10)
 iterations=(1 2 3 4 5)
 
 # full evaluation
