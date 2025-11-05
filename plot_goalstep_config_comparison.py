@@ -1863,10 +1863,10 @@ def _plot_cdf_for_sources(
         ax.text(
             mean_val,
             0.75 - idx * 0.5,
-            f"{label} mean\n{mean_val:.1f}",
+            f"{label} mean\n{mean_val:.2f}",
             ha="left",
             va="center",
-            fontsize=BAR_LABEL_FONT_SIZE,
+            fontsize=LEGEND_FONT_SIZE,
             color=color,
             bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.7),
         )
@@ -2111,7 +2111,7 @@ def plot_buffering_components_comparison(
     output_path: Path,
 ) -> bool:
     metric_keys = [
-        ("rebuffer_time", "Total Rebuffering"),
+        ("rebuffer_time", "Total"),
         ("processing_delay", "Processing"),
         ("queuing_delay", "Queuing"),
         ("network_delay", "Networking"),
@@ -2157,14 +2157,18 @@ def plot_buffering_components_comparison(
             linewidth=0.4,
             label=methods[idx],
         )
+        # annotate the bar with the mean value
+        for xpos, value, err in zip(x + offset, means, stds):
+            _annotate_bar(ax, xpos, value, err, fontsize=BAR_LABEL_FONT_SIZE)
 
-    ax.set_ylabel("Time (s)")
+    ax.set_ylabel("Rebuffering (s)", fontsize=16)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels)
+    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=12)
+    ax.tick_params(axis='y', labelsize=12)
     ax.grid(axis="y", alpha=0.3)
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
 
-    fig.tight_layout(pad=0.6)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -2392,7 +2396,7 @@ def plot_rebuffering_ablation_group(
     configure_plot_style()
     num_videos = selected_nums
 
-    if group_key in {"factor", "chunk"}:
+    if group_key in {"factor", "chunk", "rl"}:
         if group_key == "factor":
             factor_map = {"base": 0.2}
             factor_values = {
@@ -2409,6 +2413,15 @@ def plot_rebuffering_ablation_group(
             }
             for idx_val, threshold in factor_values.items():
                 factor_map[f"factor_ablation{idx_val}"] = threshold
+            baseline_x = factor_map["base"]
+        elif group_key == "rl":
+            factor_map = {"base": 0.1}
+            rl_map = {
+                "rl_ablation1": 0.0,
+                "rl_ablation2": 1.0,
+                "rl_ablation3": 10.0,
+            }
+            factor_map.update(rl_map)
             baseline_x = factor_map["base"]
         else:  # chunk ablation
             factor_map = {
@@ -2482,7 +2495,12 @@ def plot_rebuffering_ablation_group(
             linewidth=1.2,
             alpha=0.7,
         )
-        label_text = "Ours" if group_key == "factor" else "Chunk=2"
+        if group_key == "factor":
+            label_text = "Ours"
+        elif group_key == "rl":
+            label_text = "Ours"
+        else:
+            label_text = "Chunk=2"
         ylim = ax.get_ylim()
         ax.text(
             baseline_x,
