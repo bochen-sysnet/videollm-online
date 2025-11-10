@@ -2042,18 +2042,19 @@ def plot_kv_transfer_scatter(
         ax.text(
             xpos,
             value * 1.05 if value > 0 else 0.02,
-            f"{value:.2f} ms",
+            f"{value:.2f}",
             ha="center",
             va="bottom",
-            fontsize=BAR_LABEL_FONT_SIZE,
+            fontsize=10,
         )
 
-    ax.set_ylabel("Time (ms)")
+    ax.set_ylabel("Time (ms)", fontsize=10)
+    ax.tick_params(axis="y", labelsize=10)
     ax.set_xticks(x)
-    ax.set_xticklabels([name for name, _ in components], rotation=20, ha="right")
+    ax.set_xticklabels([name for name, _ in components], rotation=20, ha="right", fontsize=10)
     ax.grid(axis="y", alpha=0.3)
 
-    fig.tight_layout(pad=0.6)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -2067,16 +2068,28 @@ def plot_kv_slope_comparison(
 ) -> bool:
     off_stats = summary_stats.get(KV_OFFLOAD_SLOPE, {}).get(config_id, {})
     reload_stats = summary_stats.get(KV_RELOAD_SLOPE, {}).get(config_id, {})
+    kv_offload_pairs_stats = summary_stats.get(KV_OFFLOAD_SCATTER, {}).get(config_id, {})
+    kv_reload_pairs_stats = summary_stats.get(KV_RELOAD_SCATTER, {}).get(config_id, {})
 
     off_values: List[float] = []
-    for num_map in off_stats.values():
-        raw = num_map.get("values", [])
-        off_values.extend([float(v) for v in raw if v is not None and math.isfinite(v)])
+    for _, stats in off_stats.items():
+        raw = stats.get("values") or []
+        parsed_values = [float(v) for v in raw if v is not None and math.isfinite(v)]
+        if not parsed_values:
+            mean_val = stats.get("mean")
+            if mean_val is not None and math.isfinite(mean_val):
+                parsed_values = [float(mean_val)]
+        off_values.extend(parsed_values)
 
     reload_values: List[float] = []
-    for num_map in reload_stats.values():
-        raw = num_map.get("values", [])
-        reload_values.extend([float(v) for v in raw if v is not None and math.isfinite(v)])
+    for _, stats in reload_stats.items():
+        raw = stats.get("values") or []
+        parsed_values = [float(v) for v in raw if v is not None and math.isfinite(v)]
+        if not parsed_values:
+            mean_val = stats.get("mean")
+            if mean_val is not None and math.isfinite(mean_val):
+                parsed_values = [float(mean_val)]
+        reload_values.extend(parsed_values)
 
     datasets = [off_values, reload_values]
     if not any(values for values in datasets):
@@ -2129,10 +2142,80 @@ def plot_kv_slope_comparison(
     ax.tick_params(axis='x', labelsize=18)
     ax.grid(axis="y", alpha=0.3)
 
-    fig.tight_layout(pad=0.6)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight")
+    inflation_path = output_path.with_name(f"{output_path.stem}_inflation{output_path.suffix}")
+    fig.savefig(inflation_path, bbox_inches="tight")
     plt.close(fig)
+
+    # Scatter plot (per-number) saved alongside the violin figure
+    def extract_kv_pairs(stats_map: Dict[int, Dict[str, Iterable[float]]]) -> List[Tuple[float, float]]:
+        entries: List[Tuple[float, float]] = []
+        for stats in stats_map.values():
+            for pair in stats.get("values", []):
+                if (
+                    isinstance(pair, (list, tuple))
+                    and len(pair) == 2
+                    and pair[0] is not None
+                    and pair[1] is not None
+                    and math.isfinite(pair[0])
+                    and math.isfinite(pair[1])
+                ):
+                    size_mb = float(pair[0])
+                    time_ms = float(pair[1]) * 1000.0
+                    entries.append((size_mb, time_ms))
+        return entries
+
+    def filter_time_outliers(entries: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        if len(entries) < 6:
+            return entries
+        times = np.array([time for _, time in entries])
+        q1 = np.percentile(times, 25)
+        q3 = np.percentile(times, 75)
+        iqr = q3 - q1
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+        return [(size, time) for size, time in entries if lower <= time <= upper]
+
+    off_pairs = filter_time_outliers(extract_kv_pairs(kv_offload_pairs_stats))
+    reload_pairs = filter_time_outliers(extract_kv_pairs(kv_reload_pairs_stats))
+
+    scatter_path = output_path.with_name(f"{output_path.stem}_scatter{output_path.suffix}")
+    scatter_pairs = [
+        ("Offload", off_pairs, colors[0]),
+        ("Reload", reload_pairs, colors[1]),
+    ]
+    if any(pairs for _, pairs, _ in scatter_pairs):
+        configure_plot_style()
+        fig_scatter, ax_scatter = plt.subplots(figsize=(3.8, 2.6))
+        for label, pairs, color in scatter_pairs:
+            if not pairs:
+                continue
+            xs = np.array([size for size, _ in pairs], dtype=float)
+            ys = np.array([val for _, val in pairs], dtype=float)
+            ax_scatter.scatter(
+                xs,
+                ys,
+                color=color,
+                edgecolor="black",
+                linewidth=0.3,
+                s=18,
+                alpha=0.7,
+                label=label,
+            )
+
+        ax_scatter.set_xlabel("KV Cache Size (MB)", fontsize=18)
+        ax_scatter.set_ylabel("Time (ms)", fontsize=18)
+        ax_scatter.tick_params(axis="y", labelsize=18)
+        ax_scatter.tick_params(axis="x", labelsize=18)
+        ax_scatter.grid(axis="y", alpha=0.3)
+        ax_scatter.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, loc="upper left")
+
+        fig_scatter.tight_layout()
+        scatter_path.parent.mkdir(parents=True, exist_ok=True)
+        fig_scatter.savefig(scatter_path, bbox_inches="tight")
+        plt.close(fig_scatter)
+
     return True
 
 
@@ -3037,13 +3120,13 @@ def main() -> None:
         else:
             print(f"[{data_source}] Skipped generation speed vs listening plot; no valid data.")
 
-        kv_scatter_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_kv_transfer_scatter.pdf"
+        kv_scatter_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_kv_transfer_bar.pdf"
         if plot_kv_transfer_scatter(summary_stats, "round_robin_m", kv_scatter_path):
             print(f"[{data_source}] Saved KV transfer scatter to {kv_scatter_path}")
         else:
             print(f"[{data_source}] Skipped KV transfer scatter plot; no valid data.")
 
-        kv_slope_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_kv_transfer_slope.pdf"
+        kv_slope_path = plot_root_base.parent / f"{plot_root_base.name}_{data_source}_kv_transfer.pdf"
         if plot_kv_slope_comparison(summary_stats, "round_robin_m", kv_slope_path):
             print(f"[{data_source}] Saved KV transfer slope plot to {kv_slope_path}")
         else:
