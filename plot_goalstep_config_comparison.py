@@ -86,7 +86,7 @@ TIMING_BREAKDOWN_METRIC = "timing_breakdown"
 BAR_LABEL_FONT_SIZE = 12
 LEGEND_FONT_SIZE = 12
 TICK_FONT_SIZE = 16
-LABEL_FONT_SIZE = 20
+LABEL_FONT_SIZE = 18
 DISTRIBUTION_CONFIG_ID = "max_frames_memory_test"
 
 EXTEND_METRICS = {
@@ -788,12 +788,14 @@ def plot_overall_bar(
             edgecolor="black",
             linewidth=0.4,
         )
-        _annotate_bar(ax, x[idx], mean, std)
-    ax.set_ylabel(y_label)
+        _annotate_bar(ax, x[idx], mean, std, fontsize=BAR_LABEL_FONT_SIZE)
+    ax.set_ylabel(y_label, fontsize=LABEL_FONT_SIZE)
     ax.set_xticks(x)
-    ax.set_xticklabels(config_labels)
-    ax.set_xlabel("Config ID")
-    fig.tight_layout(pad=0.6)
+    ax.set_xticklabels(config_labels, fontsize=TICK_FONT_SIZE, rotation=20, ha="right")
+    # set y tick fontsize to TICK_FONT_SIZE
+    ax.tick_params(axis='y', labelsize=TICK_FONT_SIZE)
+    # ax.set_xlabel("Config ID", fontsize=LABEL_FONT_SIZE)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -949,66 +951,92 @@ def plot_latency_components_by_config(
 ) -> bool:
     """Compare latency components averaged across all videos for each config."""
     configure_plot_style()
-    palette = _color_hatch_cycle(len(config_ids))
-    component_keys = [key for key, _, _ in LATENCY_COMPONENTS]
-    component_labels = [label for _, label, _ in LATENCY_COMPONENTS]
-    num_components = len(component_keys)
-    num_configs = len(config_ids)
-    bar_width = min(0.8 / max(num_configs, 1), 0.18)
-    x = np.arange(num_components)
+    component_defs = [entry for entry in LATENCY_COMPONENTS if entry[1] != "Total"]
+    component_keys = [key for key, _, _ in component_defs]
+    component_labels = [label for _, label, _ in component_defs]
 
-    fig, ax = plt.subplots(figsize=(3.8, 2.6))
-    has_data = False
+    stacked_data: List[List[float]] = []
+    valid_labels: List[str] = []
 
-    for idx, config_id in enumerate(config_ids):
-        means = []
-        stds = []
+    for config_id in config_ids:
+        component_means: List[float] = []
+        has_data = False
         for key in component_keys:
             num_map = summary_stats.get(key, {}).get(config_id, {})
             collected = _collect_per_video_means(num_map, allowed_nums)
             if collected:
                 arr = np.asarray(collected, dtype=float)
-                mean = float(arr.mean())
-                std = float(arr.std(ddof=0))
+                component_means.append(float(arr.mean()))
+                has_data = True
             else:
-                mean, std = (float("nan"), float("nan"))
-            means.append(mean)
-            stds.append(std)
+                component_means.append(float("nan"))
+        if has_data:
+            stacked_data.append(component_means)
+            valid_labels.append(_display_config_name(config_id))
 
-        means_arr = np.asarray(means, dtype=float)
-        if np.all(~np.isfinite(means_arr)):
+    if not stacked_data:
+        return False
+
+    data = np.asarray(stacked_data, dtype=float)
+    data[~np.isfinite(data)] = 0.0
+
+    y = np.arange(len(valid_labels))
+    colors = _scientific_colors()
+    hatches = ["/", "\\", "-", "+", "o", "."]
+
+    fig, ax = plt.subplots(figsize=(4.2, 2.6))
+    left = np.zeros(len(valid_labels), dtype=float)
+
+    for idx, label in enumerate(component_labels):
+        segment = data[:, idx]
+        if np.all(segment == 0):
             continue
-
-        has_data = True
-        offset = (idx - (num_configs - 1) / 2) * bar_width
-        color, hatch = palette[idx]
-        positions = x + offset
-        ax.bar(
-            positions,
-            means_arr,
-            width=bar_width * 0.95,
-            yerr=stds,
-            capsize=2.5,
+        color = colors[idx % len(colors)]
+        hatch = hatches[idx % len(hatches)]
+        ax.barh(
+            y,
+            segment,
+            left=left,
             color=color,
             hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
-            label=_display_config_name(config_id),
+            label=label,
         )
-        for xpos, value, err in zip(positions, means_arr, stds):
-            _annotate_bar(ax, xpos, value, err)
+        left += segment
 
-    ax.set_ylabel("Time (s)")
-    ax.set_xticks(x)
-    ax.set_xticklabels(component_labels, rotation=25, ha="right")
-    ax.set_xlabel("Component")
-    if has_data:
-        ax.legend(frameon=False, ncol=2)
-        fig.tight_layout(pad=0.6)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_path, bbox_inches="tight")
+    totals = left
+    for ypos, total in zip(y, totals):
+        padding = max(total * 0.02, 0.05)
+        ax.text(
+            total + padding,
+            ypos,
+            f"{total:.2f}",
+            ha="left",
+            va="center",
+            fontsize=BAR_LABEL_FONT_SIZE,
+        )
+
+    ax.set_xlabel("Time (s)")
+    ax.set_yticks(y)
+    ax.set_yticklabels(valid_labels)
+    ax.grid(axis="x", alpha=0.3)
+    legend = ax.legend(
+        frameon=False,
+        fontsize=LEGEND_FONT_SIZE,
+        ncol=3,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.02),
+    )
+    if legend:
+        for text in legend.get_texts():
+            text.set_fontsize(max(LEGEND_FONT_SIZE - 2, 6))
+
+    fig.tight_layout(pad=0.6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
-    return has_data
+    return True
 
 
 def plot_scheduling_components_by_config(
@@ -1692,7 +1720,7 @@ def plot_roundrobin_ratio(
     configure_plot_style()
     colors = _scientific_colors()
     markers = ["o", "s", "^", "D", "P", "X"]
-    fig, ax = plt.subplots(figsize=(3.8, 2.6))
+    fig, ax = plt.subplots(figsize=(3.8, 2))
 
     ax.errorbar(
         nums,
@@ -1709,7 +1737,7 @@ def plot_roundrobin_ratio(
     ax.text(
         target_numbers[0],
         1.3,
-        "Slicing benefits\ndiminish",
+        "Preemption benefits\ndiminish",
         ha="left",
         va="bottom",
         fontsize=10,
@@ -1726,7 +1754,7 @@ def plot_roundrobin_ratio(
     ax.grid(alpha=0.3)
     handles, labels = ax.get_legend_handles_labels()
 
-    fig.tight_layout(pad=0.6)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -1817,7 +1845,7 @@ def _plot_cdf_for_sources(
     x_limits: Optional[Tuple[float, float]] = None,
 ) -> bool:
     configure_plot_style()
-    fig, ax = plt.subplots(figsize=(3.8, 2.6))
+    fig, ax = plt.subplots(figsize=(3.8, 2))
     colors = _scientific_colors()
 
     plotted = False
@@ -1848,13 +1876,17 @@ def _plot_cdf_for_sources(
         plt.close(fig)
         return False
 
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("CDF")
+    ax.set_xlabel(xlabel, fontsize=10)
+    ax.set_ylabel("CDF", fontsize=10)
+    # set x tick fontsize to 10
+    ax.tick_params(axis='x', labelsize=10)
+    # set y tick fontsize to 10
+    ax.tick_params(axis='y', labelsize=10)
     if x_limits is not None:
         ax.set_xlim(*x_limits)
     ax.set_ylim(0.0, 1.0)
     ax.grid(alpha=0.3)
-    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
+    ax.legend(frameon=False, fontsize=10)
 
     for idx, (mean_val, label, color) in enumerate(annotations):
         if x_limits is not None and (mean_val < x_limits[0] or mean_val > x_limits[1]):
@@ -1866,12 +1898,12 @@ def _plot_cdf_for_sources(
             f"{label} mean\n{mean_val:.2f}",
             ha="left",
             va="center",
-            fontsize=LEGEND_FONT_SIZE,
+            fontsize=10,
             color=color,
             bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.7),
         )
 
-    fig.tight_layout(pad=0.6)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -2367,13 +2399,23 @@ def plot_rebuffering_ablation_group(
                 label=baseline_label,
             )
             for xpos, value, err in zip(positions, means_arr, stds_arr):
-                _annotate_bar(ax, xpos, value, err)
+                _annotate_bar(ax, xpos, value, err, fontsize=BAR_LABEL_FONT_SIZE-2)
 
         ax.set_ylabel("Rebuffering (s)")
         ax.set_xticks(x)
         ax.set_xticklabels(group_labels)
-        ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, loc="upper left")
-        fig.tight_layout(pad=0.8)
+        ax.grid(alpha=0.3)
+        legend = ax.legend(
+            frameon=False,
+            fontsize=LEGEND_FONT_SIZE,
+            ncol=3,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.02),
+        )
+        if legend:
+            for text in legend.get_texts():
+                text.set_fontsize(max(LEGEND_FONT_SIZE - 2, 6))
+        fig.tight_layout()
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, bbox_inches="tight")
         plt.close(fig)
@@ -2488,6 +2530,11 @@ def plot_rebuffering_ablation_group(
             plt.close(fig)
             return False
 
+        if group_key == "rl" or group_key == "chunk":
+            ax.set_xscale("symlog", linthresh=0.1)
+            ax.set_xticks(xs)
+            ax.set_xticklabels([str(x) for x in xs])
+
         ax.axvline(
             baseline_x,
             color="#333333",
@@ -2495,12 +2542,7 @@ def plot_rebuffering_ablation_group(
             linewidth=1.2,
             alpha=0.7,
         )
-        if group_key == "factor":
-            label_text = "Ours"
-        elif group_key == "rl":
-            label_text = "Ours"
-        else:
-            label_text = "Chunk=2"
+        label_text = "Ours"
         ylim = ax.get_ylim()
         ax.text(
             baseline_x,
@@ -2509,16 +2551,25 @@ def plot_rebuffering_ablation_group(
             ha="left",
             va="top",
             fontsize=BAR_LABEL_FONT_SIZE,
-            rotation=90,
             color="#333333",
         )
-        ax.set_xlabel("Threshold" if group_key == "factor" else "Chunk Size")
+        # set to  one of RL weight, chunk size, or urgency threshold
+        ax.set_xlabel("RL Weight" if group_key == "rl" else "Chunk Size" if group_key == "chunk" else "Urgency Threshold")
         ax.set_ylabel("Rebuffering (s)")
         ax.set_xticks(xs)
-        ax.set_xticklabels([f"{x:.1f}" if group_key == "factor" else f"{int(x)}" for x in xs])
+        ax.set_xticklabels([f"{x:.1f}" if group_key == "factor" or group_key == "rl" else f"{int(x)}" for x in xs])
         ax.grid(alpha=0.3)
-        ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, ncol=3, loc="best")
-        fig.tight_layout(pad=0.8)
+        legend = ax.legend(
+            frameon=False,
+            fontsize=LEGEND_FONT_SIZE,
+            ncol=3,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.02),
+        )
+        if legend:
+            for text in legend.get_texts():
+                text.set_fontsize(max(LEGEND_FONT_SIZE - 2, 6))
+        fig.tight_layout()
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, bbox_inches="tight")
         plt.close(fig)
@@ -2578,7 +2629,16 @@ def plot_rebuffering_ablation_group(
     ax.set_xticklabels([str(n) for n in num_videos], fontsize=TICK_FONT_SIZE)
     ax.set_xlabel("Number of Users", fontsize=LABEL_FONT_SIZE)
     ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE)
-    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, ncol=2, loc="upper left")
+    legend = ax.legend(
+        frameon=False,
+        fontsize=LEGEND_FONT_SIZE,
+        ncol=3,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.02),
+    )
+    if legend:
+        for text in legend.get_texts():
+            text.set_fontsize(max(LEGEND_FONT_SIZE - 2, 6))
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
