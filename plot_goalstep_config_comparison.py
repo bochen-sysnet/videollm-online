@@ -57,15 +57,15 @@ LATENCY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
 )
 
 DELAY_METRICS: Tuple[Tuple[str, str, str], ...] = (
-    ("processing_delay", "Processing", "processing_delay"),
-    ("queuing_delay", "Queuing", "queuing_delay"),
-    ("network_delay", "Networking", "network_delay"),
+    ("processing_delay", "Proc", "processing_delay"),
+    ("queuing_delay", "Queue", "queuing_delay"),
+    ("network_delay", "Net", "network_delay"),
 )
 
 SCHEDULING_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
-    ("lowest_buffer_score", "Lowest", "lowest_buffer"),
-    ("nonzero_score", "Nonzero", "nonzero"),
-    ("ending_score", "Finishing", "ending"),
+    ("lowest_buffer_score", "LOW", "lowest_buffer"),
+    ("nonzero_score", "NZ", "nonzero"),
+    ("ending_score", "FN", "ending"),
 )
 
 MEMORY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
@@ -577,22 +577,21 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
 def configure_plot_style(font_size: int = 10) -> None:
     """Set matplotlib defaults to a publication-friendly style."""
     plt.style.use("seaborn-v0_8-whitegrid")
-    plt.rcParams.update(
-        {
-            "font.family": "DejaVu Sans",
-            "font.size": font_size,
-            "axes.titlesize": font_size + 1,
-            "axes.labelsize": font_size,
-            "xtick.labelsize": font_size,
-            "ytick.labelsize": font_size,
-            "legend.fontsize": LEGEND_FONT_SIZE,
-            "axes.grid": True,
-            "grid.alpha": 0.3,
-            "grid.linestyle": "--",
-            "axes.linewidth": 0.8,
-            "lines.linewidth": 1.6,
-        }
-    )
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],  # fallback list
+        "font.size": font_size,
+        "axes.titlesize": font_size + 1,
+        "axes.labelsize": font_size,
+        "xtick.labelsize": font_size,
+        "ytick.labelsize": font_size,
+        "legend.fontsize": LEGEND_FONT_SIZE,
+        "axes.grid": True,
+        "grid.alpha": 0.3,
+        "grid.linestyle": "--",
+        "axes.linewidth": 0.8,
+        "lines.linewidth": 1.6,
+    })
 
 
 def _display_config_name(config_id: str) -> str:
