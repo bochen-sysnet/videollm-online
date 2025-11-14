@@ -188,7 +188,7 @@ def render_combined_comparison(goal: AggregateMetrics, narration: AggregateMetri
             goal.response_lengths,
             narration.response_lengths,
             "",
-            "Resp. Lengths (#Words)",
+            "Length (#Words)",
             80,
             100,
         ),
@@ -196,7 +196,7 @@ def render_combined_comparison(goal: AggregateMetrics, narration: AggregateMetri
             goal.responses_per_minute,
             narration.responses_per_minute,
             "",
-            "Resp. Density (#Resp. / min)",
+            "#Resp. per Min",
             120,
             60,
         ),
@@ -204,20 +204,24 @@ def render_combined_comparison(goal: AggregateMetrics, narration: AggregateMetri
             goal.words_per_minute,
             narration.words_per_minute,
             "",
-            "Gen. Load (#Words / Min)",
+            "#Words per Min",
             120,
             400,
         ),
     ]
     # set fontsize for the plot
-    plt.rcParams.update({'font.size': 20})
-    fig, axes = plt.subplots(1, 3, figsize=(14, 3.5))
+    # "font.family": "serif",
+    # "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],  # fallback list
+    plt.rcParams.update({'font.size': 32, 'font.family': 'serif', 'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif']})
+    # update tick size for x y ticks
+    fig, axes = plt.subplots(1, 3, figsize=(15, 3))
     # set fontsize for x y ticks
     for ax in axes:
-        ax.tick_params(axis='both', which='major', labelsize=20)
+        ax.tick_params(axis='both', which='major', labelsize=28)
     # set font size for legend
-    legend_fontsize = 18
+    legend_fontsize = 26
     colors = ("#4E79A7", "#F28E2B")
+    # change to 100% on y axis
     for ax, (goal_values, narr_values, title, xlabel, bin_count, x_max) in zip(axes, metrics_pairs):
         if not goal_values and not narr_values:
             ax.axis("off")
@@ -226,6 +230,9 @@ def render_combined_comparison(goal: AggregateMetrics, narration: AggregateMetri
             goal_values, narr_values, x_max=x_max, num_bins=bin_count
         )
         width = (widths.mean() if widths.size else x_max / bin_count) * 0.45
+        # change to 100% on y axis
+        goal_hist = goal_hist * 100
+        narr_hist = narr_hist * 100
         ax.bar(
             centers - width / 2,
             goal_hist,
@@ -244,22 +251,16 @@ def render_combined_comparison(goal: AggregateMetrics, narration: AggregateMetri
         )
         ax.set_title(title)
         ax.set_xlabel(xlabel)
-        ax.set_ylabel("Norm. Freq.")
+        if ax is axes[0]:
+            ax.set_ylabel("Prob. (%)")
+        else:
+            ax.set_ylabel("")
         ax.set_xlim(0, x_max)
         ax.grid(alpha=0.3)
-
-    handles, labels = axes[0].get_legend_handles_labels()
-    axes[0].legend(
-        handles,
-        labels,
-        loc="upper right",
-        frameon=False,
-        fontsize=legend_fontsize,
-        bbox_to_anchor=(0.98, 0.98),
-    )
-    fig.tight_layout(pad=0.8)
+        if ax is axes[0]:
+            ax.legend(loc="upper right", frameon=False, fontsize=legend_fontsize)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
     print(f"📊 Saved combined comparison figure to {output_path}")
 

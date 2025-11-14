@@ -83,6 +83,15 @@ KV_SECONDARY_METRIC = "kv_transfer_per_second"
 KV_OFFLOAD_SLOPE = "kv_offload_slope"
 KV_RELOAD_SLOPE = "kv_reload_slope"
 TIMING_BREAKDOWN_METRIC = "timing_breakdown"
+CHUNK_SIZES: Tuple[int, ...] = (1, 2, 4, 8)
+FRACTION_RESPONSE_CHUNKS_PREFIX = "fraction_response_chunks"
+CHUNK_FRACTION_METRICS: Tuple[str, ...] = tuple(
+    f"{FRACTION_RESPONSE_CHUNKS_PREFIX}_{size}" for size in CHUNK_SIZES
+)
+FINISHING_CHUNK_PREFIX = "finishing_chunk_fraction"
+FINISHING_CHUNK_METRICS: Tuple[str, ...] = tuple(
+    f"{FINISHING_CHUNK_PREFIX}_{size}" for size in CHUNK_SIZES
+)
 BAR_LABEL_FONT_SIZE = 12
 LEGEND_FONT_SIZE = 12
 TICK_FONT_SIZE = 16
@@ -98,7 +107,8 @@ EXTEND_METRICS = {
     KV_RELOAD_SLOPE,
     TIMING_BREAKDOWN_METRIC,
 }
-GENERATION_LENGTHS = "generation_lengths"
+EXTEND_METRICS.update(CHUNK_FRACTION_METRICS)
+EXTEND_METRICS.update(FINISHING_CHUNK_METRICS)
 
 ABLATION_GROUPS = {
     "rl": {
@@ -414,9 +424,12 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
     offload_slopes: List[float] = []
     reload_slopes: List[float] = []
     timing_breakdowns: List[Tuple[float, float, float, float, float, float, float]] = []
+    chunk_fraction_samples: Dict[int, List[float]] = {size: [] for size in CHUNK_SIZES}
+    finishing_chunk_samples: Dict[int, List[float]] = {size: [] for size in CHUNK_SIZES}
     for result in results:
         num_frames = int(result.get("num_frames", 0) or 0)
         total_frames += max(num_frames, 0)
+        generated_turns = result.get("generated_turns", []) or []
         if result.get("generated_turns"):
             resp_time = result.get("response_time")
             if resp_time is not None:
@@ -431,7 +444,8 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
                 denom = max(num_frames, 1)
                 component_per_frame_samples[key].append(float(value) / denom)
 
-        for turn in result.get("generated_turns", []):
+        turn_word_counts: List[int] = []
+        for turn in generated_turns:
             text = turn.get("text", "")
             if "Assistant:" in text:
                 text = text.split("Assistant:", 1)[-1]
@@ -440,7 +454,22 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
             total_generation_time += float(turn.get("generation_time", 0.0))
             if word_count > 0:
                 total_nonzero_turns += 1
+            turn_word_counts.append(word_count)
             generation_lengths.append(word_count)
+        positive_counts = [count for count in turn_word_counts if count > 0]
+        positive_frames = len(positive_counts)
+        zero_frames = max(num_frames - positive_frames, 0)
+        for chunk_size in CHUNK_SIZES:
+            nonzero_chunks = sum((count / float(chunk_size)) for count in positive_counts)
+            zero_chunks = float(zero_frames)
+            total_chunks = nonzero_chunks + zero_chunks
+            if total_chunks > 0:
+                chunk_fraction_samples[chunk_size].append(nonzero_chunks / total_chunks)
+            if positive_counts:
+                total_words = sum(positive_counts)
+                total_chunks_conv = max(1, math.ceil(total_words / float(chunk_size)))
+                finishing_fraction = min(1.0, 1.0 / total_chunks_conv)
+                finishing_chunk_samples[chunk_size].append(finishing_fraction)
     ttft = float(np.mean(ttft_samples)) if ttft_samples else float("nan")
     perplexity = float(np.mean(ppl_samples)) if ppl_samples else float("nan")
 
@@ -567,6 +596,9 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
     metrics[TIMING_BREAKDOWN_METRIC] = timing_breakdowns
     metrics.update(component_means)
     metrics.update(component_per_frame_means)
+    for chunk_size in CHUNK_SIZES:
+        metrics[f"{FRACTION_RESPONSE_CHUNKS_PREFIX}_{chunk_size}"] = chunk_fraction_samples[chunk_size]
+        metrics[f"{FINISHING_CHUNK_PREFIX}_{chunk_size}"] = finishing_chunk_samples[chunk_size]
     return metrics
 
 
@@ -1914,14 +1946,73 @@ def plot_fraction_response_distribution(
     config_id: str,
     output_path: Path,
 ) -> bool:
-    return _plot_cdf_for_sources(
-        summary_stats_by_source,
-        FRACTION_RESPONSE_FRAMES_METRIC,
-        "Fraction of Frames with Nonzero Response",
-        output_path,
-        config_id,
-        x_limits=(0.0, 1.0),
-    )
+    goalstep_stats = summary_stats_by_source.get("goalstep")
+    if not goalstep_stats:
+        return False
+
+    configure_plot_style()
+    fig, ax = plt.subplots(figsize=(3.8, 2))
+    colors = _scientific_colors()
+
+    plotted = False
+    annotations: List[Tuple[float, str, str]] = []
+    for idx, chunk_size in enumerate(CHUNK_SIZES):
+        metric_key = f"{FRACTION_RESPONSE_CHUNKS_PREFIX}_{chunk_size}"
+        values = _collect_distribution_values(goalstep_stats, metric_key, config_id)
+        if not values:
+            continue
+        values_arr = np.sort(np.asarray(values, dtype=float))
+        # convert to percentage
+        values_arr = values_arr * 100.0
+        if values_arr.size == 0:
+            continue
+        cdf = np.arange(1, values_arr.size + 1, dtype=float) / values_arr.size
+        label = f"Chunk={chunk_size}"
+        color = colors[idx % len(colors)]
+        ax.step(
+            values_arr,
+            cdf,
+            where="post",
+            color=color,
+            linewidth=1.6,
+            label=label,
+        )
+        mean_val = float(values_arr.mean())
+        annotations.append((mean_val, label, color))
+        plotted = True
+
+    if not plotted:
+        plt.close(fig)
+        return False
+
+    ax.set_xlabel("Fraction of Active Chunks (%)", fontsize=10)
+    ax.set_ylabel("CDF", fontsize=10)
+    ax.set_xlim(0.0, 100.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.tick_params(axis="x", labelsize=10)
+    ax.tick_params(axis="y", labelsize=10)
+    ax.grid(alpha=0.3)
+    ax.legend(frameon=False, fontsize=10)
+
+    for idx, (mean_val, label, color) in enumerate(annotations):
+        ax.axvline(mean_val, linestyle="--", linewidth=1.0, color=color, alpha=0.6)
+        y_pos = max(0.1, 0.9 - idx * 0.18)
+        ax.text(
+            mean_val,
+            y_pos,
+            f"μ={mean_val:.1f}%",
+            ha="left",
+            va="center",
+            fontsize=10,
+            color=color,
+            # bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.7),
+        )
+
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
 
 
 def plot_generation_length_distribution(
@@ -1929,14 +2020,72 @@ def plot_generation_length_distribution(
     config_id: str,
     output_path: Path,
 ) -> bool:
-    return _plot_cdf_for_sources(
-        summary_stats_by_source,
-        GENERATION_LENGTHS,
-        "Generated Words per Response",
-        output_path,
-        config_id,
-        x_limits=None,
-    )
+    goalstep_stats = summary_stats_by_source.get("goalstep")
+    if not goalstep_stats:
+        return False
+
+    configure_plot_style()
+    fig, ax = plt.subplots(figsize=(3.8, 2))
+    colors = _scientific_colors()
+
+    plotted = False
+    annotations: List[Tuple[float, str, str]] = []
+    for idx, chunk_size in enumerate(CHUNK_SIZES):
+        metric_key = f"{FINISHING_CHUNK_PREFIX}_{chunk_size}"
+        values = _collect_distribution_values(goalstep_stats, metric_key, config_id)
+        if not values:
+            continue
+        perc_values = [float(v) * 100.0 for v in values if v is not None and math.isfinite(v)]
+        if not perc_values:
+            continue
+        values_arr = np.sort(np.asarray(perc_values, dtype=float))
+        cdf = np.arange(1, values_arr.size + 1, dtype=float) / values_arr.size
+        label = f"Chunk={chunk_size}"
+        color = colors[idx % len(colors)]
+        ax.step(
+            values_arr,
+            cdf,
+            where="post",
+            color=color,
+            linewidth=1.6,
+            label=label,
+        )
+        mean_val = float(values_arr.mean())
+        annotations.append((mean_val, label, color))
+        plotted = True
+
+    if not plotted:
+        plt.close(fig)
+        return False
+
+    ax.set_xlabel("Fraction of Finishing Chunks (%)", fontsize=10)
+    ax.set_ylabel("CDF", fontsize=10)
+    ax.set_xlim(0.0, 100.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.tick_params(axis="x", labelsize=10)
+    ax.tick_params(axis="y", labelsize=10)
+    ax.grid(alpha=0.3)
+    ax.legend(frameon=False, fontsize=10)
+
+    for idx, (mean_val, label, color) in enumerate(annotations):
+        ax.axvline(mean_val, linestyle="--", linewidth=1.0, color=color, alpha=0.6)
+        y_pos = max(0.1, 0.9 - idx * 0.18)
+        ax.text(
+            mean_val,
+            y_pos,
+            f"μ={mean_val:.1f}%",
+            ha="left",
+            va="center",
+            fontsize=10,
+            color=color,
+            # bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.7),
+        )
+
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
 
 
 def plot_kv_transfer_scatter(
@@ -2779,7 +2928,10 @@ def main() -> None:
             KV_SECONDARY_METRIC,
             KV_OFFLOAD_SLOPE,
             KV_RELOAD_SLOPE,
+            TIMING_BREAKDOWN_METRIC,
         ]
+        + list(CHUNK_FRACTION_METRICS)
+        + list(FINISHING_CHUNK_METRICS)
     )
 
     summary_stats_map: Dict[str, Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]]] = {}
