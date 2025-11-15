@@ -45,6 +45,8 @@ METRIC_ORDER: Tuple[Tuple[str, str, str, str], ...] = (
     ("scheduling_score", "Scheduling Score", "", "scheduling"),
     ("perplexity", "Perplexity", "", "perplexity"),
 )
+PERPLEXITY_VLM_KEY = "perplexity_vlm"
+PERPLEXITY_GT_KEY = "perplexity_gt"
 
 LATENCY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
     ("visual_embedding_time", "Prefilling", "prefilling"),
@@ -92,6 +94,7 @@ FINISHING_CHUNK_PREFIX = "finishing_chunk_fraction"
 FINISHING_CHUNK_METRICS: Tuple[str, ...] = tuple(
     f"{FINISHING_CHUNK_PREFIX}_{size}" for size in CHUNK_SIZES
 )
+KV_SLOPE_FIGSIZE = (4.0, 2.8)
 BAR_LABEL_FONT_SIZE = 12
 LEGEND_FONT_SIZE = 12
 TICK_FONT_SIZE = 16
@@ -411,7 +414,8 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
     }
     results = summary.get("results", []) or []
     ttft_samples: List[float] = []
-    ppl_samples: List[float] = []
+    ppl_vlm_samples: List[float] = []
+    ppl_gt_samples: List[float] = []
     total_generated_words = 0.0
     total_generation_time = 0.0
     total_nonzero_turns = 0
@@ -435,8 +439,10 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
             if resp_time is not None:
                 ttft_samples.append(float(resp_time))
         ppl_data = result.get("ppl_data") or {}
-        ppl_values = ppl_data.get("gt_ppls_vlm_prefix_visual") or []
-        ppl_samples.extend(float(p) for p in ppl_values if p is not None)
+        vlm_values = ppl_data.get("gt_ppls_vlm_prefix_visual") or []
+        ppl_vlm_samples.extend(float(p) for p in vlm_values if p is not None)
+        gt_values = ppl_data.get("gt_ppls_gt_prefix_visual") or []
+        ppl_gt_samples.extend(float(p) for p in gt_values if p is not None)
         for key, _, _ in LATENCY_COMPONENTS:
             value = result.get(key)
             if value is not None:
@@ -471,7 +477,8 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
                 finishing_fraction = min(1.0, 1.0 / total_chunks_conv)
                 finishing_chunk_samples[chunk_size].append(finishing_fraction)
     ttft = float(np.mean(ttft_samples)) if ttft_samples else float("nan")
-    perplexity = float(np.mean(ppl_samples)) if ppl_samples else float("nan")
+    perplexity_vlm = float(np.mean(ppl_vlm_samples)) if ppl_vlm_samples else float("nan")
+    perplexity_gt = float(np.mean(ppl_gt_samples)) if ppl_gt_samples else float("nan")
 
     # Scheduling score: use the final cumulative score as overall value.
     scheduling = summary.get("scheduling_data") or {}
@@ -560,7 +567,7 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
         "rebuffer_time": rebuffer_time,
         "ttft": ttft,
         "scheduling_score": scheduling_score,
-        "perplexity": perplexity,
+        "perplexity": perplexity_vlm,
         "processing_delay": processing_delay,
         "queuing_delay": queuing_delay,
         "network_delay": networking_delay,
@@ -591,6 +598,8 @@ def load_iteration_metrics(summary_path: Path, num_videos: Optional[int] = None)
     metrics[KV_SECONDARY_METRIC] = flattened_pairs
     # Debug for slopes
     # print(f"[DEBUG] slopes collected off={len(offload_slopes)} reload={len(reload_slopes)}")
+    metrics[PERPLEXITY_VLM_KEY] = perplexity_vlm
+    metrics[PERPLEXITY_GT_KEY] = perplexity_gt
     metrics[KV_OFFLOAD_SLOPE] = offload_slopes
     metrics[KV_RELOAD_SLOPE] = reload_slopes
     metrics[TIMING_BREAKDOWN_METRIC] = timing_breakdowns
@@ -769,9 +778,18 @@ def plot_grouped_bar(
     ax.tick_params(axis='y', labelsize=TICK_FONT_SIZE)
     ax.set_xlabel("Number of Users", fontsize=LABEL_FONT_SIZE)
     if has_data:
-        ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_path, bbox_inches="tight")
+        legend = ax.legend(
+            frameon=True,
+            fontsize=LEGEND_FONT_SIZE,
+            loc="upper left",
+            bbox_to_anchor=(0.02, 1.02),
+            ncol=2,
+        )
+        if legend:
+            legend.get_frame().set_facecolor("white")
+            legend.get_frame().set_alpha(0.85)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
     return has_data
 
@@ -786,6 +804,14 @@ def plot_overall_bar(
     output_path: Path,
     allowed_nums: Optional[Iterable[int]] = None,
 ) -> bool:
+    if metric_key == "perplexity":
+        return _plot_overall_perplexity(
+            summary_stats,
+            config_ids,
+            output_path,
+            allowed_nums,
+            y_label,
+        )
     """Bar chart summarizing mean/std aggregated across all video counts."""
     configure_plot_style()
     palette = _color_hatch_cycle(len(config_ids))
@@ -826,6 +852,97 @@ def plot_overall_bar(
     # set y tick fontsize to TICK_FONT_SIZE
     ax.tick_params(axis='y', labelsize=TICK_FONT_SIZE)
     # ax.set_xlabel("Config ID", fontsize=LABEL_FONT_SIZE)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def _plot_overall_perplexity(
+    summary_stats: Dict[str, Dict[str, Dict[int, Dict[str, Iterable[float]]]]],
+    config_ids: List[str],
+    output_path: Path,
+    allowed_nums: Optional[Iterable[int]],
+    y_label: str,
+) -> bool:
+    type_specs = [
+        (PERPLEXITY_VLM_KEY, "Gen-Perplexity"),
+        (PERPLEXITY_GT_KEY, "GT-Perplexity"),
+    ]
+    config_records: List[List[Tuple[float, float]]] = []
+    config_labels: List[str] = []
+    type_has_data = [False] * len(type_specs)
+
+    for config_id in config_ids:
+        per_type_entries: List[Tuple[float, float]] = []
+        has_any = False
+        for idx, (metric_name, _) in enumerate(type_specs):
+            num_map = summary_stats.get(metric_name, {}).get(config_id, {})
+            mean, std = _aggregate_across_videos(num_map, allowed_nums)
+            if math.isfinite(mean):
+                has_any = True
+                type_has_data[idx] = True
+                per_type_entries.append((mean, std if math.isfinite(std) else 0.0))
+            else:
+                per_type_entries.append((float("nan"), 0.0))
+        if has_any:
+            config_records.append(per_type_entries)
+            config_labels.append(_display_config_name(config_id))
+
+    active_indices = [idx for idx, has in enumerate(type_has_data) if has]
+    if not active_indices or not config_records:
+        return False
+
+    pruned_records = [
+        [entries[idx] for idx in active_indices] for entries in config_records
+    ]
+    active_specs = [type_specs[idx] for idx in active_indices]
+
+    configure_plot_style()
+    fig, ax = plt.subplots(figsize=(3.4, 2.6))
+    palette = _color_hatch_cycle(len(active_specs))
+    x = np.arange(len(config_labels))
+    num_types = len(active_specs)
+    bar_width = min(0.8 / max(num_types, 1), 0.35)
+
+    for type_idx, ((_, type_label), (color, hatch)) in enumerate(
+        zip(active_specs, palette)
+    ):
+        type_means = np.array([record[type_idx][0] for record in pruned_records], dtype=float)
+        type_stds = np.array([record[type_idx][1] for record in pruned_records], dtype=float)
+        positions = x + (type_idx - (num_types - 1) / 2) * bar_width
+        heights = np.nan_to_num(type_means, nan=0.0)
+        bars = ax.bar(
+            positions,
+            heights,
+            width=bar_width * 0.95,
+            yerr=type_stds,
+            capsize=2.5,
+            color=color,
+            hatch=hatch,
+            edgecolor="black",
+            linewidth=0.4,
+            label=type_label,
+        )
+        for bar, value, err in zip(bars, type_means, type_stds):
+            if not math.isfinite(value):
+                bar.set_alpha(0.0)
+                continue
+            _annotate_bar(ax, bar.get_x() + bar.get_width() / 2.0, value, err)
+
+    ax.set_ylabel(y_label, fontsize=LABEL_FONT_SIZE)
+    ax.set_xticks(x)
+    ax.set_xticklabels(config_labels, fontsize=TICK_FONT_SIZE, rotation=20, ha="right")
+    ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE)
+    # add box to legend with white background
+    legend = ax.legend(
+        frameon=True,
+        facecolor="white",
+        fontsize=LEGEND_FONT_SIZE,
+        loc="lower left",
+        ncol=1,
+    )
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -2157,7 +2274,7 @@ def plot_kv_transfer_scatter(
         return False
 
     configure_plot_style()
-    fig, ax = plt.subplots(figsize=(3.8, 2.6))
+    fig, ax = plt.subplots(figsize=KV_SLOPE_FIGSIZE)
 
     components = [
         ("Prefilling", prefilling_ms),
@@ -2329,28 +2446,53 @@ def plot_kv_slope_comparison(
     reload_pairs = filter_time_outliers(extract_kv_pairs(kv_reload_pairs_stats))
 
     scatter_path = output_path.with_name(f"{output_path.stem}_scatter{output_path.suffix}")
-    scatter_pairs = [
-        ("Offload", off_pairs, colors[0]),
-        ("Reload", reload_pairs, colors[1]),
+
+    def smooth_pairs(pairs: List[Tuple[float, float]], window: int = 7) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+        if not pairs:
+            return None
+        pairs = sorted(pairs, key=lambda x: x[0])
+        xs = np.array([size for size, _ in pairs], dtype=float)
+        ys = np.array([time for _, time in pairs], dtype=float)
+        window = max(3, min(window, len(xs)))
+        half = window // 2
+        smoothed_x = []
+        mean_y = []
+        lower_y = []
+        upper_y = []
+        for idx in range(len(xs)):
+            start = max(0, idx - half)
+            end = min(len(xs), idx + half + 1)
+            window_x = xs[start:end]
+            window_y = ys[start:end]
+            if window_y.size == 0:
+                continue
+            smoothed_x.append(float(window_x.mean()))
+            mean_y.append(float(window_y.mean()))
+            lower_y.append(float(np.percentile(window_y, 10)))
+            upper_y.append(float(np.percentile(window_y, 90)))
+        if not smoothed_x:
+            return None
+        return (
+            np.asarray(smoothed_x, dtype=float),
+            np.asarray(mean_y, dtype=float),
+            np.asarray(lower_y, dtype=float),
+            np.asarray(upper_y, dtype=float),
+        )
+
+    scatter_series = [
+        ("Offload", smooth_pairs(off_pairs), colors[0]),
+        ("Reload", smooth_pairs(reload_pairs), colors[1]),
     ]
-    if any(pairs for _, pairs, _ in scatter_pairs):
+
+    if any(series for _, series, _ in scatter_series):
         configure_plot_style()
         fig_scatter, ax_scatter = plt.subplots(figsize=(3.8, 2.6))
-        for label, pairs, color in scatter_pairs:
-            if not pairs:
+        for label, series, color in scatter_series:
+            if not series:
                 continue
-            xs = np.array([size for size, _ in pairs], dtype=float)
-            ys = np.array([val for _, val in pairs], dtype=float)
-            ax_scatter.scatter(
-                xs,
-                ys,
-                color=color,
-                edgecolor="black",
-                linewidth=0.3,
-                s=18,
-                alpha=0.7,
-                label=label,
-            )
+            xs, mean_y, lower_y, upper_y = series
+            ax_scatter.plot(xs, mean_y, color=color, linewidth=2.0, label=label)
+            ax_scatter.fill_between(xs, lower_y, upper_y, color=color, alpha=0.2)
 
         ax_scatter.set_xlabel("KV Cache Size (MB)", fontsize=18)
         ax_scatter.set_ylabel("Time (ms)", fontsize=18)
@@ -2608,7 +2750,7 @@ def plot_rebuffering_ablation_group(
         palette = _color_hatch_cycle(len(valid_baselines))
         x = np.arange(len(group_labels))
         bar_width = min(0.75 / max(len(valid_baselines), 1), 0.18)
-        fig, ax = plt.subplots(figsize=(3.8, 2.6))
+        fig, ax = plt.subplots(figsize=KV_SLOPE_FIGSIZE)
 
         for idx, baseline_label in enumerate(valid_baselines):
             means_arr = np.asarray(values[baseline_label], dtype=float)
@@ -2923,6 +3065,8 @@ def main() -> None:
             GENERATION_SPEED_METRIC,
             FRACTION_RESPONSE_FRAMES_METRIC,
             GENERATION_LENGTHS,
+            PERPLEXITY_VLM_KEY,
+            PERPLEXITY_GT_KEY,
             KV_OFFLOAD_SCATTER,
             KV_RELOAD_SCATTER,
             KV_SECONDARY_METRIC,
@@ -3049,16 +3193,18 @@ def main() -> None:
                             "values": list(values),
                         }
 
-            # Reuse base perplexity for RD-M and ER-M variants
-            perplexity_stats = summary_stats.get("perplexity")
-            if perplexity_stats:
-                base_stats = perplexity_stats.get(BASE_CONFIG_ID)
-                if base_stats:
-                    for alias in ("random_m", "round_robin_m"):
-                        perplexity_stats[alias] = {
-                            num: dict(stats_dict)
-                            for num, stats_dict in base_stats.items()
-                        }
+            # Reuse base perplexity metrics for RD-M and ER-M variants
+            for metric_name in ("perplexity", PERPLEXITY_VLM_KEY, PERPLEXITY_GT_KEY):
+                metric_stats = summary_stats.get(metric_name)
+                if not metric_stats:
+                    continue
+                base_stats = metric_stats.get(BASE_CONFIG_ID)
+                if not base_stats:
+                    continue
+                for alias in ("random_m", "round_robin_m"):
+                    metric_stats[alias] = {
+                        num: dict(stats_dict) for num, stats_dict in base_stats.items()
+                    }
             summary_stats_map[key][data_source] = summary_stats
 
     primary_summary_stats = summary_stats_map.get("primary", {})
