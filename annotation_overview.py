@@ -185,6 +185,14 @@ def _prepare_hist(
 def render_combined_comparison(goal: AggregateMetrics, narration: AggregateMetrics, output_path: Path) -> None:
     metrics_pairs = [
         (
+            goal.words_per_minute,
+            narration.words_per_minute,
+            "",
+            "#Words per Min",
+            120,
+            400,
+        ),
+        (
             goal.response_lengths,
             narration.response_lengths,
             "",
@@ -199,14 +207,6 @@ def render_combined_comparison(goal: AggregateMetrics, narration: AggregateMetri
             "#Resp. per Min",
             120,
             60,
-        ),
-        (
-            goal.words_per_minute,
-            narration.words_per_minute,
-            "",
-            "#Words per Min",
-            120,
-            400,
         ),
     ]
     # set fontsize for the plot
@@ -257,7 +257,7 @@ def render_combined_comparison(goal: AggregateMetrics, narration: AggregateMetri
             ax.set_ylabel("")
         ax.set_xlim(0, x_max)
         ax.grid(alpha=0.3)
-        if ax is axes[0]:
+        if ax is axes[1]:
             ax.legend(loc="upper right", frameon=False, fontsize=legend_fontsize)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")

@@ -49,12 +49,12 @@ PERPLEXITY_VLM_KEY = "perplexity_vlm"
 PERPLEXITY_GT_KEY = "perplexity_gt"
 
 LATENCY_COMPONENTS: Tuple[Tuple[str, str, str], ...] = (
-    ("visual_embedding_time", "Prefilling", "prefilling"),
+    ("visual_embedding_time", "Pre", "prefilling"),
     ("model_forward_time", "EOS", "scoring"),
-    ("generation_time", "Decoding", "generation"),
-    ("kv_offload_time", "Offload", "kv_offload"),
-    ("kv_reload_time", "Reload", "kv_reload"),
-    ("total_sending_time", "Network", "network_time"),
+    ("generation_time", "Dec", "generation"),
+    ("kv_offload_time", "Off", "kv_offload"),
+    ("kv_reload_time", "Rel", "kv_reload"),
+    ("total_sending_time", "Net", "network_time"),
     ("total_processing_time", "Total", "total_processing"),
 )
 
@@ -97,8 +97,8 @@ FINISHING_CHUNK_METRICS: Tuple[str, ...] = tuple(
 KV_SLOPE_FIGSIZE = (4.0, 2.8)
 BAR_LABEL_FONT_SIZE = 12
 LEGEND_FONT_SIZE = 12
-TICK_FONT_SIZE = 16
-LABEL_FONT_SIZE = 18
+TICK_FONT_SIZE = 12
+LABEL_FONT_SIZE = 16
 DISTRIBUTION_CONFIG_ID = "max_frames_memory_test"
 
 EXTEND_METRICS = {
@@ -186,7 +186,7 @@ ABLATION_GROUPS = {
                 ("consumption_ablation2_rand_2", "RD-S"),
                 ("consumption_ablation2_rand_m", "RD-M"),
             ]),
-            ("3 (Ours)", [
+            ("3*", [
                 ("base", "Base"),
                 ("round_robin_2", "ER-S"),
                 ("round_robin_m", "ER-M"),
@@ -780,10 +780,10 @@ def plot_grouped_bar(
     if has_data:
         legend = ax.legend(
             frameon=True,
-            fontsize=LEGEND_FONT_SIZE,
+            fontsize=10,
             loc="upper left",
             bbox_to_anchor=(0.02, 1.02),
-            ncol=2,
+            ncol=1,
         )
         if legend:
             legend.get_frame().set_facecolor("white")
@@ -1077,14 +1077,29 @@ def plot_delay_comparison_by_config(
             label=title,
         )
         for xpos, value in zip(positions, arr[:, idx]):
-            _annotate_bar(ax, xpos, value, 0.0)
+            _annotate_bar(ax, xpos, value, 0.0, fontsize=10)
 
-    ax.set_ylabel("Rebuffering (s)")
+    ax.set_ylabel("Rebuffering (s)", fontsize=16)
     ax.set_xticks(x)
-    ax.set_xticklabels(config_labels)
-    ax.set_xlabel("Scheduler")
-    ax.legend(frameon=False)
-    fig.tight_layout(pad=0.6)
+    ax.set_xticklabels(config_labels, fontsize=16, rotation=20, ha="right")
+    ax.tick_params(axis='y', labelsize=12)
+    # if max value is greater than 2.9, set ylim to 4
+    if np.max(arr) > 2.9:
+        ax.set_ylim(0, 4.0)
+    else:
+        ax.set_ylim(0, 2.2)
+    # move up the legend
+    legend = ax.legend(
+            frameon=True,
+            fontsize=10,
+            loc="upper left",
+            bbox_to_anchor=(0.02, 1.02),
+            ncol=1,
+        )
+    if legend:
+        legend.get_frame().set_facecolor("white")
+        legend.get_frame().set_alpha(0.85)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -1165,20 +1180,19 @@ def plot_latency_components_by_config(
             fontsize=BAR_LABEL_FONT_SIZE,
         )
 
-    ax.set_xlabel("Time (s)")
+    ax.set_xlabel("Latency (s)", fontsize=LABEL_FONT_SIZE)
     ax.set_yticks(y)
     ax.set_yticklabels(valid_labels)
+    ax.tick_params(axis="x", labelsize=TICK_FONT_SIZE+2)
+    ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE+2)
     ax.grid(axis="x", alpha=0.3)
     legend = ax.legend(
         frameon=False,
         fontsize=LEGEND_FONT_SIZE,
         ncol=3,
         loc="lower center",
-        bbox_to_anchor=(0.5, 1.02),
+        bbox_to_anchor=(0.5, 0.95),
     )
-    if legend:
-        for text in legend.get_texts():
-            text.set_fontsize(max(LEGEND_FONT_SIZE - 2, 6))
 
     fig.tight_layout(pad=0.6)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1256,12 +1270,22 @@ def plot_scheduling_components_by_config(
         for xpos, value, err in zip(positions, means_arr, stds_arr):
             _annotate_bar(ax, xpos, value, err)
 
-    ax.set_ylabel("Cumulative Score")
+    ax.set_ylabel("Scheduling Score", fontsize=16)
     ax.set_xticks(x)
-    ax.set_xticklabels(valid_configs, rotation=20, ha="right")
-    ax.set_xlabel("Config ID")
-    ax.legend(frameon=False)
-    fig.tight_layout(pad=0.6)
+    ax.set_xticklabels(valid_configs, rotation=20, ha="right", fontsize=16)
+    ax.tick_params(axis='y', labelsize=12)
+    # ylim 0,1500 
+    ax.set_ylim(0, 1500)
+    legend = ax.legend(
+            frameon=True,
+            fontsize=10,
+            loc="upper center",
+            ncol=1,
+        )
+    if legend:
+        legend.get_frame().set_facecolor("white")
+        legend.get_frame().set_alpha(0.85)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -1711,7 +1735,7 @@ def plot_rebuffer_baseline_comparison_across_bases(
             label=label,
         )
         for xpos, value, err in zip(positions, dataset_means, dataset_stds):
-            _annotate_bar(ax, xpos, value, err)
+            _annotate_bar(ax, xpos, value, err, fontsize=TICK_FONT_SIZE)
 
     if not plotted:
         plt.close(fig)
@@ -1719,14 +1743,14 @@ def plot_rebuffer_baseline_comparison_across_bases(
 
     cfg_labels = [_display_config_name(config_ids[i]) for i in valid_indices]
     nums_str = ", ".join(str(n) for n in target_nums)
-    ax.set_ylabel("Rebuffering (s)", fontsize=10)
-    ax.tick_params(axis="y", labelsize=10)
+    ax.set_ylabel("Rebuffering (s)", fontsize=LABEL_FONT_SIZE)
+    ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE)
     ax.set_xticks(x)
-    ax.set_xticklabels(cfg_labels, fontsize=10)
+    ax.set_xticklabels(cfg_labels, fontsize=TICK_FONT_SIZE)
     ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
     ax.grid(axis="y", alpha=0.3)
 
-    fig.tight_layout(pad=0.6)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -2774,20 +2798,21 @@ def plot_rebuffering_ablation_group(
             for xpos, value, err in zip(positions, means_arr, stds_arr):
                 _annotate_bar(ax, xpos, value, err, fontsize=BAR_LABEL_FONT_SIZE-2)
 
-        ax.set_ylabel("Rebuffering (s)")
+        ax.set_ylabel("Rebuffering (s)", fontsize=LABEL_FONT_SIZE+2)
         ax.set_xticks(x)
-        ax.set_xticklabels(group_labels)
+        ax.set_xticklabels(group_labels, fontsize=TICK_FONT_SIZE+2)
+        ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE+2)
         ax.grid(alpha=0.3)
         legend = ax.legend(
             frameon=False,
             fontsize=LEGEND_FONT_SIZE,
             ncol=3,
             loc="lower center",
-            bbox_to_anchor=(0.5, 1.02),
+            bbox_to_anchor=(0.5, 0.95),
         )
-        if legend:
-            for text in legend.get_texts():
-                text.set_fontsize(max(LEGEND_FONT_SIZE - 2, 6))
+        # if legend:
+        #     for text in legend.get_texts():
+        #         text.set_fontsize(max(LEGEND_FONT_SIZE - 2, 6))
         fig.tight_layout()
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, bbox_inches="tight")
@@ -2908,40 +2933,28 @@ def plot_rebuffering_ablation_group(
             ax.set_xticks(xs)
             ax.set_xticklabels([str(x) for x in xs])
 
-        ax.axvline(
-            baseline_x,
-            color="#333333",
-            linestyle="--",
-            linewidth=1.2,
-            alpha=0.7,
-        )
-        label_text = "Ours"
-        ylim = ax.get_ylim()
-        ax.text(
-            baseline_x,
-            ylim[1] - (ylim[1] - ylim[0]) * 0.05,
-            label_text,
-            ha="left",
-            va="top",
-            fontsize=BAR_LABEL_FONT_SIZE,
-            color="#333333",
-        )
         # set to  one of RL weight, chunk size, or urgency threshold
-        ax.set_xlabel("RL Weight" if group_key == "rl" else "Chunk Size" if group_key == "chunk" else "Urgency Threshold")
-        ax.set_ylabel("Rebuffering (s)")
+        ax.set_xlabel("RL Weight" if group_key == "rl" else "Chunk Size" if group_key == "chunk" else "Urgency Threshold", fontsize=LABEL_FONT_SIZE)
+        ax.set_ylabel("Rebuffering (s)", fontsize=LABEL_FONT_SIZE)
+        if group_key == "factor":
+            xs = [0,.2,.4,.6,.8,1.0]
         ax.set_xticks(xs)
-        ax.set_xticklabels([f"{x:.1f}" if group_key == "factor" or group_key == "rl" else f"{int(x)}" for x in xs])
+        if group_key == "rl":
+            ax.set_xticklabels([f"{x:.1f}" if x!=baseline_x else f"{x:.1f}*" for x in xs])
+        elif group_key == "chunk":
+            ax.set_xticklabels([f"{int(x)}" if x!=baseline_x else f"{int(x)}*" for x in xs])
+        else:
+            ax.set_xticklabels([f"{x:.1f}" if x!=baseline_x else f"{x:.1f}*" for x in xs])
+        ax.tick_params(axis="x", labelsize=TICK_FONT_SIZE+2)
+        ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE+2)
         ax.grid(alpha=0.3)
         legend = ax.legend(
             frameon=False,
             fontsize=LEGEND_FONT_SIZE,
             ncol=3,
             loc="lower center",
-            bbox_to_anchor=(0.5, 1.02),
+            bbox_to_anchor=(0.5, 0.95),
         )
-        if legend:
-            for text in legend.get_texts():
-                text.set_fontsize(max(LEGEND_FONT_SIZE - 2, 6))
         fig.tight_layout()
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, bbox_inches="tight")
