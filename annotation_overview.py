@@ -27,6 +27,7 @@ class AggregateMetrics:
     responses_per_minute: List[float]
     response_gaps: List[float]
     words_per_minute: List[float]
+    response_length_pairs: List[Tuple[float, float]]
     total_videos: int
     total_conversations: int
     total_responses: int
@@ -41,6 +42,7 @@ def load_goalstep() -> AggregateMetrics:
     response_gaps: List[float] = []
     words_per_minute: List[float] = []
     video_ids: set[str] = set()
+    response_pairs: List[Tuple[float, float]] = []
 
     for entry in data:
         video_uid = entry.get("video_uid", "")
@@ -51,11 +53,16 @@ def load_goalstep() -> AggregateMetrics:
 
         resp_times = []
         conv_word_total = 0.0
+        prev_lengths: List[float] = []
         for turn in responses:
             text = turn.get("content") or ""
             words = len(text.split())
             conv_word_total += words
             response_lengths.append(words)
+            if words > 0:
+                for prev in prev_lengths:
+                    response_pairs.append((prev, words))
+                prev_lengths.append(words)
             if isinstance(turn.get("time"), (int, float)):
                 resp_times.append(float(turn["time"]))
 
@@ -81,6 +88,7 @@ def load_goalstep() -> AggregateMetrics:
         responses_per_minute,
         response_gaps,
         words_per_minute,
+        response_pairs,
         total_videos=len(video_ids),
         total_conversations=len(data),
         total_responses=len(response_lengths),
@@ -97,6 +105,7 @@ def load_narration() -> AggregateMetrics:
     words_per_minute: List[float] = []
     video_ids: set[str] = set()
     conv_count = 0
+    response_pairs: List[Tuple[float, float]] = []
 
     for video_uid, conversations in data.items():
         video_ids.add(video_uid)
@@ -106,13 +115,18 @@ def load_narration() -> AggregateMetrics:
             responses_per_conv.append(len(entries))
             times = []
             conv_word_total = 0.0
-            for entry in entries:
-                text = entry.get("text") or ""
-                words = len(text.split())
-                conv_word_total += words
-                response_lengths.append(words)
-                if isinstance(entry.get("time"), (int, float)):
-                    times.append(float(entry["time"]))
+        prev_lengths: List[float] = []
+        for entry in entries:
+            text = entry.get("text") or ""
+            words = len(text.split())
+            conv_word_total += words
+            response_lengths.append(words)
+            if words > 0:
+                for prev in prev_lengths:
+                    response_pairs.append((prev, words))
+                prev_lengths.append(words)
+            if isinstance(entry.get("time"), (int, float)):
+                times.append(float(entry["time"]))
 
             if times:
                 times = sorted(times)
@@ -132,6 +146,7 @@ def load_narration() -> AggregateMetrics:
         responses_per_minute,
         response_gaps,
         words_per_minute,
+        response_pairs,
         total_videos=len(video_ids),
         total_conversations=conv_count,
         total_responses=len(response_lengths),
@@ -265,6 +280,49 @@ def render_combined_comparison(goal: AggregateMetrics, narration: AggregateMetri
     print(f"📊 Saved combined comparison figure to {output_path}")
 
 
+def plot_response_length_correlation(
+    goal: AggregateMetrics,
+    output_path: Path,
+) -> None:
+    pairs = goal.response_length_pairs
+    plt.style.use("seaborn-v0_8-whitegrid")
+    fig, ax = plt.subplots(figsize=(5.5, 4.5))
+    if not pairs:
+        ax.text(0.5, 0.5, "No response data", ha="center", va="center")
+    else:
+        arr = np.asarray(pairs, dtype=float)
+        mask = np.isfinite(arr).all(axis=1)
+        arr = arr[mask]
+        prev = arr[:, 0]
+        curr = arr[:, 1]
+        sample_size = min(prev.size, 8000)
+        if prev.size > sample_size:
+            idx = np.random.default_rng(0).choice(prev.size, sample_size, replace=False)
+            prev_plot = prev[idx]
+            curr_plot = curr[idx]
+        else:
+            prev_plot = prev
+            curr_plot = curr
+        ax.scatter(prev_plot, curr_plot, alpha=0.2, s=12, color="#4E79A7")
+        corr = float("nan")
+        if prev.size >= 2:
+            coeffs = np.polyfit(prev, curr, deg=1)
+            x_line = np.linspace(prev.min(), prev.max(), 200)
+            y_line = coeffs[0] * x_line + coeffs[1]
+            ax.plot(x_line, y_line, color="#E15759", linewidth=2)
+            corr = np.corrcoef(prev, curr)[0, 1]
+        ax.set_title(f"Goalstep (r={corr:.2f} / n={prev.size:,})")
+        ax.set_xlabel("Previous response length (# words)")
+        ax.set_ylabel("Current response length (# words)")
+        ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"📊 Saved response length correlation figure to {output_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Annotation overview for Goalstep/Narration datasets.")
     parser.add_argument(
@@ -300,6 +358,9 @@ def main() -> None:
         render_combined_comparison(metrics_map["goalstep"], metrics_map["narration"], combined_plot)
     else:
         print("⚠️ Need both goalstep and narration data to render the combined comparison.")
+    if "goalstep" in metrics_map:
+        correlation_plot = args.output_dir / "goalstep_response_length_correlation.pdf"
+        plot_response_length_correlation(metrics_map["goalstep"], correlation_plot)
 
 
 if __name__ == "__main__":

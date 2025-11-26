@@ -9,6 +9,7 @@ import json
 import math
 from collections import defaultdict
 from pathlib import Path
+from token import LBRACE
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import matplotlib.pyplot as plt
@@ -133,7 +134,7 @@ ABLATION_GROUPS = {
             ("comp_ablation2", "Age"),
             ("comp_ablation3", "Thr."),
             ("comp_ablation4", "LBF"),
-            ("comp_ablation5", "Slice"),
+            ("comp_ablation5", "SIM"),
         ],
         "num_videos": [5, 10, 15],
         "slug": "comp_ablation",
@@ -173,35 +174,35 @@ ABLATION_GROUPS = {
         "title": "Consumption Ablation",
         "grouped_configs": [
             ("1", [
-                ("consumption_ablation1_base", "Base"),
+                ("consumption_ablation1_base", "Ours"),
                 ("consumption_ablation1_rr_2", "ER-S"),
                 ("consumption_ablation1_rr_m", "ER-M"),
                 ("consumption_ablation1_rand_2", "RD-S"),
                 ("consumption_ablation1_rand_m", "RD-M"),
             ]),
             ("2", [
-                ("consumption_ablation2_base", "Base"),
+                ("consumption_ablation2_base", "Ours"),
                 ("consumption_ablation2_rr_2", "ER-S"),
                 ("consumption_ablation2_rr_m", "ER-M"),
                 ("consumption_ablation2_rand_2", "RD-S"),
                 ("consumption_ablation2_rand_m", "RD-M"),
             ]),
             ("3*", [
-                ("base", "Base"),
+                ("base", "Ours"),
                 ("round_robin_2", "ER-S"),
                 ("round_robin_m", "ER-M"),
                 ("random_2", "RD-S"),
                 ("random_m", "RD-M"),
             ]),
             ("4", [
-                ("consumption_ablation3_base", "Base"),
+                ("consumption_ablation3_base", "Ours"),
                 ("consumption_ablation3_rr_2", "ER-S"),
                 ("consumption_ablation3_rr_m", "ER-M"),
                 ("consumption_ablation3_rand_2", "RD-S"),
                 ("consumption_ablation3_rand_m", "RD-M"),
             ]),
             ("5", [
-                ("consumption_ablation4_base", "Base"),
+                ("consumption_ablation4_base", "Ours"),
                 ("consumption_ablation4_rr_2", "ER-S"),
                 ("consumption_ablation4_rr_m", "ER-M"),
                 ("consumption_ablation4_rand_2", "RD-S"),
@@ -219,7 +220,7 @@ ABLATION_GROUPS = {
             ("single_comp_ablation2", "Age"),
             ("single_comp_ablation3", "Thr."),
             ("single_comp_ablation4", "LBF"),
-            ("single_comp_ablation5", "Slice"),
+            ("single_comp_ablation5", "SIM"),
         ],
         "num_videos": [5, 10, 15],
         "slug": "single_comp_ablation",
@@ -768,14 +769,14 @@ def plot_grouped_bar(
             linewidth=0.4,
             label=_display_config_name(config_id),
         )
-        for xpos, value, err in zip(positions, means_arr, stds_arr):
-            _annotate_bar(ax, xpos, value, err, fontsize=BAR_LABEL_FONT_SIZE)
+        # for xpos, value, err in zip(positions, means_arr, stds_arr):
+        #     _annotate_bar(ax, xpos, value, err, fontsize=BAR_LABEL_FONT_SIZE)
 
     ax.set_ylabel(y_label, fontsize=LABEL_FONT_SIZE)
     ax.set_xticks(x)
-    ax.set_xticklabels([str(n) for n in num_videos], fontsize=TICK_FONT_SIZE)
+    ax.set_xticklabels([str(n) for n in num_videos], fontsize=LABEL_FONT_SIZE)
     # set y tick fontsize to TICK_FONT_SIZE
-    ax.tick_params(axis='y', labelsize=TICK_FONT_SIZE)
+    ax.tick_params(axis='y', labelsize=LABEL_FONT_SIZE)
     ax.set_xlabel("Number of Users", fontsize=LABEL_FONT_SIZE)
     if has_data:
         legend = ax.legend(
@@ -845,12 +846,12 @@ def plot_overall_bar(
             edgecolor="black",
             linewidth=0.4,
         )
-        _annotate_bar(ax, x[idx], mean, std, fontsize=BAR_LABEL_FONT_SIZE)
-    ax.set_ylabel(y_label, fontsize=LABEL_FONT_SIZE)
+        # _annotate_bar(ax, x[idx], mean, std, fontsize=BAR_LABEL_FONT_SIZE)
+    ax.set_ylabel(y_label, fontsize=LABEL_FONT_SIZE+2)
     ax.set_xticks(x)
-    ax.set_xticklabels(config_labels, fontsize=TICK_FONT_SIZE, rotation=20, ha="right")
+    ax.set_xticklabels(config_labels, fontsize=LABEL_FONT_SIZE, rotation=25, ha="right")
     # set y tick fontsize to TICK_FONT_SIZE
-    ax.tick_params(axis='y', labelsize=TICK_FONT_SIZE)
+    ax.tick_params(axis='y', labelsize=LABEL_FONT_SIZE)
     # ax.set_xlabel("Config ID", fontsize=LABEL_FONT_SIZE)
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -929,17 +930,17 @@ def _plot_overall_perplexity(
             if not math.isfinite(value):
                 bar.set_alpha(0.0)
                 continue
-            _annotate_bar(ax, bar.get_x() + bar.get_width() / 2.0, value, err)
+            # _annotate_bar(ax, bar.get_x() + bar.get_width() / 2.0, value, err)
 
-    ax.set_ylabel(y_label, fontsize=LABEL_FONT_SIZE)
+    ax.set_ylabel(y_label, fontsize=LABEL_FONT_SIZE+2)
     ax.set_xticks(x)
-    ax.set_xticklabels(config_labels, fontsize=TICK_FONT_SIZE, rotation=20, ha="right")
-    ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE)
+    ax.set_xticklabels(config_labels, fontsize=LABEL_FONT_SIZE, rotation=20, ha="right")
+    ax.tick_params(axis="y", labelsize=LABEL_FONT_SIZE)
     # add box to legend with white background
     legend = ax.legend(
         frameon=True,
         facecolor="white",
-        fontsize=LEGEND_FONT_SIZE,
+        fontsize=LABEL_FONT_SIZE,
         loc="lower left",
         ncol=1,
     )
@@ -1005,8 +1006,8 @@ def plot_base_delay_trends(
             linewidth=0.4,
             label=title,
         )
-        for xpos, val, err in zip(bars_x, means_arr, stds):
-            _annotate_bar(ax, xpos, val, err)
+        # for xpos, val, err in zip(bars_x, means_arr, stds):
+        #     _annotate_bar(ax, xpos, val, err)
 
     if not has_data:
         plt.close(fig)
@@ -1015,8 +1016,8 @@ def plot_base_delay_trends(
     ax.set_xlabel("Number of Users", fontsize=LABEL_FONT_SIZE)
     ax.set_ylabel("Rebuffering (s)", fontsize=LABEL_FONT_SIZE)
     ax.set_xticks(x)
-    ax.set_xticklabels([str(n) for n in num_videos], fontsize=TICK_FONT_SIZE)
-    ax.tick_params(axis='y', labelsize=TICK_FONT_SIZE)
+    ax.set_xticklabels([str(n) for n in num_videos], fontsize=LABEL_FONT_SIZE)
+    ax.tick_params(axis='y', labelsize=LABEL_FONT_SIZE)
     ax.grid(axis="y", alpha=0.3)
     ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE, loc="best")
 
@@ -1076,8 +1077,8 @@ def plot_delay_comparison_by_config(
             linewidth=0.4,
             label=title,
         )
-        for xpos, value in zip(positions, arr[:, idx]):
-            _annotate_bar(ax, xpos, value, 0.0, fontsize=10)
+        # for xpos, value in zip(positions, arr[:, idx]):
+        #     _annotate_bar(ax, xpos, value, 0.0, fontsize=10)
 
     ax.set_ylabel("Rebuffering (s)", fontsize=16)
     ax.set_xticks(x)
@@ -1091,7 +1092,7 @@ def plot_delay_comparison_by_config(
     # move up the legend
     legend = ax.legend(
             frameon=True,
-            fontsize=10,
+            fontsize=12,
             loc="upper left",
             bbox_to_anchor=(0.02, 1.02),
             ncol=1,
@@ -1115,7 +1116,7 @@ def plot_latency_components_by_config(
     """Compare latency components averaged across all videos for each config."""
     configure_plot_style()
     component_defs = [entry for entry in LATENCY_COMPONENTS if entry[1] != "Total"]
-    component_keys = [key for key, _, _ in component_defs]
+    component_keys = [f"{key}_per_frame" for key, _, _ in component_defs]
     component_labels = [label for _, label, _ in component_defs]
 
     stacked_data: List[List[float]] = []
@@ -1142,6 +1143,8 @@ def plot_latency_components_by_config(
 
     data = np.asarray(stacked_data, dtype=float)
     data[~np.isfinite(data)] = 0.0
+    # convert to ms
+    data *= 1000
 
     y = np.arange(len(valid_labels))
     colors = _scientific_colors()
@@ -1168,27 +1171,27 @@ def plot_latency_components_by_config(
         )
         left += segment
 
-    totals = left
-    for ypos, total in zip(y, totals):
-        padding = max(total * 0.02, 0.05)
-        ax.text(
-            total + padding,
-            ypos,
-            f"{total:.2f}",
-            ha="left",
-            va="center",
-            fontsize=BAR_LABEL_FONT_SIZE,
-        )
+    # totals = left
+    # for ypos, total in zip(y, totals):
+    #     padding = max(total * 0.02, 0.05)
+    #     ax.text(
+    #         total + padding,
+    #         ypos,
+    #         f"{total:.2f}",
+    #         ha="left",
+    #         va="center",
+    #         fontsize=BAR_LABEL_FONT_SIZE,
+    #     )
 
-    ax.set_xlabel("Latency (s)", fontsize=LABEL_FONT_SIZE)
+    ax.set_xlabel("Latency (ms)", fontsize=LABEL_FONT_SIZE+2)
     ax.set_yticks(y)
     ax.set_yticklabels(valid_labels)
-    ax.tick_params(axis="x", labelsize=TICK_FONT_SIZE+2)
-    ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE+2)
+    ax.tick_params(axis="x", labelsize=LABEL_FONT_SIZE)
+    ax.tick_params(axis="y", labelsize=LABEL_FONT_SIZE)
     ax.grid(axis="x", alpha=0.3)
     legend = ax.legend(
         frameon=False,
-        fontsize=LEGEND_FONT_SIZE,
+        fontsize=LEGEND_FONT_SIZE+2,
         ncol=3,
         loc="lower center",
         bbox_to_anchor=(0.5, 0.95),
@@ -1267,8 +1270,8 @@ def plot_scheduling_components_by_config(
             linewidth=0.4,
             label=label,
         )
-        for xpos, value, err in zip(positions, means_arr, stds_arr):
-            _annotate_bar(ax, xpos, value, err)
+        # for xpos, value, err in zip(positions, means_arr, stds_arr):
+        #     _annotate_bar(ax, xpos, value, err)
 
     ax.set_ylabel("Scheduling Score", fontsize=16)
     ax.set_xticks(x)
@@ -1348,8 +1351,8 @@ def plot_scheduling_components_base_vs_videos(
             linewidth=0.4,
             label=f"N={n}",
         )
-        for xpos, value, err in zip(positions, means_arr, stds):
-            _annotate_bar(ax, xpos, value, err)
+        # for xpos, value, err in zip(positions, means_arr, stds):
+        #     _annotate_bar(ax, xpos, value, err)
 
     if not has_data:
         plt.close(fig)
@@ -1506,8 +1509,8 @@ def plot_memory_breakdown_multi_videos(
             linewidth=0.4,
             label=f"N={num}",
         )
-        for xpos, value, err in zip(positions, means_arr, stds_arr):
-            _annotate_bar(ax, xpos, value, err)
+        # for xpos, value, err in zip(positions, means_arr, stds_arr):
+        #     _annotate_bar(ax, xpos, value, err)
 
     ax.set_ylabel("Memory (MB)", fontsize=LABEL_FONT_SIZE)
     ax.set_xticks(x)
@@ -1522,7 +1525,7 @@ def plot_memory_breakdown_multi_videos(
         max_pos = max(positive_values)
         ax.set_yscale("log")
         ax.set_ylim(min_pos / 1.8, max_pos * 1.6)
-    ax.legend(frameon=False, ncol=1, fontsize=LEGEND_FONT_SIZE, loc="best")
+    ax.legend(frameon=False, ncol=1, fontsize=LEGEND_FONT_SIZE+2, loc="best")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -1598,7 +1601,7 @@ def plot_memory_speed_ratios(
     ):
         return False
 
-    categories = ["CPU", "GPU", "Throughput"]
+    categories = ["CPU", "GPU", "Trpt"]
     ratio_matrix = [cpu_ratios, kv_ratios, consumption_ratios]
     # convert to percentages
     ratio_matrix = [[val * 100 for val in row] for row in ratio_matrix]
@@ -1630,25 +1633,26 @@ def plot_memory_speed_ratios(
             linewidth=0.4,
             label=f"N={num}",
         )
-        for xpos, value in zip(positions, values_arr):
-            _annotate_bar(ax, xpos, value, 0.0)
+        # for xpos, value in zip(positions, values_arr):
+        #     _annotate_bar(ax, xpos, value, 0.0)
 
     if not plotted:
         plt.close(fig)
         return False
         
-    ax.set_ylabel("Ratio (%)", fontsize=10)
+    ax.set_ylabel("Utilization (%)", fontsize=LABEL_FONT_SIZE)
     ax.set_xticks(x)
-    ax.set_xticklabels(categories, fontsize=10)
+    ax.set_xticklabels(categories, fontsize=LABEL_FONT_SIZE)
+    ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE+2)
     ax.grid(axis="y", alpha=0.3)
     ylim_upper = max(
         [value for row in ratio_matrix for value in row if math.isfinite(value)]
         + [1.0]
     )
     ax.set_ylim(0, ylim_upper * 1.2)
-    ax.legend(frameon=False, ncol=1, fontsize=LEGEND_FONT_SIZE)
+    ax.legend(frameon=False, ncol=1, fontsize=LEGEND_FONT_SIZE+2)
 
-    fig.tight_layout(pad=0.6)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -1732,10 +1736,10 @@ def plot_rebuffer_baseline_comparison_across_bases(
             hatch=hatch,
             edgecolor="black",
             linewidth=0.4,
-            label=label,
+            label=f'RTX {label}',
         )
-        for xpos, value, err in zip(positions, dataset_means, dataset_stds):
-            _annotate_bar(ax, xpos, value, err, fontsize=TICK_FONT_SIZE)
+        # for xpos, value, err in zip(positions, dataset_means, dataset_stds):
+        #     _annotate_bar(ax, xpos, value, err, fontsize=TICK_FONT_SIZE)
 
     if not plotted:
         plt.close(fig)
@@ -1744,10 +1748,10 @@ def plot_rebuffer_baseline_comparison_across_bases(
     cfg_labels = [_display_config_name(config_ids[i]) for i in valid_indices]
     nums_str = ", ".join(str(n) for n in target_nums)
     ax.set_ylabel("Rebuffering (s)", fontsize=LABEL_FONT_SIZE)
-    ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE)
+    ax.tick_params(axis="y", labelsize=LABEL_FONT_SIZE)
     ax.set_xticks(x)
-    ax.set_xticklabels(cfg_labels, fontsize=TICK_FONT_SIZE)
-    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
+    ax.set_xticklabels(cfg_labels, fontsize=LABEL_FONT_SIZE, rotation=20, ha="right")
+    ax.legend(frameon=False, fontsize=LABEL_FONT_SIZE-2, loc="upper left")
     ax.grid(axis="y", alpha=0.3)
 
     fig.tight_layout()
@@ -1771,10 +1775,10 @@ def plot_roundrobin_comparison(
 
     target_numbers = list(range(1, 11))
     series_def = [
-        ("rebuffer_time", "Total"),
-        ("processing_delay", "Processing"),
-        ("queuing_delay", "Queuing"),
-        ("network_delay", "Networking"),
+        ("rebuffer_time", "All"),
+        ("processing_delay", "Proc."),
+        ("queuing_delay", "Queue"),
+        ("network_delay", "Net"),
     ]
 
     data_series: List[Tuple[str, List[int], List[float], List[float]]] = []
@@ -1818,18 +1822,18 @@ def plot_roundrobin_comparison(
             label=label,
         )
 
-    ax.set_xlabel("Number of Videos", fontsize=10)
-    ax.set_ylabel("RebufferingTime (s)", fontsize=10)
+    ax.set_xlabel("Number of Users", fontsize=16)
+    ax.set_ylabel("Rebuffering (s)", fontsize=16)
     ax.set_xticks(target_numbers)
     # set xtick fontsize to 10
-    ax.tick_params(axis='x', labelsize=10)
+    ax.tick_params(axis='x', labelsize=16)
     # set ytick fontsize to 10
-    ax.tick_params(axis='y', labelsize=10)
+    ax.tick_params(axis='y', labelsize=16)
     ax.grid(alpha=0.3)
     # set legend fontsize to 10
     ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
 
-    fig.tight_layout(pad=0.6)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -1916,7 +1920,7 @@ def plot_roundrobin_ratio(
         color="red",
     )
 
-    ax.set_xlabel("Number of Videos", fontsize=10)
+    ax.set_xlabel("Number of Users", fontsize=10)
     ax.set_ylabel("Rebuffering Ratio", fontsize=10)
     # set x tick fontsize to 10
     ax.tick_params(axis='x', labelsize=10)
@@ -1952,43 +1956,53 @@ def plot_generation_speed_vs_listening(
     base_mean = float(np.mean(speeds))
     base_std = float(np.std(speeds))
 
+    # studies = [
+    #     ("Kuperman et al. 2021", 270 / 60.0),
+    #     ("Sommers et al. 2009", 240 / 60.0),
+    #     ("OAText 2017", 124 / 60.0),
+    #     ("Adams & Weber 2006", ((160 + 207) / 2) / 60.0),
+    # ]
+
     studies = [
-        ("Kuperman et al. 2021", 270 / 60.0),
-        ("Sommers et al. 2009", 240 / 60.0),
-        ("OAText 2017", 124 / 60.0),
-        ("Adams & Weber 2006", ((160 + 207) / 2) / 60.0),
+        ("Efficient", 270 / 60.0),
+        ("Avg.", 240 / 60.0),
+        ("Young", ((160 + 207) / 2) / 60.0),
+        ("Impaired", 124 / 60.0),
     ]
 
-    labels = [s[0] for s in studies] + ["VLM Generation"]
-    values = [s[1] for s in studies] + [base_mean]
-    colors = ["#4C72B0", "#55A868", "#C44E52", "#8172B3", "#F28E2B"]
+    labels = ["VLM"] + [s[0] for s in studies]
+    values = [base_mean] + [s[1] for s in studies]
+    colors = ["#F28E2B", "#4C72B0", "#55A868", "#C44E52", "#8172B3", ]
 
     configure_plot_style()
     fig, ax = plt.subplots(figsize=(6, 4))
     bars = ax.barh(labels, values, color=colors, edgecolor="black", linewidth=0.6)
 
     for bar, value, label in zip(bars, values, labels):
-        if label == "VLM Generation":
+        if label == "VLM":
             text = f"{value:.2f}±{base_std:.2f}"
+            # put text at the center of the bar horizontally
+            ax.text(12.5 + 0.05, bar.get_y() + bar.get_height() / 2, text, ha="center", va="center", 
+            fontsize=BAR_LABEL_FONT_SIZE+10)
         else:
             text = f"{value:.2f}"
-        ax.text(
-            value + 0.05,
-            bar.get_y() + bar.get_height() / 2,
-            text,
-            va="center",
-            fontsize=BAR_LABEL_FONT_SIZE,
-        )
+            ax.text(
+                value + 0.05,
+                bar.get_y() + bar.get_height() / 2,
+                text,
+                va="center",
+                fontsize=BAR_LABEL_FONT_SIZE+10,
+            )
 
-    ax.set_xlabel("Words Per Second", fontsize=10)
-    ax.set_ylabel("Listening Speed Study", fontsize=10)
+    ax.set_xlabel("Words Per Second", fontsize=24)
+    # ax.set_ylabel("Listening Speed Study", fontsize=10)
     max_val = max(values)
     ax.set_xlim(0, max(max_val + 0.8, 5.5))
     ax.grid(axis="x", linestyle="--", alpha=0.4)
     # set ytick size to 10
-    ax.tick_params(axis='y', labelsize=10)
-    ax.tick_params(axis='x', labelsize=10)
-    fig.tight_layout(pad=0.6)
+    ax.tick_params(axis='y', labelsize=24)
+    ax.tick_params(axis='x', labelsize=24)
+    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -2301,12 +2315,12 @@ def plot_kv_transfer_scatter(
     fig, ax = plt.subplots(figsize=KV_SLOPE_FIGSIZE)
 
     components = [
-        ("Prefilling", prefilling_ms),
+        ("Pre", prefilling_ms),
         ("EOS", eos_ms),
-        ("Decoding", decoding_ms),
-        ("Network", network_ms),
-        ("Offload", float(np.mean(off_times)) if off_times else 0.0),
-        ("Reload", float(np.mean(reload_times)) if reload_times else 0.0),
+        ("Dec", decoding_ms),
+        # ("Net", network_ms),
+        ("Off", float(np.mean(off_times)) if off_times else 0.0),
+        ("Rel", float(np.mean(reload_times)) if reload_times else 0.0),
     ]
 
     components = [(name, value) for name, value in components if math.isfinite(value) and value > 0]
@@ -2334,13 +2348,15 @@ def plot_kv_transfer_scatter(
             f"{value:.2f}",
             ha="center",
             va="bottom",
-            fontsize=10,
+            fontsize=14,
         )
 
-    ax.set_ylabel("Time (ms)", fontsize=10)
-    ax.tick_params(axis="y", labelsize=10)
+    # set ylim to 0,60
+    ax.set_ylim(0, 60)
+    ax.set_ylabel("Time (ms)", fontsize=16)
+    ax.tick_params(axis="y", labelsize=16)
     ax.set_xticks(x)
-    ax.set_xticklabels([name for name, _ in components], rotation=20, ha="right", fontsize=10)
+    ax.set_xticklabels([name for name, _ in components], rotation=20, ha="right", fontsize=16)
     ax.grid(axis="y", alpha=0.3)
 
     fig.tight_layout()
@@ -2540,10 +2556,10 @@ def plot_buffering_components_comparison(
     output_path: Path,
 ) -> bool:
     metric_keys = [
-        ("rebuffer_time", "Total"),
-        ("processing_delay", "Processing"),
-        ("queuing_delay", "Queuing"),
-        ("network_delay", "Networking"),
+        ("rebuffer_time", "All"),
+        ("processing_delay", "Proc."),
+        ("queuing_delay", "Queue"),
+        ("network_delay", "Net"),
     ]
 
     config_stats = []
@@ -2590,12 +2606,14 @@ def plot_buffering_components_comparison(
         for xpos, value, err in zip(x + offset, means, stds):
             _annotate_bar(ax, xpos, value, err, fontsize=BAR_LABEL_FONT_SIZE)
 
-    ax.set_ylabel("Rebuffering (s)", fontsize=16)
+    ax.set_ylim(0, 2)
+    ax.set_ylabel("Rebuffering (s)", fontsize=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=12)
-    ax.tick_params(axis='y', labelsize=12)
+    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=14)
+    ax.tick_params(axis='y', labelsize=14)
     ax.grid(axis="y", alpha=0.3)
-    ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE)
+    # move legend slightly to the right and top
+    ax.legend(frameon=False, fontsize=14, loc="upper right", bbox_to_anchor=(1.05, 1.05))
 
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2795,13 +2813,14 @@ def plot_rebuffering_ablation_group(
                 linewidth=0.4,
                 label=baseline_label,
             )
-            for xpos, value, err in zip(positions, means_arr, stds_arr):
-                _annotate_bar(ax, xpos, value, err, fontsize=BAR_LABEL_FONT_SIZE-2)
+            # for xpos, value, err in zip(positions, means_arr, stds_arr):
+            #     _annotate_bar(ax, xpos, value, err, fontsize=BAR_LABEL_FONT_SIZE-2)
 
         ax.set_ylabel("Rebuffering (s)", fontsize=LABEL_FONT_SIZE+2)
         ax.set_xticks(x)
-        ax.set_xticklabels(group_labels, fontsize=TICK_FONT_SIZE+2)
-        ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE+2)
+        ax.set_xticklabels(group_labels, fontsize=LABEL_FONT_SIZE)
+        ax.tick_params(axis="y", labelsize=LABEL_FONT_SIZE)
+        ax.set_xlabel("Consumption Rate (wps)", fontsize=LABEL_FONT_SIZE+2)
         ax.grid(alpha=0.3)
         legend = ax.legend(
             frameon=False,
@@ -2810,9 +2829,6 @@ def plot_rebuffering_ablation_group(
             loc="lower center",
             bbox_to_anchor=(0.5, 0.95),
         )
-        # if legend:
-        #     for text in legend.get_texts():
-        #         text.set_fontsize(max(LEGEND_FONT_SIZE - 2, 6))
         fig.tight_layout()
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, bbox_inches="tight")
@@ -2950,7 +2966,7 @@ def plot_rebuffering_ablation_group(
         ax.grid(alpha=0.3)
         legend = ax.legend(
             frameon=False,
-            fontsize=LEGEND_FONT_SIZE,
+            fontsize=LEGEND_FONT_SIZE+2,
             ncol=3,
             loc="lower center",
             bbox_to_anchor=(0.5, 0.95),
@@ -3003,8 +3019,8 @@ def plot_rebuffering_ablation_group(
             linewidth=0.4,
             label=label,
         )
-        for xpos, value, err in zip(positions, means_arr, stds_arr):
-            _annotate_bar(ax, xpos, value, err)
+        # for xpos, value, err in zip(positions, means_arr, stds_arr):
+        #     _annotate_bar(ax, xpos, value, err)
 
     if not plotted:
         plt.close(fig)
@@ -3012,19 +3028,16 @@ def plot_rebuffering_ablation_group(
 
     ax.set_ylabel("Rebuffering (s)", fontsize=LABEL_FONT_SIZE)
     ax.set_xticks(x_positions)
-    ax.set_xticklabels([str(n) for n in num_videos], fontsize=TICK_FONT_SIZE)
+    ax.set_xticklabels([str(n) for n in num_videos], fontsize=TICK_FONT_SIZE+2)
     ax.set_xlabel("Number of Users", fontsize=LABEL_FONT_SIZE)
-    ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE)
+    ax.tick_params(axis="y", labelsize=TICK_FONT_SIZE+2)
     legend = ax.legend(
         frameon=False,
         fontsize=LEGEND_FONT_SIZE,
         ncol=3,
         loc="lower center",
-        bbox_to_anchor=(0.5, 1.02),
+        bbox_to_anchor=(0.5, .95),
     )
-    if legend:
-        for text in legend.get_texts():
-            text.set_fontsize(max(LEGEND_FONT_SIZE - 2, 6))
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -3502,11 +3515,11 @@ def main() -> None:
         else:
             print("[combined] Skipped response fraction CDF; no valid data.")
 
-    combined_timing_path = combined_dir / "timing_breakdown_round_robin_m_combined.pdf"
-    if plot_timing_breakdown(all_summary_stats, data_sources, combined_timing_path):
-        print(f"[combined] Saved combined timing breakdown to {combined_timing_path}")
-    else:
-        print("[combined] Skipped combined timing breakdown plot; no valid data.")
+    # combined_timing_path = combined_dir / "timing_breakdown_round_robin_m_combined.pdf"
+    # if plot_timing_breakdown(all_summary_stats, data_sources, combined_timing_path):
+    #     print(f"[combined] Saved combined timing breakdown to {combined_timing_path}")
+    # else:
+    #     print("[combined] Skipped combined timing breakdown plot; no valid data.")
 
     # Combined round_robin_m comparison across data sources
     if data_sources:
